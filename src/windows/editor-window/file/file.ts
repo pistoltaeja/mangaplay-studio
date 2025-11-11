@@ -237,7 +237,7 @@ export class SuperscriptFile {
         const zipped = await this.zip.generateAsync({ type: 'uint8array' })
         await fs.outputFile(this.filename, zipped)
       } catch (e) {
-        alert(`Save failed. Please try again.\n\nIf save keeps failing, contact support@superscript.app\n\nError: ${e}`)
+        alert(`Save failed. Please try again.\n\nIf save keeps failing, open a ticket at https://github.com/machindo/superscript/issues\n\nError: ${e}`)
         console.error(e)
       }
 
@@ -254,7 +254,7 @@ export class SuperscriptFile {
         const zipped = await this.zip.generateAsync({ type: 'uint8array' })
         await fs.outputFile(this.backupFilename, zipped)
       } catch (e) {
-        alert(`Save failed. Please try again.\n\nIf save keeps failing, contact support@superscript.app\n\nError: ${e}`)
+        alert(`Save failed. Please try again.\n\nIf save keeps failing, open a ticket at https://github.com/machindo/superscript/issues\n\nError: ${e}`)
         console.error(e)
       }
 

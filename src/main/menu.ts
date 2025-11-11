@@ -331,8 +331,8 @@ function menuTemplate(): MenuItemConstructorOptions[] {
       label: 'Open Guide',
       click: Commands.openTour
     }, {
-      label: 'Report Bugs or Feature Requests',
-      click: Commands.openEmail
+      label: 'Report a Bug or Request a Feature',
+      click: Commands.newIssueInBrowser
     }, {
       type: 'separator'
     }, {

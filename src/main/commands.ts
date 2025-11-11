@@ -226,18 +226,8 @@ export namespace Commands {
     shell.openExternal('https://www.superscript.app')
   }
 
-  export function openEmail() {
-    const logDirPath = app.getPath('logs')
-    const logPath = path.join(logDirPath, 'log.log')
-    const log = fs.pathExistsSync(logPath) ? fs.readFileSync(logPath, 'utf8').replace('\n', '%0A') : ''
-    shell.openExternal(`mailto:support@superscript.app?subject=Superscript bug or feature&body=%0A
-%0A
-** Including the following data will allow us to help you quicker. **%0A
-App version: ${app.getVersion()}%0A
-%0A
-** Your error log is copied below. Please include this in bug reports. You may delete it for feature requests. **%0A
-${log}
-`)
+  export function newIssueInBrowser() {
+    shell.openExternal("https://github.com/machindo/superscript/issues");
   }
 
   export async function openTour() {
