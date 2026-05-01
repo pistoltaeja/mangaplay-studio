@@ -4,7 +4,7 @@ import isDev from 'electron-is-dev'
 import console from 'electron-log'
 import { checkForUpdates } from 'main/updater'
 import path from 'path'
-import robot from 'robotjs'
+import robot from '@jitsi/robotjs'
 // @ts-ignore
 import SystemFonts from 'system-font-families'
 

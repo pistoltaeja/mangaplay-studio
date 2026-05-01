@@ -1,3 +1,5 @@
+import path from 'node:path'
+
 export default {
   cache: true,
   files: ['src/**/*.spec.ts'],

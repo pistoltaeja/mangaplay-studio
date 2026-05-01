@@ -1,4 +1,4 @@
-import anyTest, { TestInterface } from 'ava'
+import anyTest, { TestFn } from 'ava'
 import proxyquire from 'proxyquire'
 
 import { EditorPane } from '../editor-pane/editor-pane'
@@ -15,7 +15,7 @@ const { FloatingMenu } = proxyquire<FloatingMenuModule>('./floating-menu', {
   }
 })
 
-const test = anyTest as TestInterface<{ component: OriginalFloatingMenu }>
+const test = anyTest as TestFn<{ component: OriginalFloatingMenu }>
 
 test.beforeEach(t => {
   t.context.component = new FloatingMenu()
