@@ -82,7 +82,7 @@ const commonConfig = {
     'electron-updater': 'require("electron-updater")',
     'fs-extra': 'require("fs-extra")',
     'pdfjs-dist': 'require("pdfjs-dist")',
-    'robotjs': 'require("robotjs")'
+    '@jitsi/robotjs': 'require("@jitsi/robotjs")'
   }
 }
 
