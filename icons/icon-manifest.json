@@ -1,0 +1,5 @@
+{
+    "default": "master-transparent.png",
+    "android_bg": "master-background.png",
+    "android_fg": "master-foreground.png"
+}
