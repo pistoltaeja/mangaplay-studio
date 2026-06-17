@@ -9,7 +9,7 @@ Mangaplay Studio carries that workflow forward, extends the plain-text format in
 
 Where Superscript was a text-only desktop editor, Mangaplay renders pages and panels live beside your script. 
 
-Mangaplay Studio has built in support for Superscript's `.sup` and Fountain's `.fountain` in the `.mangaplay.md` format for a clean interops for screenplays in Final Draft, Fade In or PDFS with no extra work.
+Mangaplay Studio has built in support for Superscript's `.sup` and Fountain's `.fountain` in the `.mangaplay.md` format for a clean interops for screenplays in Final Draft, Fade In or PDF with no extra work.
 
 We are not affiliated with Superscript or its author. The lineage is in the workflow, not the code.
 
