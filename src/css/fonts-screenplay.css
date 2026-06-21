@@ -1,0 +1,52 @@
+/* fonts-screenplay.css — Screenplay-role shard (Courier Prime).
+ *
+ * Mounted as a static <link> from src/index.html (NOT by font-loader.js).
+ * Reason: font-prefs.js applyScreenplayFont() fires at boot before the
+ * loader has mounted any locale shards. If Courier Prime's @font-face isn't
+ * already declared at that moment, the screenplay preview paints in Courier
+ * New fallback for a beat. A static <link> guarantees the face is declared
+ * before any JS runs.
+ *
+ * Used only by --mps-font-screenplay-body (owned by font-prefs.js) —
+ * the screenplay preview pane and the screenplay PDF rendering path.
+ * Not used by the .mangaplay editor body (that's Inter now).
+ *
+ * unicode-range — Latin + Latin Extended + Vietnamese precomposed +
+ * punctuation. Courier Prime ships these in its static TTF.
+ */
+
+@font-face {
+    font-family: "Courier Prime";
+    font-weight: 400;
+    font-style: normal;
+    font-display: block;
+    src: url("../fonts/courier-prime/CourierPrime-Regular.ttf") format("truetype");
+    unicode-range: U+0000-024F, U+1E00-1EFF, U+2000-206F, U+20A0-20CF;
+}
+
+@font-face {
+    font-family: "Courier Prime";
+    font-weight: 400;
+    font-style: italic;
+    font-display: block;
+    src: url("../fonts/courier-prime/CourierPrime-Italic.ttf") format("truetype");
+    unicode-range: U+0000-024F, U+1E00-1EFF, U+2000-206F, U+20A0-20CF;
+}
+
+@font-face {
+    font-family: "Courier Prime";
+    font-weight: 700;
+    font-style: normal;
+    font-display: block;
+    src: url("../fonts/courier-prime/CourierPrime-Bold.ttf") format("truetype");
+    unicode-range: U+0000-024F, U+1E00-1EFF, U+2000-206F, U+20A0-20CF;
+}
+
+@font-face {
+    font-family: "Courier Prime";
+    font-weight: 700;
+    font-style: italic;
+    font-display: block;
+    src: url("../fonts/courier-prime/CourierPrime-BoldItalic.ttf") format("truetype");
+    unicode-range: U+0000-024F, U+1E00-1EFF, U+2000-206F, U+20A0-20CF;
+}

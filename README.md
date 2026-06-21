@@ -13,4 +13,37 @@ Mangaplay Studio has built in support for Superscript's `.sup` and Fountain's `.
 
 We are not affiliated with Superscript or its author. The lineage is in the workflow, not the code.
 
+## User data and portable mode
+
+Mangaplay Studio stores small per-user preferences in `user-settings.json`. By
+default this lives in the OS-correct user-config directory:
+
+| OS      | Default path                                                       |
+|---------|--------------------------------------------------------------------|
+| Windows | `%APPDATA%\com.mangaplay.studio.desktop\user-settings.json`        |
+| macOS   | `~/Library/Application Support/com.mangaplay.studio.desktop/`      |
+| Linux   | `~/.config/com.mangaplay.studio.desktop/user-settings.json`        |
+
+### Portable mode (Windows + Linux)
+
+To carry your settings on a USB stick or run from an extracted archive without
+touching your user profile, create an empty file named `portable` (no extension)
+next to `MangaplayStudio.exe` (or the AppImage on Linux). On the next launch
+the app switches storage to `<exe-folder>/userdata/`, including
+`user-settings.json`.
+
+| Marker present | Folder writable | Effective storage                  |
+|----------------|------------------|------------------------------------|
+| Yes            | Yes              | `<exe-folder>/userdata/`           |
+| Yes            | No               | OS default (silent fallback)       |
+| No             | —                | OS default                         |
+
+### Why macOS ignores the marker
+
+macOS short-circuits the marker. Gatekeeper "App Translocation" launches
+quarantined apps from a randomised read-only path, and a notarised `.app`
+bundle's signature seals every resource — writing inside it invalidates the
+signature and Gatekeeper refuses subsequent launches. Settings always live
+under `~/Library/Application Support` on macOS.
+
 ## More coming soon

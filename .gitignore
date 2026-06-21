@@ -15,6 +15,9 @@ node_modules
 /packed
 /coverage
 
+# Plan orchestrator state
+.plan-state
+
 # Temporary files
 .awcache
 .nyc_output

@@ -1,0 +1,68 @@
+/**
+ * dark-theme.css — sleek dark palette mirroring light-theme.css.
+ *
+ * Mirrors every CSS custom property declared in light-theme.css. Loaded by
+ * swapping the <link id="active-theme"> href in index.html (see theme.js).
+ * Component CSS reads the same var() names so no other file needs changes.
+ */
+
+:root
+{
+    --grey-light: #363636;
+    --grey-dark:  #262626;
+
+    --rule:              #1e1e1e;
+    --rail-width:        40px;
+    --top-bar-height:    40px;
+    --left-pane-width:   240px;
+    --left-pane-min:     200px;
+
+    --panel-bg:          #1e1e1e;
+    --row-highlight:     #2a2a2a;
+
+    --storyboard-width:        520px;
+    --storyboard-min:          200px;
+    --editor-min:              200px;
+
+    --btn-hover-bg:   #2a2a2a;
+    --btn-active-bg:  #1e1e1e;
+    --focus-ring:     #0a84ff;
+
+    /* File explorer row pill */
+    --row-bg:    #2a2a2a;
+    --row-text:  #c8c8c8;
+    --row-badge: #7a7a7a;
+
+    /* Editor tab strip text — light grey in dark mode for legibility
+     * against the #363636 topbar / #1e1e1e active surface. Light theme
+     * falls back to #1a1a1a via the var() default in app.css. */
+    --tab-text: #f6f6f6;
+
+    /* Destructive action text colour (context-menu items, danger buttons) */
+    --danger-fg:       #ff7a7a;
+    --danger-fg-hover: #ff9a9a;
+    --shadow-1:       0 1px 2px rgba(0, 0, 0, 0.40);
+    --shadow-2:       0 2px 4px rgba(0, 0, 0, 0.50);
+    --shadow-3:       0 4px 16px rgba(0, 0, 0, 0.60);
+    --shadow-inset:   inset 0 1px 2px rgba(0, 0, 0, 0.35);
+
+    /* MPS brand primary — slightly brighter than the light variant for
+     * better contrast against dark surfaces. */
+    --mps-primary:       #0a84ff;
+    --mps-primary-hover: #409cff;
+
+    /* --window-controls-inset removed.
+       Consumers now read --tauri-frame-controls-width (auto-injected on :root by
+       tauri-plugin-frame) with a 138px fallback for the pre-injection frame. */
+}
+
+html[data-theme="dark"]
+{
+    color: #e8e8e8;
+}
+
+html[data-theme="dark"] body
+{
+    background: var(--grey-light);
+    color: #e8e8e8;
+}

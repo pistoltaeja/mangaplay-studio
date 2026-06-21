@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en" data-app-state="booting">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mangaplay Studio</title>
+    <!-- Screenplay-role font (Courier Prime). Static <link> so font-prefs.js
+         applyScreenplayFont() finds the @font-face declared at boot, before
+         any JS runs — otherwise the screenplay preview paints Courier New
+         fallback for a beat. -->
+    <link rel="stylesheet" href="./css/fonts-screenplay.css">
+    <!-- Website canvas + paint-widget CSS (mounted via aliasPlugin). Order matters —
+         CSS-var defining files first, layout selectors after. -->
+    <link rel="stylesheet" href="./css/website/fonts-local.css">
+    <link rel="stylesheet" href="./css/website/base.css">
+    <link rel="stylesheet" href="./css/website/theme.css">
+    <link rel="stylesheet" href="./css/website/panel-typography.css">
+    <link rel="stylesheet" href="./css/website/panel.css">
+    <link rel="stylesheet" href="./css/website/canvas.css">
+    <link rel="stylesheet" href="./css/website/screenplay.css">
+    <link rel="stylesheet" href="./css/website/mps-color-wheel.css">
+    <!-- Desktop chrome — overrides where it diverges from website. -->
+    <link id="active-theme" rel="stylesheet" href="./light-theme.css">
+    <link rel="stylesheet" href="./app.css">
+    <!-- Phase-2 spike: visual editor component styles. Safe to load always —
+         all rules are namespaced under `mps-visual-editor`. -->
+    <link rel="stylesheet" href="./css/visual-editor.css">
+    <script type="module" src="./app.js"></script>
+</head>
+<body>
+    <!-- Picker shell — the single dark surface that replaces the old
+         #loading-screen + #start-screen pair. Drives bootstrap / picker /
+         opening phases via its data-phase attribute. The legacy
+         #loading-screen + #start-screen elements stay in the DOM (hidden) so
+         any code path that still references them is a no-op rather than a
+         crash; nothing visible reads from them anymore. -->
+    <mps-picker-shell id="picker-shell" data-phase="bootstrap"></mps-picker-shell>
+
+    <div id="loading-screen" data-state="booting" hidden>
+        <div class="brand">
+            <img src="./img/icon-256.png" alt="" width="96" height="96">
+            <h1>Mangaplay Studio</h1>
+        </div>
+        <p class="status-line" data-state-message>Starting up…</p>
+        <div class="spinner" aria-hidden="true"></div>
+    </div>
+
+    <div id="start-screen" hidden>
+        <div class="start-drag-strip" data-tauri-drag-region></div>
+        <button id="btn-start-close" class="start-close" aria-label="Close" data-tooltip="Close" data-i18n-tooltip="mangaplay-studio.chrome.tooltip.closeButton" data-tooltip-side="left" type="button">
+            <span data-icon="x"></span>
+        </button>
+        <div class="start-fixed">
+            <div class="brand">
+                <img src="./img/icon-256.png" alt="" width="64" height="64">
+                <h1>Mangaplay Studio</h1>
+            </div>
+            <div class="start-actions">
+                <button id="btn-new-project" class="primary">New Project</button>
+                <button id="btn-open-folder" class="secondary">Open Folder…</button>
+            </div>
+        </div>
+        <div id="recent-list" class="recent-list" aria-label="Recent projects"></div>
+    </div>
+
+    <div id="app-chrome" hidden>
+        <div id="top-bar">
+            <div class="top-bar-left">
+                <button id="btn-left-pane-toggle"
+                        class="top-bar-icon top-bar-toggle"
+                        aria-label="Collapse left pane"
+                        aria-pressed="false"
+                        data-tooltip="Collapse"
+                        data-i18n-tooltip="mangaplay-studio.chrome.tooltip.sidebarCollapse"
+                        data-tooltip-side="right"
+                        type="button">
+                    <span data-icon="panel-left-close"></span>
+                </button>
+
+                <div id="left-subview-group" class="top-bar-subview-group">
+                    <button id="btn-subview-folder"
+                            class="top-bar-icon top-bar-subview"
+                            aria-label="Folder Explorer"
+                            aria-pressed="true"
+                            data-subview="folder"
+                            data-tooltip="File Explorer"
+                            data-i18n-tooltip="mangaplay-studio.chrome.tooltip.tabFileExplorer"
+                            data-tooltip-side="bottom"
+                            type="button">
+                        <span data-icon="folder"></span>
+                    </button>
+                    <button id="btn-subview-bookmarks"
+                            class="top-bar-icon top-bar-subview"
+                            aria-label="Bookmarks"
+                            aria-pressed="false"
+                            data-subview="bookmarks"
+                            data-tooltip="Bookmarks"
+                            data-i18n-tooltip="mangaplay-studio.chrome.tooltip.tabBookmarks"
+                            data-tooltip-side="bottom"
+                            type="button">
+                        <span data-icon="bookmark"></span>
+                    </button>
+                </div>
+            </div>
+
+            <div class="top-bar-tabs"></div>
+
+            <div id="topbar-pagination" class="topbar-pagination" hidden>
+                <button id="btn-page-prev" class="top-bar-icon topbar-page-btn" type="button" aria-label="Previous page" data-tooltip="Previous page" data-tooltip-side="bottom">
+                    <span data-icon="chevron-left"></span>
+                </button>
+                <span id="topbar-page-label" class="topbar-page-label" aria-live="polite">Page 1</span>
+                <button id="btn-page-next" class="top-bar-icon topbar-page-btn" type="button" aria-label="Next page" data-tooltip="Next page" data-tooltip-side="bottom">
+                    <span data-icon="chevron-right"></span>
+                </button>
+            </div>
+            <div class="topbar-divider" aria-hidden="true"></div>
+
+            <button id="btn-storyboard-collapse"
+                    class="top-bar-action top-bar-action-anchored top-bar-action-c"
+                    type="button"
+                    data-state="expanded"
+                    aria-label="Collapse Storyboard/Screenplay"
+                    aria-pressed="false"
+                    data-tooltip="Collapse"
+                    data-i18n-tooltip="mangaplay-studio.chrome.tooltip.storyboardCollapse"
+                    data-tooltip-side="left">
+                <span data-icon="columns-2"></span>
+            </button>
+
+            <button id="btn-storyboard-action"
+                    class="top-bar-action top-bar-action-anchored"
+                    type="button"
+                    aria-label="Switch to Screenplay"
+                    data-tooltip="Show Screenplay"
+                    data-i18n-tooltip="mangaplay-studio.chrome.tooltip.showScreenplay"
+                    data-tooltip-side="bottom">
+                <span data-icon="arrow-left-right"></span>
+            </button>
+        </div>
+
+        <div class="app-body">
+            <aside id="left-sidebar">
+                <button class="rail-icon" aria-label="Files" data-tooltip="Files" data-i18n-tooltip="mangaplay-studio.chrome.tooltip.railFiles" data-tooltip-side="right" type="button">
+                    <span data-icon="files"></span>
+                </button>
+            </aside>
+
+            <aside id="left-pane" data-subview="folder">
+                <div class="left-pane-content">
+                    <div id="subview-folder" class="subview">
+                        <div class="folder-list" aria-label="Files"></div>
+                    </div>
+                    <div id="subview-bookmarks" class="subview">
+                        <p class="subview-empty">No bookmarks found</p>
+                    </div>
+                </div>
+                <div class="left-pane-footer">
+                    <button id="project-switcher-btn" type="button" class="project-switcher-btn" aria-haspopup="menu" aria-expanded="false">
+                        <span class="project-switcher-chevron" data-icon="chevrons-down-up"></span>
+                        <span class="project-switcher-label">(project)</span>
+                    </button>
+                    <button id="btn-app-settings"
+                            class="footer-icon"
+                            type="button"
+                            aria-label="Settings"
+                            data-tooltip="App Settings"
+                            data-i18n-tooltip="mangaplay-studio.chrome.tooltip.appSettings"
+                            data-tooltip-side="top">
+                        <span data-icon="settings"></span>
+                    </button>
+                </div>
+                <div class="left-pane-resize-handle"
+                     role="separator" aria-orientation="vertical"
+                     aria-label="Resize left pane"></div>
+            </aside>
+
+            <main class="workspace view-managed" data-view-mode="dual">
+                <div id="empty-state" hidden>
+                    <div class="empty-state-content">
+                        <p class="empty-state-title">Create a new mangaplay</p>
+                        <p class="empty-state-hint">Press Enter or click here to create Untitled.mangaplay.md</p>
+                    </div>
+                </div>
+                <mps-editor-host></mps-editor-host>
+                <div class="workspace-seam"
+                     role="separator" aria-orientation="vertical"
+                     aria-label="Resize Editor / Storyboard"></div>
+                <div class="right-pane-stack">
+                    <div id="quick-toggle-strip" class="quick-toggle-strip"></div>
+                    <div class="right-pane-slider" data-active="storyboard">
+                        <mps-canvas></mps-canvas>
+                        <mps-screenplay></mps-screenplay>
+                    </div>
+                </div>
+                <div class="widget-clip">
+                    <mps-paint-widget></mps-paint-widget>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <div id="error-overlay" hidden>
+        <div class="error-card">
+            <p class="error-title">Something went wrong</p>
+            <p class="error-body"></p>
+            <button class="error-retry">Retry</button>
+        </div>
+    </div>
+</body>
+</html>

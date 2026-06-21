@@ -1,0 +1,24 @@
+/* fonts-jp.css — Noto Sans JP shard for ja locale.
+ *
+ * Used for BOTH app and editor (see Section 0 of the plan — no separate
+ * mono CJK face). unicode-range covers Hiragana, Katakana, CJK Unified
+ * Ideographs and Halfwidth/Fullwidth forms.
+ */
+
+@font-face {
+    font-family: "Noto Sans JP";
+    font-weight: 400;
+    font-style: normal;
+    font-display: block;
+    src: url("../fonts/noto-sans-jp/NotoSansJP-Regular.ttf") format("truetype");
+    unicode-range: U+3000-30FF, U+4E00-9FFF, U+FF00-FFEF;
+}
+
+@font-face {
+    font-family: "Noto Sans JP";
+    font-weight: 700;
+    font-style: normal;
+    font-display: block;
+    src: url("../fonts/noto-sans-jp/NotoSansJP-Bold.ttf") format("truetype");
+    unicode-range: U+3000-30FF, U+4E00-9FFF, U+FF00-FFEF;
+}

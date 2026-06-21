@@ -1,0 +1,25 @@
+/* fonts-mono.css — Noto Sans Mono shard.
+ *
+ * Loaded only for locales whose --mps-font-mono needs Cyrillic mono
+ * coverage that Courier Prime can't provide (ru). Noto Sans Mono ships
+ * Latin + Cyrillic in a single static .ttf. No italic shipped for the
+ * Mono family — editor only uses Regular + Bold.
+ */
+
+@font-face {
+    font-family: "Noto Sans Mono";
+    font-weight: 400;
+    font-style: normal;
+    font-display: block;
+    src: url("../fonts/noto-sans-mono/NotoSansMono-Regular.ttf") format("truetype");
+    unicode-range: U+0000-024F, U+0400-04FF, U+0500-052F, U+1E00-1EFF, U+2000-206F;
+}
+
+@font-face {
+    font-family: "Noto Sans Mono";
+    font-weight: 700;
+    font-style: normal;
+    font-display: block;
+    src: url("../fonts/noto-sans-mono/NotoSansMono-Bold.ttf") format("truetype");
+    unicode-range: U+0000-024F, U+0400-04FF, U+0500-052F, U+1E00-1EFF, U+2000-206F;
+}

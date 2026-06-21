@@ -1,0 +1,95 @@
+/* fonts-base.css — Latin baseline shard.
+ *
+ * Loaded for every locale by font-loader.js. Carries Inter (R/I/B/BI) for the
+ * UI + .mangaplay editor body, and Source Code Pro (R/I/B/BI) for code blocks,
+ * inline code, the console, file paths and hex dumps.
+ *
+ * Inter static .ttf covers Latin, Latin Extended, Cyrillic, Greek and
+ * Vietnamese in a single file, so locales like ru / de / vi need no
+ * additional shard for their app font. Source Code Pro's unicode-range is
+ * narrower (Latin + Latin Extended only) — ru pulls in fonts-mono.css for
+ * Cyrillic mono coverage.
+ *
+ * font-display: block — prevents FOUT flashes that would otherwise break
+ * the editor's measure-text layout loop.
+ *
+ * Courier Prime (screenplay role) is declared in fonts-screenplay.css and
+ * mounted as a static <link> from index.html so applyScreenplayFont() at
+ * boot finds the face declared before any JS runs.
+ */
+
+/* ── Inter (UI + .mangaplay editor body — Latin / Latin Ext / Cyrillic / Greek / Vietnamese) ── */
+
+@font-face {
+    font-family: "Inter";
+    font-weight: 400;
+    font-style: normal;
+    font-display: block;
+    src: url("../fonts/inter/Inter-Regular.ttf") format("truetype");
+    unicode-range: U+0000-024F, U+0370-03FF, U+0400-04FF, U+0500-052F, U+1E00-1EFF, U+2000-206F, U+20A0-20CF;
+}
+
+@font-face {
+    font-family: "Inter";
+    font-weight: 400;
+    font-style: italic;
+    font-display: block;
+    src: url("../fonts/inter/Inter-Italic.ttf") format("truetype");
+    unicode-range: U+0000-024F, U+0370-03FF, U+0400-04FF, U+0500-052F, U+1E00-1EFF, U+2000-206F, U+20A0-20CF;
+}
+
+@font-face {
+    font-family: "Inter";
+    font-weight: 700;
+    font-style: normal;
+    font-display: block;
+    src: url("../fonts/inter/Inter-Bold.ttf") format("truetype");
+    unicode-range: U+0000-024F, U+0370-03FF, U+0400-04FF, U+0500-052F, U+1E00-1EFF, U+2000-206F, U+20A0-20CF;
+}
+
+@font-face {
+    font-family: "Inter";
+    font-weight: 700;
+    font-style: italic;
+    font-display: block;
+    src: url("../fonts/inter/Inter-BoldItalic.ttf") format("truetype");
+    unicode-range: U+0000-024F, U+0370-03FF, U+0400-04FF, U+0500-052F, U+1E00-1EFF, U+2000-206F, U+20A0-20CF;
+}
+
+/* ── Source Code Pro (code role — inline code, code blocks, console, paths) ── */
+
+@font-face {
+    font-family: "Source Code Pro";
+    font-weight: 400;
+    font-style: normal;
+    font-display: block;
+    src: url("../fonts/source-code-pro/SourceCodePro-Regular.ttf") format("truetype");
+    unicode-range: U+0000-024F, U+1E00-1EFF, U+2000-206F, U+20A0-20CF;
+}
+
+@font-face {
+    font-family: "Source Code Pro";
+    font-weight: 400;
+    font-style: italic;
+    font-display: block;
+    src: url("../fonts/source-code-pro/SourceCodePro-Italic.ttf") format("truetype");
+    unicode-range: U+0000-024F, U+1E00-1EFF, U+2000-206F, U+20A0-20CF;
+}
+
+@font-face {
+    font-family: "Source Code Pro";
+    font-weight: 700;
+    font-style: normal;
+    font-display: block;
+    src: url("../fonts/source-code-pro/SourceCodePro-Bold.ttf") format("truetype");
+    unicode-range: U+0000-024F, U+1E00-1EFF, U+2000-206F, U+20A0-20CF;
+}
+
+@font-face {
+    font-family: "Source Code Pro";
+    font-weight: 700;
+    font-style: italic;
+    font-display: block;
+    src: url("../fonts/source-code-pro/SourceCodePro-BoldItalic.ttf") format("truetype");
+    unicode-range: U+0000-024F, U+1E00-1EFF, U+2000-206F, U+20A0-20CF;
+}

@@ -1,0 +1,1062 @@
+/* =============================================================================
+   VISUAL EDITOR
+
+   Phase 2a — read-only renderer styles.  Header/footer nav strips, page
+   direction section, panel cards with pill + description + border badges
+   + widget placeholders.  Widget chrome (rails, ghost, drop-zones) and
+   active editing surfaces land in later phases.
+
+   All colours, spacing, borders pull from existing theme tokens — zero
+   new colour literals.  See TODO/mps-visual-panel-editor.md "Colour
+   coding" + "CSS strategy".
+   ============================================================================= */
+
+mps-visual-editor
+{
+    display: block;
+    width: 100%;
+    height: 100%;
+    overflow-y: auto;
+    overflow-x: visible;
+    padding-top: 12px;
+    background: var(--mps-editor-bg);
+    color: var(--mps-text-primary);
+    box-sizing: border-box;
+    scrollbar-width: thin;
+    scrollbar-color: var(--mps-scrollbar-thumb) transparent;
+}
+
+mps-visual-editor::-webkit-scrollbar { width: 8px; }
+mps-visual-editor::-webkit-scrollbar-track { background: transparent; margin: 8px 0; }
+mps-visual-editor::-webkit-scrollbar-thumb { background: var(--mps-scrollbar-thumb); border-radius: 4px; }
+mps-visual-editor::-webkit-scrollbar-thumb:hover { background: var(--mps-scrollbar-thumb-hover); }
+
+/* ---- Body ---- */
+
+.visual-editor-body
+{
+    padding: var(--mps-spacing-md);
+    display: flex;
+    flex-direction: column;
+    gap: var(--mps-spacing-md);
+}
+
+/* ---- Line-range gutter (compact mirror of source view's gutter) ---- */
+
+.panel-line-gutter
+{
+    position: absolute;
+    top: 14px;
+    left: 40px;
+    font-family: var(--mps-font-mono);
+    font-size: 10px;
+    color: var(--mps-editor-line-number);
+    user-select: none;
+    pointer-events: none;
+    white-space: nowrap;
+}
+
+/* ---- Panel drag grip (left edge of each panel card) ---- */
+
+.panel-grip-rail
+{
+    position: absolute;
+    top: calc(-1 * var(--mps-panel-border-width));
+    bottom: calc(-1 * var(--mps-panel-border-width));
+    left: calc(-1 * var(--mps-panel-border-width));
+    width: calc(24px + var(--mps-panel-border-width));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--mps-text-secondary);
+    cursor: grab;
+    border-radius: 8px 0 0 8px;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+    transition: background-color 120ms ease-out, color 120ms ease-out;
+}
+
+.panel-grip-rail::before
+{
+    content: ": :";
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: -1px;
+    transform: rotate(90deg);
+    display: inline-block;
+}
+
+.panel-grip-rail:hover,
+.panel-grip-rail:focus-visible
+{
+    color: var(--mps-text-primary);
+    background: var(--mps-btn-hover-bg);
+    outline: none;
+}
+
+.panel-grip-rail:active
+{
+    cursor: grabbing;
+}
+
+.panel-card.is-active .panel-grip-rail
+{
+    background: var(--mps-accent);
+    color: var(--mps-text-on-accent, #fff);
+}
+
+/* ---- PAGE HEADER CARD ---- */
+
+.page-header-card
+{
+    position: relative;
+    overflow: visible;
+    box-sizing: border-box;
+    background: var(--mps-panel-bg);
+    border: var(--mps-panel-border-width) solid var(--mps-panel-border);
+    border-radius: 8px;
+    padding: var(--mps-spacing-md);
+    padding-top: 36px;
+    padding-left: 36px;
+    display: flex;
+    flex-direction: column;
+}
+
+.page-header-card-badges
+{
+    position: absolute;
+    top: 0;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    display: flex;
+    gap: 10px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 120ms ease-out;
+}
+
+.page-header-card.is-active .page-header-card-badges,
+.page-header-card:focus-within .page-header-card-badges
+{
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.page-header-card-header
+{
+    display: flex;
+    align-items: center;
+    gap: var(--mps-spacing-md);
+}
+
+.page-header-pill
+{
+    background: var(--mps-accent);
+    color: var(--mps-text-on-accent, #fff);
+    padding: 0.25rem 0.75rem;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+mps-visual-editor textarea.page-header-label
+{
+    position: static;
+    top: auto;
+    left: auto;
+    min-height: 0;
+    margin: 0;
+    padding: 4px 6px;
+    width: 100%;
+    box-sizing: border-box;
+    flex: 1 1 auto;
+    align-self: center;
+    resize: none;
+    overflow: hidden;
+    font-family: var(--mps-font-script);
+    font-size: var(--mps-editor-font-size);
+    line-height: var(--mps-editor-line-height-ratio);
+    white-space: pre-wrap;
+    color: var(--mps-panel-content-text);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.page-header-label:hover
+{
+    border-color: var(--mps-border);
+}
+
+.page-header-label:focus
+{
+    outline: none;
+    border-color: var(--mps-accent);
+    background: var(--mps-editor-bg);
+    cursor: text;
+}
+
+/* ---- PANEL CARD ---- */
+
+.panel-card
+{
+    position: relative;
+    overflow: visible;
+    box-sizing: border-box;
+    background: var(--mps-panel-bg);
+    border: var(--mps-panel-border-width) solid var(--mps-panel-border);
+    border-radius: 8px;
+    padding: var(--mps-spacing-md);
+    padding-top: 36px;
+    padding-left: 36px;
+    padding-bottom: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--mps-spacing-sm);
+    transition: border-color 120ms ease-out;
+}
+
+.panel-card.is-active
+{
+    border-color: var(--mps-panel-selected);
+}
+
+
+.panel-card-header
+{
+    display: flex;
+    align-items: flex-start;
+    gap: var(--mps-spacing-md);
+    margin: 0;
+}
+
+.panel-number-pill
+{
+    background: var(--mps-panel-number-bg);
+    color: var(--mps-panel-number-text);
+    padding: 0.25rem 0.75rem;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+mps-visual-editor textarea.panel-description
+{
+    position: static;
+    top: auto;
+    left: auto;
+    min-height: 0;
+    margin: 0;
+    padding: 4px 6px;
+    width: 100%;
+    box-sizing: border-box;
+    flex: 1 1 auto;
+    align-self: center;
+    resize: none;
+    overflow: hidden;
+    font-family: var(--mps-font-script);
+    font-size: var(--mps-editor-font-size);
+    line-height: var(--mps-editor-line-height-ratio);
+    white-space: pre-wrap;
+    /* `.panel-card` keeps a white background in both themes (panel = paper).
+       Use panel-content-text (#333, identical in both themes) so dark
+       theme doesn't render off-white text on a white card. */
+    color: var(--mps-panel-content-text);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.panel-description:hover
+{
+    border-color: var(--mps-border);
+}
+
+.panel-description:focus
+{
+    outline: none;
+    border-color: var(--mps-accent);
+    background: var(--mps-editor-bg);
+    cursor: text;
+}
+
+/* ---- Border badges ---- */
+
+.panel-card-badges
+{
+    position: absolute;
+    top: 0;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    display: flex;
+    gap: 10px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 120ms ease-out;
+}
+
+.panel-card.is-active .panel-card-badges,
+.panel-card:focus-within .panel-card-badges
+{
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.panel-add-badge
+{
+    background: var(--mps-panel-number-bg-solid);
+    color: var(--mps-panel-number-text);
+    border: 1px solid var(--mps-panel-border);
+    border-radius: 999px;
+    padding: 0.25rem 0.75rem;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background-color 120ms, color 120ms;
+}
+
+.panel-add-badge::after
+{
+    content: ' \25BE';
+    font-size: 13px;
+    line-height: 1;
+    vertical-align: middle;
+}
+
+.panel-add-badge:hover,
+.panel-add-badge:focus-visible
+{
+    background: var(--mps-accent);
+    color: var(--mps-text-on-accent, #fff);
+    outline: none;
+}
+
+.panel-delete-badge
+{
+    position: absolute;
+    top: -11px;
+    right: -11px;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: #dc3545;
+    color: #fff;
+    font-size: 16px;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 120ms ease-out, background-color 120ms;
+    z-index: 2;
+}
+
+.panel-card.is-active .panel-delete-badge,
+.panel-card:focus-within .panel-delete-badge
+{
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.panel-delete-badge:hover,
+.panel-delete-badge:focus-visible
+{
+    background: #b02a37;
+    outline: none;
+}
+
+/* ---- Insert Blank Page badge (top of visual editor) ---- */
+
+.visual-editor-insert-page-badge
+{
+    position: absolute;
+    /* Desktop relocates this badge from top-center to top-right so it
+     * sits to the LEFT of the editor-pane mode toggle (which floats at
+     * top: 8px; right: 8px and is 28px wide). Offset chosen so the
+     * badge clears the toggle by 8px. */
+    top: 8px;
+    right: 48px;
+    background: var(--mps-panel-number-bg-solid);
+    color: var(--mps-panel-number-text);
+    border: 1px solid var(--mps-panel-border);
+    border-radius: 999px;
+    padding: 0.25rem 0.75rem;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background-color 120ms, color 120ms;
+    z-index: 100;
+    pointer-events: auto;
+}
+
+.visual-editor-insert-page-badge::after
+{
+    content: ' \25BE';
+    font-size: 13px;
+    line-height: 1;
+    vertical-align: middle;
+}
+
+.visual-editor-insert-page-badge:hover,
+.visual-editor-insert-page-badge:focus-visible
+{
+    background: var(--mps-accent);
+    color: var(--mps-text-on-accent, #fff);
+    outline: none;
+}
+
+/* ---- Widgets ---- */
+
+.widgets-list
+{
+    list-style: none;
+    padding: 0;
+    margin: 0 0 var(--mps-spacing-sm) 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--mps-spacing-sm);
+}
+
+.widgets-list:empty
+{
+    margin-bottom: 0;
+}
+
+.widget
+{
+    display: grid;
+    grid-template-columns: 32px 1fr 32px;
+    align-items: stretch;
+    background: var(--mps-editor-bg);
+    border: 1px solid var(--mps-border);
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.widget:focus-within
+{
+    outline: 1px dashed var(--mps-accent);
+    outline-offset: 2px;
+}
+
+.widget-grip-rail,
+.widget-remove-rail
+{
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--mps-panel-number-bg);
+    color: var(--mps-text-secondary);
+    border: 0;
+    font-size: 16px;
+    line-height: 1;
+    width: 32px;
+    transition: background-color 120ms, color 120ms;
+}
+
+.widget-grip-rail
+{
+    cursor: grab;
+}
+
+.widget-grip-rail:active,
+.widget-grip-rail.dragging
+{
+    cursor: grabbing;
+    background: var(--mps-btn-hover-bg);
+    color: var(--mps-accent);
+}
+
+.widget-grip-rail::before
+{
+    content: ": :";
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: -1px;
+    transform: rotate(90deg);
+    display: inline-block;
+}
+
+.widget-grip-rail:hover,
+.widget-grip-rail:focus-visible
+{
+    color: var(--mps-text-primary);
+    background: var(--mps-btn-hover-bg);
+    outline: none;
+}
+
+.widget-remove-rail
+{
+    cursor: pointer;
+    font-size: 18px;
+    font-weight: 600;
+}
+
+.widget-remove-rail:hover
+{
+    background: var(--mps-status-dirty);
+    color: var(--mps-text-on-accent);
+}
+
+/* ---- Drop zones (active during drag) ---- */
+
+/* Body-level flag set by the DnD engine on pointerdown — all drop zones
+   light up with a neutral dashed border to show they are valid targets
+   in principle. */
+/* Empty matching-type zones used to get `min-height: 32px` during a
+   drag to make them hittable — but that caused every panel to visibly
+   grow when the user grabbed a widget. Hittability is now done in JS:
+   `_onPointerMove` resolves the destination zone via `.panel-card`
+   hover, not via elementFromPoint on the (possibly 0-height) `<ul>`. */
+
+body[data-dragging="true"] .widgets-list[data-drop-zone-type].drop-valid
+{
+    border: 2px dashed var(--mps-status-success);
+    border-radius: 6px;
+    padding: 4px;
+}
+
+body[data-dragging="true"] .widgets-list[data-drop-zone-type].drop-invalid
+{
+    border: 2px dashed var(--mps-status-dirty);
+    border-radius: 6px;
+    padding: 4px;
+}
+
+/* Page-header card lights up as an invalid drop target during a panel drag
+   — the source panel will snap back to its original position on release. */
+body[data-dragging-type="panel"] .page-header-card.drop-invalid
+{
+    border-color: var(--mps-status-dirty);
+}
+
+/* ---- Drag ghost + placeholder ---- */
+
+.widget-drag-ghost
+{
+    position: fixed;
+    top: 0;
+    left: 0;
+    pointer-events: none;
+    z-index: 9999;
+    opacity: 0;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+    transition: opacity 80ms ease-out;
+}
+
+.widget-drag-ghost.visible
+{
+    opacity: 0.65;
+}
+
+.widget.dragging-source
+{
+    opacity: 0.30;
+    pointer-events: none;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+/* During panel drag: highlight the source like the selected state
+   (accent border + filled grip rail) but keep badges hidden. */
+.panel-card.dragging-source
+{
+    border-color: var(--mps-panel-selected);
+    pointer-events: none;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+.panel-card.dragging-source .panel-grip-rail
+{
+    background: var(--mps-accent);
+    color: var(--mps-text-on-accent, #fff);
+    pointer-events: auto;
+}
+
+/* Widget grip stays interactive during drag (pointer capture). */
+.dragging-source .widget-grip-rail
+{
+    pointer-events: auto;
+}
+
+/* Ghost should never intercept input — even though `pointer-events: none`
+   is on .widget-drag-ghost, descendants of the ghost (textareas, buttons)
+   could still receive events on some browsers. `inert` is the safest
+   guarantee. */
+.widget-drag-ghost
+{
+    -webkit-user-select: none;
+    user-select: none;
+}
+.widget-drag-ghost *
+{
+    pointer-events: none !important;
+}
+
+/* Inside the ghost, suppress redundant chrome: the gutter line number
+   and the active-state badges would otherwise render twice (once on
+   the in-flow source, once on the floating ghost) and read as a
+   "doubled" card. */
+.widget-drag-ghost .panel-line-gutter,
+.widget-drag-ghost .panel-card-badges,
+.widget-drag-ghost .page-header-card-badges
+{
+    display: none !important;
+}
+
+/* FLIP transition on neighbours during live reorder. */
+.widget.flip-shift
+{
+    transition: transform 180ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Snap-back / fly-in animations are driven inline (transform +
+   transition) by the DnD engine; this rule defines the curve. */
+.widget-drag-ghost.snapping
+{
+    transition: transform 180ms cubic-bezier(0.4, 0, 0.2, 1),
+                opacity 180ms ease-out;
+}
+
+.widget-drag-ghost.flying-in
+{
+    transition: transform 120ms cubic-bezier(0.4, 0, 0.2, 1),
+                opacity 120ms ease-out;
+}
+
+/* Chip activation crossfade. */
+.parenthetical-chip
+{
+    transition: background-color 120ms, color 120ms, border-color 120ms;
+}
+
+/* Cross-type drag tooltip (transient, anchored near cursor). */
+.widget-drag-tooltip
+{
+    position: fixed;
+    z-index: 10000;
+    pointer-events: none;
+    background: var(--mps-text-primary);
+    color: var(--mps-editor-bg);
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+    max-width: 260px;
+}
+
+.widget-content
+{
+    padding: 4px var(--mps-spacing-sm);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+/* ---- Dialogue widget bits ---- */
+
+/* Override the global `mps-editor textarea { position: absolute }` rule
+   (editor.css) — that selector targets the source textarea but also
+   matches our widget textareas because the visual editor is nested
+   inside mps-editor.  Increased specificity forces static positioning. */
+mps-visual-editor textarea.dialogue-text
+{
+    position: static;
+    top: auto;
+    left: auto;
+    min-height: 0;
+    width: 100%;
+    box-sizing: border-box;
+    resize: none;
+    margin: 0;
+    padding: 4px 6px;
+    font-family: var(--mps-font-script);
+    font-size: var(--mps-editor-font-size);
+    line-height: var(--mps-editor-line-height-ratio);
+    white-space: pre-wrap;
+    color: var(--mps-panel-content-text);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+}
+
+.dialogue-text:hover
+{
+    border-color: var(--mps-border);
+}
+
+.dialogue-text:focus
+{
+    outline: none;
+    border-color: var(--mps-accent);
+    background: var(--mps-editor-bg);
+}
+
+/* ---- SFX widget bits ---- */
+
+.sfx-content
+{
+    flex-direction: row;
+    align-items: center;
+    gap: var(--mps-spacing-md);
+}
+
+.sfx-label
+{
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 11px;
+    color: var(--mps-text-secondary);
+    flex-shrink: 0;
+}
+
+.sfx-text
+{
+    flex: 1;
+    box-sizing: border-box;
+    margin: 0;
+    padding: 4px 6px;
+    font-family: var(--mps-font-script);
+    font-size: var(--mps-editor-font-size);
+    line-height: var(--mps-editor-line-height-ratio);
+    color: var(--mps-panel-content-text);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+}
+
+.sfx-text:hover
+{
+    border-color: var(--mps-border);
+}
+
+.sfx-text:focus
+{
+    outline: none;
+    border-color: var(--mps-accent);
+    background: var(--mps-editor-bg);
+}
+
+/* ---- Character combobox sub-widget ---- */
+
+.character-combobox-input
+{
+    width: 100%;
+    min-width: 60px;
+    box-sizing: border-box;
+    margin: 0;
+    padding: 4px 6px;
+    font-family: var(--mps-font-script);
+    font-size: var(--mps-editor-font-size);
+    line-height: var(--mps-editor-line-height-ratio);
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    font-weight: 600;
+    color: var(--mps-text-primary);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+}
+
+.character-combobox-input:hover
+{
+    border-color: var(--mps-border);
+}
+
+.character-combobox-input:focus
+{
+    outline: none;
+    border-color: var(--mps-accent);
+    background: var(--mps-editor-bg);
+}
+
+/* ---- Parenthetical chips ---- */
+
+.dialogue-chips-row
+{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+}
+
+.parenthetical-chip
+{
+    background: transparent;
+    color: var(--mps-text-secondary);
+    border: 1px solid var(--mps-border);
+    border-radius: 999px;
+    padding: 2px 10px;
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.parenthetical-chip:hover
+{
+    color: var(--mps-text-primary);
+    border-color: var(--mps-accent);
+}
+
+.parenthetical-chip-active
+{
+    background: var(--mps-accent);
+    color: var(--mps-text-on-accent);
+    border-color: var(--mps-accent);
+}
+
+.parenthetical-chip-plus
+{
+    border-style: dashed;
+}
+
+.custom-parenthetical-input-row
+{
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.custom-parenthetical-input
+{
+    flex: 1;
+    font: inherit;
+    font-size: 12px;
+    color: var(--mps-text-primary);
+    background: var(--mps-editor-bg);
+    border: 1px solid var(--mps-accent);
+    border-radius: 4px;
+    padding: 4px 8px;
+}
+
+.custom-parenthetical-input:focus
+{
+    outline: none;
+}
+
+.custom-parenthetical-ok,
+.custom-parenthetical-cancel
+{
+    background: transparent;
+    border: 1px solid var(--mps-border);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font: inherit;
+    cursor: pointer;
+    color: var(--mps-text-secondary);
+}
+
+.custom-parenthetical-ok:hover
+{
+    color: var(--mps-status-success);
+    border-color: var(--mps-status-success);
+}
+
+.custom-parenthetical-cancel:hover
+{
+    color: var(--mps-status-dirty);
+    border-color: var(--mps-status-dirty);
+}
+
+/* ---- Mobile: bottom-sheet combobox + larger rails ---- */
+
+@media (max-width: 767px)
+{
+    .widget
+    {
+        grid-template-columns: 44px 1fr 44px;
+    }
+
+    .widget-grip-rail,
+    .widget-remove-rail
+    {
+        width: 44px;
+    }
+
+    .widget-content
+    {
+        padding: var(--mps-spacing-sm);
+    }
+
+    .panel-card
+    {
+        padding: var(--mps-spacing-sm);
+    }
+
+}
+
+@media (max-width: 479px)
+{
+    .dialogue-chips-row
+    {
+        flex-wrap: wrap;
+    }
+}
+
+/* ---- Phase 2c stubs ---- */
+
+.visual-editor-empty
+{
+    padding: var(--mps-spacing-lg);
+    color: var(--mps-text-secondary);
+    text-align: center;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 12px;
+}
+
+/* ---- Title block (Page 0) ---- */
+
+.title-block-card
+{
+    background: var(--mps-panel-bg);
+    border: var(--mps-panel-border-width) solid var(--mps-panel-border);
+    border-radius: 8px;
+    padding: var(--mps-spacing-md);
+    display: flex;
+    flex-direction: column;
+    gap: var(--mps-spacing-md);
+}
+
+.title-block-header
+{
+    display: flex;
+    align-items: center;
+    gap: var(--mps-spacing-md);
+}
+
+.title-block-pill
+{
+    background: var(--mps-status-warning);
+    color: var(--mps-text-on-accent);
+    padding: 0.25rem 0.75rem;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.title-block-body
+{
+    display: flex;
+    flex-direction: column;
+    gap: var(--mps-spacing-sm);
+}
+
+.title-block-row
+{
+    display: grid;
+    grid-template-columns: 110px 1fr;
+    align-items: center;
+    gap: var(--mps-spacing-md);
+}
+
+.title-block-label
+{
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--mps-panel-description);
+}
+
+.title-block-value
+{
+    width: 100%;
+    box-sizing: border-box;
+    font: inherit;
+    font-size: 14px;
+    color: var(--mps-panel-content-text);
+    background: var(--mps-editor-bg);
+    border: 1px solid var(--mps-border);
+    border-radius: 4px;
+    padding: 6px 8px;
+}
+
+.title-block-value:focus
+{
+    outline: none;
+    border-color: var(--mps-accent);
+}
+
+.title-block-add-row
+{
+    display: grid;
+    grid-template-columns: 110px 1fr;
+    gap: var(--mps-spacing-md);
+    margin-top: var(--mps-spacing-sm);
+}
+
+.title-block-add-row::before
+{
+    content: '';
+}
+
+.title-block-add-select
+{
+    font: inherit;
+    font-size: 12px;
+    color: var(--mps-panel-description);
+    background: var(--mps-editor-bg);
+    border: 1px dashed var(--mps-border);
+    border-radius: 4px;
+    padding: 4px 8px;
+    cursor: pointer;
+}
+
+.title-block-add-select:focus
+{
+    outline: none;
+    border-color: var(--mps-accent);
+    color: var(--mps-panel-content-text);
+}
+
+.title-block-format-toggle
+{
+    width: 100%;
+    box-sizing: border-box;
+    font: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--mps-text-on-accent);
+    background: var(--mps-accent);
+    border: 1px solid var(--mps-accent);
+    border-radius: 4px;
+    padding: 6px 8px;
+    cursor: pointer;
+    text-align: center;
+}
+
+.title-block-format-toggle:hover
+{
+    filter: brightness(1.1);
+}
