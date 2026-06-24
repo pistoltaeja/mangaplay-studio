@@ -86,35 +86,6 @@ export async function openDrawingDB()
     return { _kind: "tauri-drawing-store-stub" };
 }
 
-// ── Safe stubs for less-used exports (the engine may import some of these). ──
-
-export function setDecompressWorker() {}
-export async function deleteDrawingDB() { return true; }
-export function migrateFormat(payload) { return payload; }
-
-export async function savePageMeta(slotId, pageIndex, meta)
-{
-    const b = bridge();
-    if (!b) return { ok: false, error: "bridge-not-ready" };
-    const m = b.getMangaart();
-    if (!m || !Array.isArray(m.pages)) return { ok: false, error: "no-cache" };
-    const entry = m.pages.find(p => p && p.index === pageIndex);
-    if (entry) entry.meta = meta; // tuck meta alongside drawing
-    return { ok: true };
-}
-
-export async function loadPageMeta(slotId, pageIndex)
-{
-    const b = bridge();
-    if (!b) return null;
-    const m = b.getMangaart();
-    if (!m || !Array.isArray(m.pages)) return null;
-    const entry = m.pages.find(p => p && p.index === pageIndex);
-    return entry?.meta || null;
-}
-
-export async function migrateIdbToDocKeys() { return { ok: true, migrated: 0 }; }
-
 export async function deletePageVectors(slotId, pageIndex)
 {
     const b = bridge();
@@ -127,7 +98,3 @@ export async function deletePageVectors(slotId, pageIndex)
 }
 
 export async function deleteSlotVectors() { return true; }
-export async function getTotalStorageUsed() { return 0; }
-export async function savePagePreview() { return { ok: true }; }
-export async function loadPagePreview() { return null; }
-export async function checkStorageQuota() { return { ok: true, usage: 0, quota: Number.MAX_SAFE_INTEGER }; }

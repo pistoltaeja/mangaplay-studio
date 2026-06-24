@@ -387,14 +387,6 @@ function resolveDrawingId()
     return SaveSlotManager.getActiveSlotId();
 }
 
-/** @param {string} content @returns {string|null} */
-function extractTitle(content)
-{
-    if (!content) return null;
-    const match = content.match(/^#\s+(.+)$/m);
-    return match ? match[1].trim() : null;
-}
-
 // ── Tauri FS command wrappers ──────────────────────────────────────────────
 //
 // Thin JS shims over the `app_*` Tauri commands. They dispatch the same way
@@ -491,7 +483,6 @@ export {
     STORAGE_DEFAULTS,
     SaveSlotManager,
     resolveDrawingId,
-    extractTitle,
 };
 
 export default SaveSlotManager;

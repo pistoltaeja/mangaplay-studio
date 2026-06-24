@@ -149,11 +149,6 @@ function detectLanguage()
     return 'en';
 }
 
-function matchBrowserLanguage(tag)
-{
-    return matchSupportedLanguage(tag) || 'en';
-}
-
 function isValidLanguage(code)
 {
     return SUPPORTED_LANGUAGE_CODES.includes(code);
@@ -262,17 +257,6 @@ function initialise()
     }
 }
 
-function initialiseAsync()
-{
-    initialise();
-    return Promise.resolve(currentLang);
-}
-
-function i18nReady()
-{
-    return initialiseAsync();
-}
-
 function format(template, ...args)
 {
     return template.replace(/\{(\d+)\}/g, (m, i) =>
@@ -283,18 +267,13 @@ function format(template, ...args)
 }
 
 export {
-    matchBrowserLanguage,
     detectLanguage,
-    isValidLanguage,
     getLanguage,
     setLanguage,
     getTranslations,
     t,
     format,
-    interpolate,
     subscribe,
     getLanguageConfig,
     initialise,
-    initialiseAsync,
-    i18nReady,
 };

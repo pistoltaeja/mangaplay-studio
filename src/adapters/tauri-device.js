@@ -1,9 +1,9 @@
 /**
  * Desktop device manager stub.
- * Tauri WebView2 is always desktop context.
+ * Tauri WebView2 is always desktop context — `isMobile` is permanently false,
+ * `subscribe()` returns a no-op unsubscribe so website call sites (view-manager,
+ * mps-toolbar, mps-sidebar-nav) keep working without runtime errors.
  */
-
-const MOBILE_BREAKPOINT = 1280;
 
 class DeviceManager
 {
@@ -20,17 +20,15 @@ class DeviceManager
     }
 
     /**
-     * @param {function(boolean): void} callback
+     * @param {function(boolean): void} _callback
      * @returns {function(): void} unsubscribe
      */
-    subscribe(callback)
+    subscribe(_callback)
     {
         return () => {};
     }
-
-    destroy() {}
 }
 
 const deviceManager = new DeviceManager();
 
-export { MOBILE_BREAKPOINT, deviceManager, DeviceManager };
+export { deviceManager };
