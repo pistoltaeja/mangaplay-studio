@@ -20,9 +20,9 @@ default this lives in the OS-correct user-config directory:
 
 | OS      | Default path                                                       |
 |---------|--------------------------------------------------------------------|
-| Windows | `%APPDATA%\com.mangaplay.studio.desktop\user-settings.json`        |
-| macOS   | `~/Library/Application Support/com.mangaplay.studio.desktop/`      |
-| Linux   | `~/.config/com.mangaplay.studio.desktop/user-settings.json`        |
+| Windows | `%APPDATA%\studio.mangaplay.mobile\user-settings.json`             |
+| macOS   | `~/Library/Application Support/studio.mangaplay.mobile/`           |
+| Linux   | `~/.config/studio.mangaplay.mobile/user-settings.json`             |
 
 ### Portable mode (Windows + Linux)
 
