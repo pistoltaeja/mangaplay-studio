@@ -8,12 +8,6 @@
  * Triggers automatically while typing (activateOnTyping: true) so the user can
  * see the suggestion the moment they type `#`. Tab accepts the snippet; Esc /
  * any printable character dismisses (default CM6 autocomplete behaviour).
- *
- * Co-resident with `mangaplayCompletions` from completion-sources.js: CM6's
- * autocompletion config facet only keeps the last-applied `override` array,
- * so this extension bundles BOTH sources (snippet + character/vocab) into a
- * single autocompletion() call. lang-registry no longer registers
- * `mangaplayAutocomplete()` separately — see [lang-registry.js].
  */
 
 import { autocompletion, snippet } from "@codemirror/autocomplete";

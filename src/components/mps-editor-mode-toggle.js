@@ -1,15 +1,21 @@
 // @ts-check
 /**
- * mps-editor-mode-toggle — three-state cycling button for the editor pane.
+ * mps-editor-mode-toggle — cycling button for the editor pane.
  *
- * States cycle: "source" → "text" → "visual" → "source".
+ * Full cycle: "source" → "text" → "visual" → "source".
+ *
+ * The active set of states is restricted by the `allowedModes` property
+ * (defaults to all three). Clicking cycles to the NEXT state that is
+ * present in `allowedModes`. When only one mode is allowed, the button
+ * renders disabled.
+ *
  * Icons (from icons.js registry):
  *   - "source"  → code
  *   - "text"    → book-open
  *   - "visual"  → wand-sparkles
  *
- * Click cycles to the NEXT state and dispatches `mps:mode-change` with
- * `detail = { mode }` (bubbles + composed) so the host can react.
+ * Click dispatches `mps:mode-change` with `detail = { mode }`
+ * (bubbles + composed) so the host can react.
  *
  * The `mode` attribute / property sets the current state. Defaults to "text".
  * Setting the property externally (e.g. after persisting / restoring) keeps
@@ -36,22 +42,37 @@ const TOOLTIP_KEY_FOR_NEXT = {
 
 /** English fallback labels used when a translation isn't available. */
 const FALLBACK_LABEL_FOR_NEXT = {
-    source: "Switch to Source",
-    text:   "Switch to Text",
-    visual: "Switch to Visual"
+    source: "Source Editor",
+    text:   "Text Editor",
+    visual: "Visual Editor"
+};
+
+const FALLBACK_LABEL_FOR_CURRENT = {
+    source: "Source Editor",
+    text:   "Text Editor",
+    visual: "Visual Editor"
 };
 
 /**
+ * Cycle to the next mode that is present in `allowed`. If the current mode
+ * is the only allowed one, returns it unchanged.
  * @param {"source"|"text"|"visual"} mode
+ * @param {Array<"source"|"text"|"visual">} allowed
  * @returns {"source"|"text"|"visual"}
  */
-function nextMode(mode)
+function nextMode(mode, allowed)
 {
-    const i = MODES.indexOf(mode);
-    return MODES[(i + 1) % MODES.length];
+    if (!allowed.length) return mode;
+    const start = MODES.indexOf(mode);
+    for (let step = 1; step <= MODES.length; step++)
+    {
+        const candidate = MODES[(start + step) % MODES.length];
+        if (allowed.includes(candidate)) return candidate;
+    }
+    return mode;
 }
 
-export class MPSEditorModeToggle extends HTMLElement
+class MPSEditorModeToggle extends HTMLElement
 {
     static get observedAttributes()
     {
@@ -63,6 +84,8 @@ export class MPSEditorModeToggle extends HTMLElement
         super();
         /** @type {"source"|"text"|"visual"} */
         this._mode = "text";
+        /** @type {Array<"source"|"text"|"visual">} */
+        this._allowedModes = MODES.slice();
         this._btn = /** @type {HTMLButtonElement|null} */ (null);
         this._onClick = this._onClick.bind(this);
         /** @type {(() => void) | null} */
@@ -137,9 +160,28 @@ export class MPSEditorModeToggle extends HTMLElement
         this._render();
     }
 
+    /** @returns {Array<"source"|"text"|"visual">} */
+    get allowedModes()
+    {
+        return this._allowedModes.slice();
+    }
+
+    /** @param {Array<"source"|"text"|"visual">} list */
+    set allowedModes(list)
+    {
+        const next = Array.isArray(list)
+            ? MODES.filter((m) => list.includes(m))
+            : MODES.slice();
+        // Fall back to the full set if the caller passes an empty list — the
+        // button must always have at least one renderable state.
+        this._allowedModes = next.length ? next : MODES.slice();
+        this._render();
+    }
+
     _onClick()
     {
-        const next = nextMode(this._mode);
+        const next = nextMode(this._mode, this._allowedModes);
+        if (next === this._mode) return;
         this._mode = next;
         this.setAttribute("mode", next);
         this._render();
@@ -158,13 +200,32 @@ export class MPSEditorModeToggle extends HTMLElement
     _render()
     {
         if (!this._btn) return;
-        const next = nextMode(this._mode);
+        const allowed = this._allowedModes;
+        const onlyOne = allowed.length <= 1;
         this._btn.innerHTML = icon(ICON_FOR_MODE[this._mode], { size: 18 });
-        const label = t(TOOLTIP_KEY_FOR_NEXT[next]) || FALLBACK_LABEL_FOR_NEXT[next];
+        let label;
+        if (onlyOne)
+        {
+            label = FALLBACK_LABEL_FOR_CURRENT[this._mode];
+        }
+        else
+        {
+            const next = nextMode(this._mode, allowed);
+            label = t(TOOLTIP_KEY_FOR_NEXT[next]) || FALLBACK_LABEL_FOR_NEXT[next];
+        }
         this._btn.setAttribute("aria-label", label);
         this._btn.setAttribute("data-tooltip", label);
-        this._btn.setAttribute("data-tooltip-side", "bottom");
+        this._btn.setAttribute("data-tooltip-side", "left");
         this._btn.dataset.mode = this._mode;
+        this._btn.disabled = onlyOne;
+        if (onlyOne)
+        {
+            this._btn.setAttribute("aria-disabled", "true");
+        }
+        else
+        {
+            this._btn.removeAttribute("aria-disabled");
+        }
     }
 }
 

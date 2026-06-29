@@ -178,7 +178,11 @@ class MpsLangSelect extends HTMLElement
 
     _select(code)
     {
-        setLanguage(code);   // notifies subscribers + dispatches mps-lang-change
+        // setLanguage is async (loads the locale chunk first). Fire-and-forget
+        // from this sync event handler — subscribers + mps-lang-change fire
+        // once the chunk lands. _close() still runs immediately so the popover
+        // dismisses on click.
+        void setLanguage(code);
         this._close();
     }
 

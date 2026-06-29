@@ -11,7 +11,6 @@
  * tooltip delay overridden to 300ms (CM6 default 600ms is too slow vs VS Code).
  */
 
-import { linter } from "@codemirror/lint";
 import { parseScript } from "../../core/parser/fountain-plus-mangaplay-parser.js";
 import {
     sequentialPages,
@@ -24,15 +23,18 @@ import { t } from "./adapters/tauri-i18n.js";
 /**
  * Map WARN_ / EDITOR_ codes to { severity, markClass, messageKey }.
  *
- * Two visual categories:
+ * Three visual categories:
  *   - red squiggle (`cm-mp-error`): objective errors that break the document
  *   - orange dotted (`cm-mp-style`): case/style nits where the parser still understands
+ *   - green squiggle (`cm-mp-hint`): canonical-form hints (lowest priority)
  *
  * @type {Record<string, { severity: "error"|"warning"|"info", markClass: string, messageKey: string }>}
  */
-const CODE_META = {
+export const CODE_META = {
     // Parser warnings — case/style (orange dotted)
-    WARN_PAGE_LOWERCASE:      { severity: "info",    markClass: "cm-mp-style", messageKey: "ui.warnings.pageLowercase" },
+    WARN_PAGE_LOWERCASE:      { severity: "info",    markClass: "cm-mp-hint",  messageKey: "ui.warnings.pageCamelCase" },
+    WARN_PAGE_UPPERCASE:      { severity: "info",    markClass: "cm-mp-hint",  messageKey: "ui.warnings.pageCamelCase" },
+    WARN_PANEL_CASE:          { severity: "info",    markClass: "cm-mp-hint",  messageKey: "ui.warnings.panelCamelCase" },
     WARN_ACTION_INDENTED:     { severity: "info",    markClass: "cm-mp-style", messageKey: "ui.warnings.actionIndented" },
     WARN_LEGACY_PANEL:        { severity: "info",    markClass: "cm-mp-style", messageKey: "ui.warnings.legacyPanel" },
     WARN_RESERVED_MARKER:     { severity: "info",    markClass: "cm-mp-style", messageKey: "ui.warnings.reservedMarker" },
@@ -41,12 +43,19 @@ const CODE_META = {
 
     // Parser warnings — structural (red squiggle)
     WARN_PAGE_MISSING_HASH:   { severity: "warning", markClass: "cm-mp-error", messageKey: "ui.warnings.pageMissingHash" },
+    WARN_PAGE_SUFFIX_INVALID: { severity: "warning", markClass: "cm-mp-error", messageKey: "ui.warnings.pageSuffixInvalid" },
     WARN_BONEYARD_UNTERMINATED: { severity: "error", markClass: "cm-mp-error", messageKey: "ui.warnings.boneyardUnterminated" },
 
     // Editor-side checks — all structural (red squiggle)
     EDITOR_PAGE_OUT_OF_ORDER:  { severity: "warning", markClass: "cm-mp-error", messageKey: "ui.warnings.pageOutOfOrder" },
     EDITOR_PANEL_OUT_OF_ORDER: { severity: "warning", markClass: "cm-mp-error", messageKey: "ui.warnings.panelOutOfOrder" },
-    EDITOR_UNKNOWN_PANEL_TAG:  { severity: "warning", markClass: "cm-mp-error", messageKey: "ui.warnings.unknownPanelTag" }
+    // Duplicate detection — same shape as out-of-order but with a
+    // distinct message and NO [Change] quick-fix action (the linter's
+    // action builder gates on the _OUT_OF_ORDER codes).
+    EDITOR_PAGE_DUPLICATE:     { severity: "warning", markClass: "cm-mp-error", messageKey: "ui.warnings.pageDuplicate" },
+    EDITOR_PANEL_DUPLICATE:    { severity: "warning", markClass: "cm-mp-error", messageKey: "ui.warnings.panelDuplicate" },
+    EDITOR_UNKNOWN_PANEL_TAG:  { severity: "warning", markClass: "cm-mp-error", messageKey: "ui.warnings.unknownPanelTag" },
+    EDITOR_CHARACTER_CASE:     { severity: "warning", markClass: "cm-mp-error", messageKey: "ui.warnings.characterCase" }
 };
 
 /**
@@ -111,70 +120,165 @@ function locToRange(state, loc)
 }
 
 /**
- * Build the CM6 linter() extension for .mangaplay editors.
- * @returns {import("@codemirror/state").Extension}
+ * Run the parser linter synchronously against a CM6 view and return the
+ * Diagnostic[] directly. Split out of `editorLinter()` so combined-linter.js
+ * can merge these with spellcheck diagnostics inside a single CM6 lint
+ * source — see TODO/lint-regression-investigation.md for the regression
+ * this avoids (CM6's `batchResults` dropping the parser source when
+ * spellcheck's async callback hung past its budget).
+ *
+ * @param {import("@codemirror/view").EditorView} view
+ * @param {string} [format] - Document format hint. Case-hint warnings only fire for "mangaplay".
+ * @returns {import("@codemirror/lint").Diagnostic[]}
  */
-export function editorLinter()
+export function runParserLinter(view, format = "mangaplay")
 {
-    return linter(
-        (view) =>
+    const source = view.state.doc.toString();
+    /** @type {import("@codemirror/lint").Diagnostic[]} */
+    const diagnostics = [];
+
+    let ast;
+    try
+    {
+        ast = parseScript(source);
+    }
+    catch
+    {
+        return diagnostics;
+    }
+
+    /** @type {any[]} */
+    const allWarnings = [];
+    if (ast && Array.isArray(ast.warnings))
+    {
+        for (const w of ast.warnings) allWarnings.push(w);
+    }
+    for (const w of sequentialPages(ast))   allWarnings.push(w);
+    for (const w of sequentialPanels(ast))  allWarnings.push(w);
+    for (const w of unknownPanelTags(ast, source)) allWarnings.push(w);
+
+    const CASE_HINT_CODES = new Set([
+        "WARN_PAGE_LOWERCASE",
+        "WARN_PAGE_UPPERCASE",
+        "WARN_PANEL_CASE"
+    ]);
+
+    for (const w of allWarnings)
+    {
+        const meta = CODE_META[w.code];
+        if (!meta) continue;
+
+        // Case hints are mangaplay-specific. Fountain / SuperScript / general
+        // text documents should not see them.
+        if (format !== "mangaplay" && CASE_HINT_CODES.has(w.code)) continue;
+
+        const params = argsToParams(w.args);
+        const message = resolveDiagnosticMessage(
+            {
+                messageKey: meta.messageKey,
+                message: w.message || w.code,
+                messageParams: params
+            },
+            translate
+        );
+
+        const { from, to } = locToRange(view.state, w);
+
+        diagnostics.push({
+            from,
+            to,
+            severity: meta.severity,
+            message,
+            markClass: meta.markClass
+            // Source tag (Mangaplay / Fountain / Superscript) hidden by
+            // request — re-enable by uncommenting the line below. The
+            // associated CSS (.cm-diagnosticSource in app.css) is left in
+            // place so the tag renders correctly when restored.
+            // source: "mangaplay"
+        });
+
+        const actions = buildCaseHintAction(w) || buildSequentialAction(w);
+        if (actions)
         {
-            const source = view.state.doc.toString();
-            /** @type {import("@codemirror/lint").Diagnostic[]} */
-            const diagnostics = [];
-
-            let ast;
-            try
-            {
-                ast = parseScript(source);
-            }
-            catch
-            {
-                return diagnostics;
-            }
-
-            /** @type {any[]} */
-            const allWarnings = [];
-            if (ast && Array.isArray(ast.warnings))
-            {
-                for (const w of ast.warnings) allWarnings.push(w);
-            }
-            for (const w of sequentialPages(ast))   allWarnings.push(w);
-            for (const w of sequentialPanels(ast))  allWarnings.push(w);
-            for (const w of unknownPanelTags(ast, source)) allWarnings.push(w);
-
-            for (const w of allWarnings)
-            {
-                const meta = CODE_META[w.code];
-                if (!meta) continue;
-
-                const params = argsToParams(w.args);
-                const message = resolveDiagnosticMessage(
-                    {
-                        messageKey: meta.messageKey,
-                        message: w.message || w.code,
-                        messageParams: params
-                    },
-                    translate
-                );
-
-                const { from, to } = locToRange(view.state, w);
-
-                diagnostics.push({
-                    from,
-                    to,
-                    severity: meta.severity,
-                    message,
-                    markClass: meta.markClass,
-                    source: "mangaplay"
-                });
-            }
-
-            return diagnostics;
-        },
-        {
-            delay: 250,
-            hoverTime: 300
+            diagnostics[diagnostics.length - 1].actions = actions;
         }
-    );
+    }
+
+    return diagnostics;
+}
+
+/**
+ * Build the [Change] quick-fix action for a case-hint warning. Each of
+ * the three case-hint codes has a canonical replacement: `Page` for the
+ * page warnings, `Panel` for the panel one. The replacement spans
+ * exactly the squiggle range (from..to derived from line/column/length).
+ *
+ * @param {any} warning   Parser warning record.
+ * @returns {import("@codemirror/lint").Action[] | null}
+ */
+function buildCaseHintAction(warning)
+{
+    let replacement = null;
+    if (warning.code === "WARN_PAGE_LOWERCASE" || warning.code === "WARN_PAGE_UPPERCASE")
+    {
+        replacement = "Page";
+    }
+    else if (warning.code === "WARN_PANEL_CASE")
+    {
+        replacement = "Panel";
+    }
+    if (replacement === null) return null;
+    const label = translate("ui.warnings.changeAction", "Change");
+    return [{
+        name: label,
+        apply(v, aFrom, aTo)
+        {
+            v.dispatch({ changes: { from: aFrom, to: aTo, insert: replacement } });
+        }
+    }];
+}
+
+/**
+ * Build the [Change] quick-fix action for EDITOR_PAGE_OUT_OF_ORDER and
+ * EDITOR_PANEL_OUT_OF_ORDER. Rewrites the bad id token on the warning line
+ * with the expected number (warning.args[0]). The action range spans the
+ * whole line; the apply callback scopes the rewrite to just the id token so
+ * trailing scene-heading / label text is preserved.
+ *
+ * @param {any} warning
+ * @returns {import("@codemirror/lint").Action[] | null}
+ */
+function buildSequentialAction(warning)
+{
+    const isPage = warning.code === "EDITOR_PAGE_OUT_OF_ORDER";
+    const isPanel = warning.code === "EDITOR_PANEL_OUT_OF_ORDER";
+    if (!isPage && !isPanel) return null;
+    const expected = warning.args?.[0];
+    if (expected === undefined || expected === null) return null;
+    const label = translate("ui.warnings.changeAction", "Change");
+    // Match `# Page <id>` or `Panel <id>` (id = digits + optional -suffix).
+    const tokenRe = isPage
+        ? /(^#\s+page\s+)(\d+(?:-(?:\d+|[IVXLCDM]+|[A-Z]))?)/i
+        : /((?:^|\s)panel\s+)(\d+(?:-\d+)?)/i;
+    return [{
+        name: label,
+        apply(v, aFrom, aTo)
+        {
+            const lineText = v.state.doc.sliceString(aFrom, aTo);
+            const m = lineText.match(tokenRe);
+            if (!m) return;
+            // Index of the id token (group 2) within lineText.
+            const idx = (m.index ?? 0) + m[1].length;
+            const tokenFrom = aFrom + idx;
+            const tokenTo = tokenFrom + m[2].length;
+            v.dispatch({ changes: { from: tokenFrom, to: tokenTo, insert: String(expected) } });
+        }
+    }];
+}
+
+// Test-only hook: lets the CDP smoke harness probe diagnostics + action list
+// without needing dynamic imports inside the bundled WebView context.
+if (typeof globalThis !== "undefined")
+{
+    /** @type {any} */ (globalThis).__mpsRunParserLinter = runParserLinter;
 }

@@ -44,20 +44,39 @@ import {
     unfoldCode
 } from "@codemirror/language";
 import { icon } from "./icons.js";
-
-/** Strict page-heading regex — `# Page N` (case-insensitive on `page`). Used
- *  by the foldService to decide whether a line can be folded: folding only
- *  applies to COMPLETE page headings, never mid-typed ones.
- *
- *  The site spec only emits warnings on lowercase `# page`, not uppercase,
- *  so widening on `page` doesn't change parse semantics. */
-const PAGE_LINE_RE = /^# [Pp][Aa][Gg][Ee]\b/;
+import { PAGE_LINE_RE } from "./editor-line-regexes.js";
 
 /** Loose chevron regex — any line starting with `#` followed by whitespace or
  *  end of line. Catches mid-typed states (`#`, `# `, `# P`, `# Page 1 INT...`)
  *  so the chevron + H1 styling activate from the first keystroke, eliminating
  *  the grey→black + size jitter as the user finishes typing `Page N`. */
 const CHEVRON_LINE_RE = /^#(\s|$)/;
+
+/**
+ * Probe `foldedRanges(state)` to decide whether the page anchored at `line`
+ * is currently folded. The fold service emits ranges that start at the end
+ * of the page heading line, so any folded range whose `from` is at or after
+ * `line.to` belongs to this page.
+ *
+ * @param {import("@codemirror/state").EditorState} state
+ * @param {{ from: number, to: number }} line
+ * @returns {boolean}
+ */
+export function isPageFolded(state, line)
+{
+    const folded = foldedRanges(state);
+    let isFolded = false;
+    folded.between(line.from, line.to + 2, (rangeFrom) =>
+    {
+        if (rangeFrom >= line.to)
+        {
+            isFolded = true;
+            return false;
+        }
+        return undefined;
+    });
+    return isFolded;
+}
 
 /**
  * foldService — return the foldable range for a page heading. The fold body
@@ -126,12 +145,15 @@ class PageChevronWidget extends WidgetType
         span.className = "cm-mp-page-chevron";
         span.setAttribute("role", "button");
         span.setAttribute("aria-label", this.folded ? "Unfold page" : "Fold page");
+        // Expose fold state on the host element so tests / a11y consumers
+        // can read orientation without inspecting the SVG markup.
+        span.setAttribute("data-folded", this.folded ? "true" : "false");
         span.style.cursor = "pointer";
         const glyph = document.createElement("span");
         glyph.className = "cm-mp-page-chevron-glyph";
         // Render lucide SVG (ChevronRight when folded, ChevronDown when open).
-        // 20px square, currentColor stroke inherits from .cm-mp-page-chevron.
-        glyph.innerHTML = icon(this.folded ? "chevron-right" : "chevron-down", { size: 20 });
+        // 24px square, currentColor stroke inherits from .cm-mp-page-chevron.
+        glyph.innerHTML = icon(this.folded ? "chevron-right" : "chevron-down", { size: 24 });
         span.appendChild(glyph);
         span.addEventListener("mousedown", (e) =>
         {

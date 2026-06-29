@@ -1,14 +1,12 @@
 /* =============================================================================
    VISUAL EDITOR
 
-   Phase 2a — read-only renderer styles.  Header/footer nav strips, page
-   direction section, panel cards with pill + description + border badges
-   + widget placeholders.  Widget chrome (rails, ghost, drop-zones) and
-   active editing surfaces land in later phases.
+   Renderer + editing-surface styles: header/footer nav strips, page
+   direction section, panel cards (pill + description + border badges),
+   widget chrome (rails, ghost, drop-zones), and active editing surfaces.
 
    All colours, spacing, borders pull from existing theme tokens — zero
-   new colour literals.  See TODO/mps-visual-panel-editor.md "Colour
-   coding" + "CSS strategy".
+   new colour literals.
    ============================================================================= */
 
 mps-visual-editor
@@ -18,7 +16,7 @@ mps-visual-editor
     height: 100%;
     overflow-y: auto;
     overflow-x: visible;
-    padding-top: 12px;
+    padding-top: 44px;
     background: var(--mps-editor-bg);
     color: var(--mps-text-primary);
     box-sizing: border-box;
@@ -26,7 +24,7 @@ mps-visual-editor
     scrollbar-color: var(--mps-scrollbar-thumb) transparent;
 }
 
-mps-visual-editor::-webkit-scrollbar { width: 8px; }
+mps-visual-editor::-webkit-scrollbar { width: 9px; }
 mps-visual-editor::-webkit-scrollbar-track { background: transparent; margin: 8px 0; }
 mps-visual-editor::-webkit-scrollbar-thumb { background: var(--mps-scrollbar-thumb); border-radius: 4px; }
 mps-visual-editor::-webkit-scrollbar-thumb:hover { background: var(--mps-scrollbar-thumb-hover); }
@@ -39,6 +37,25 @@ mps-visual-editor::-webkit-scrollbar-thumb:hover { background: var(--mps-scrollb
     display: flex;
     flex-direction: column;
     gap: var(--mps-spacing-md);
+}
+
+/* ---- Page section (continuous-scroll) ---- */
+
+.visual-editor-page
+{
+    display: flex;
+    flex-direction: column;
+    gap: var(--mps-spacing-md);
+    /* scroll-into-view from anchor jumps clears the 44px top bar */
+    scroll-margin-top: 52px;
+    padding-top: var(--mps-spacing-md);
+    padding-bottom: var(--mps-spacing-md);
+}
+
+.visual-editor-page + .visual-editor-page
+{
+    border-top: 1px solid var(--mps-divider, rgba(0, 0, 0, 0.08));
+    margin-top: 0;
 }
 
 /* ---- Line-range gutter (compact mirror of source view's gutter) ---- */
@@ -118,10 +135,14 @@ mps-visual-editor::-webkit-scrollbar-thumb:hover { background: var(--mps-scrollb
     border: var(--mps-panel-border-width) solid var(--mps-panel-border);
     border-radius: 8px;
     padding: var(--mps-spacing-md);
-    padding-top: 36px;
     padding-left: 36px;
     display: flex;
     flex-direction: column;
+}
+
+.page-header-card.is-active
+{
+    border: calc(2 * var(--mps-panel-border-width)) solid var(--mps-panel-selected);
 }
 
 .page-header-card-badges
@@ -213,7 +234,6 @@ mps-visual-editor textarea.page-header-label
     border: var(--mps-panel-border-width) solid var(--mps-panel-border);
     border-radius: 8px;
     padding: var(--mps-spacing-md);
-    padding-top: 36px;
     padding-left: 36px;
     padding-bottom: 0;
     display: flex;
@@ -224,9 +244,8 @@ mps-visual-editor textarea.page-header-label
 
 .panel-card.is-active
 {
-    border-color: var(--mps-panel-selected);
+    border: calc(2 * var(--mps-panel-border-width)) solid var(--mps-panel-selected);
 }
-
 
 .panel-card-header
 {
@@ -383,48 +402,10 @@ mps-visual-editor textarea.panel-description
     outline: none;
 }
 
-/* ---- Insert Blank Page badge (top of visual editor) ---- */
-
-.visual-editor-insert-page-badge
-{
-    position: absolute;
-    /* Desktop relocates this badge from top-center to top-right so it
-     * sits to the LEFT of the editor-pane mode toggle (which floats at
-     * top: 8px; right: 8px and is 28px wide). Offset chosen so the
-     * badge clears the toggle by 8px. */
-    top: 8px;
-    right: 48px;
-    background: var(--mps-panel-number-bg-solid);
-    color: var(--mps-panel-number-text);
-    border: 1px solid var(--mps-panel-border);
-    border-radius: 999px;
-    padding: 0.25rem 0.75rem;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background-color 120ms, color 120ms;
-    z-index: 100;
-    pointer-events: auto;
-}
-
-.visual-editor-insert-page-badge::after
-{
-    content: ' \25BE';
-    font-size: 13px;
-    line-height: 1;
-    vertical-align: middle;
-}
-
-.visual-editor-insert-page-badge:hover,
-.visual-editor-insert-page-badge:focus-visible
-{
-    background: var(--mps-accent);
-    color: var(--mps-text-on-accent, #fff);
-    outline: none;
-}
+/* Insert Blank Page and Fix Structural Issues both live as icon buttons
+ * in the editor-area-top-bar in app.js (right after the prev/next
+ * chevrons). See `.editor-area-top-bar .editor-bar-fix-issues` and
+ * `.editor-area-top-bar .editor-bar-insert-page` in app.css. */
 
 /* ---- Widgets ---- */
 
@@ -638,12 +619,6 @@ body[data-dragging-type="panel"] .page-header-card.drop-invalid
 
 /* Snap-back / fly-in animations are driven inline (transform +
    transition) by the DnD engine; this rule defines the curve. */
-.widget-drag-ghost.snapping
-{
-    transition: transform 180ms cubic-bezier(0.4, 0, 0.2, 1),
-                opacity 180ms ease-out;
-}
-
 .widget-drag-ghost.flying-in
 {
     transition: transform 120ms cubic-bezier(0.4, 0, 0.2, 1),
@@ -919,8 +894,6 @@ mps-visual-editor textarea.dialogue-text
         flex-wrap: wrap;
     }
 }
-
-/* ---- Phase 2c stubs ---- */
 
 .visual-editor-empty
 {

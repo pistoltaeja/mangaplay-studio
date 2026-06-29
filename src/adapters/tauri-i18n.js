@@ -1,8 +1,9 @@
 /**
  * Desktop i18n adapter.
  *
- * Loads all 14 `localisation/<code>.json` dictionaries at build time (Bun
- * inlines the imports) and resolves `t(path)` against the active dictionary.
+ * Static-imports only the English dictionary as the boot floor + fallback.
+ * The other 13 locale JSONs are wired through `LOADERS` so Bun emits one
+ * chunk per locale and only the active language ships to first paint.
  *
  * Detection priority on first launch:
  *   1. localStorage 'mps_desktop_lang' (mirrored from app_settings.language)
@@ -10,28 +11,14 @@
  *   3. navigator.languages[*] (in order, first match wins)
  *   4. 'en'
  *
- * setLanguage(code) updates the active dictionary, mirrors to localStorage,
- * dispatches a 'mps-lang-change' CustomEvent on document, and notifies
- * subscribe() listeners. Persistence to app_settings is the caller's job
- * (see <mps-lang-select>).
+ * setLanguage(code) is async — it awaits the dictionary chunk before swapping
+ * currentLang + notifying subscribers, so the first `t()` call on the new
+ * locale always finds its strings. `t()` itself stays synchronous.
  *
  * Mirrors the API surface of `extension-mangaplay-studio/adapters/ext-i18n.js`.
  */
 
 import en from '../../../localisation/en.json';
-import ja from '../../../localisation/ja.json';
-import ko from '../../../localisation/ko.json';
-import es from '../../../localisation/es.json';
-import fr from '../../../localisation/fr.json';
-import it from '../../../localisation/it.json';
-import id from '../../../localisation/id.json';
-import ru from '../../../localisation/ru.json';
-import pt from '../../../localisation/pt.json';
-import th from '../../../localisation/th.json';
-import zhCN from '../../../localisation/zh-CN.json';
-import zhTW from '../../../localisation/zh-TW.json';
-import de from '../../../localisation/de.json';
-import vi from '../../../localisation/vi.json';
 
 import {
     SUPPORTED_LANGUAGES_LIST,
@@ -41,23 +28,56 @@ import {
 
 const STORAGE_KEY = 'mps_desktop_lang';
 
-/** @type {Record<string, any>} */
-const DICTS = {
-    'en':    en,
-    'ja':    ja,
-    'ko':    ko,
-    'es':    es,
-    'fr':    fr,
-    'it':    it,
-    'id':    id,
-    'ru':    ru,
-    'pt':    pt,
-    'th':    th,
-    'zh-CN': zhCN,
-    'zh-TW': zhTW,
-    'de':    de,
-    'vi':    vi,
+/**
+ * Lazy loaders for the 13 non-English dictionaries. Each invocation returns
+ * a Promise that resolves to the module record; Bun code-splits these into
+ * one chunk per locale at build time.
+ * @type {Record<string, () => Promise<any>>}
+ */
+const LOADERS = {
+    'ja':    () => import('../../../localisation/ja.json'),
+    'ko':    () => import('../../../localisation/ko.json'),
+    'es':    () => import('../../../localisation/es.json'),
+    'fr':    () => import('../../../localisation/fr.json'),
+    'it':    () => import('../../../localisation/it.json'),
+    'id':    () => import('../../../localisation/id.json'),
+    'ru':    () => import('../../../localisation/ru.json'),
+    'pt':    () => import('../../../localisation/pt.json'),
+    'th':    () => import('../../../localisation/th.json'),
+    'zh-CN': () => import('../../../localisation/zh-CN.json'),
+    'zh-TW': () => import('../../../localisation/zh-TW.json'),
+    'de':    () => import('../../../localisation/de.json'),
+    'vi':    () => import('../../../localisation/vi.json'),
 };
+
+/** @type {Record<string, any>} */
+const DICTS = { 'en': en };
+
+/** @type {Map<string, Promise<any>>} */
+const inflight = new Map();
+
+/**
+ * Ensure the dictionary for `code` is resident in `DICTS`. Idempotent.
+ * Concurrent calls share a single inflight promise so we never double-fetch.
+ * @param {string} code
+ * @returns {Promise<void>}
+ */
+async function ensureLoaded(code)
+{
+    if (code === 'en' || DICTS[code]) return;
+    const loader = LOADERS[code];
+    if (!loader) return; // Unknown code — caller falls back to 'en'.
+    let p = inflight.get(code);
+    if (!p)
+    {
+        p = loader().then((mod) =>
+        {
+            DICTS[code] = mod && mod.default ? mod.default : mod;
+        }).finally(() => { inflight.delete(code); });
+        inflight.set(code, p);
+    }
+    await p;
+}
 
 /** Back-compat shape for consumers that list languages. */
 export const LANGUAGES = SUPPORTED_LANGUAGES_LIST.map((l) => ({
@@ -181,12 +201,19 @@ function notify()
 }
 
 /**
+ * Switch the active language. Awaits the locale chunk before mutating state
+ * so subscribers (and the immediately-following `t()` calls) always observe
+ * the new dictionary as loaded.
  * @param {string} lang
+ * @returns {Promise<void>}
  */
-function setLanguage(lang)
+async function setLanguage(lang)
 {
     const next = isValidLanguage(lang) ? lang : 'en';
     if (next === currentLang) return;
+
+    await ensureLoaded(next);
+
     currentLang = next;
 
     try { globalThis.localStorage?.setItem?.(STORAGE_KEY, next); }
@@ -199,11 +226,6 @@ function setLanguage(lang)
     }
 
     notify();
-}
-
-function getTranslations()
-{
-    return (DICTS[currentLang] && DICTS[currentLang].shared) || {};
 }
 
 function interpolate(template, params)
@@ -240,15 +262,16 @@ function subscribe(cb)
     return () => subscribers.delete(cb);
 }
 
-function getLanguageConfig(code)
+/**
+ * Detect the boot-time language and ensure its dictionary is loaded before
+ * any consumer can call `t()`. Caller must `await` this in the boot path.
+ * @returns {Promise<void>}
+ */
+async function initialise()
 {
-    const want = code || currentLang;
-    return LANGUAGES.find((l) => l.code === want);
-}
-
-function initialise()
-{
-    currentLang = detectLanguage();
+    const detected = detectLanguage();
+    await ensureLoaded(detected);
+    currentLang = detected;
 
     if (typeof document !== 'undefined')
     {
@@ -257,23 +280,11 @@ function initialise()
     }
 }
 
-function format(template, ...args)
-{
-    return template.replace(/\{(\d+)\}/g, (m, i) =>
-    {
-        const v = args[Number(i)];
-        return v === undefined ? m : String(v);
-    });
-}
-
 export {
     detectLanguage,
     getLanguage,
     setLanguage,
-    getTranslations,
     t,
-    format,
     subscribe,
-    getLanguageConfig,
     initialise,
 };

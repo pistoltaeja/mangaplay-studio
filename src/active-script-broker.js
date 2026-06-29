@@ -145,13 +145,11 @@ class Broker
      * Adopt a new path or clear ownership entirely.
      *   - `null`     → no file is active (e.g. external delete)
      *   - string     → adopt this path as the new active (e.g. external rename)
-     *   - undefined  → keep the current path (legacy callers)
      * Pending writes are dropped on any change because they target the old path.
-     * @param {string | null} [newPath]
+     * @param {string | null} newPath
      */
     unlock(newPath)
     {
-        if (newPath === undefined) return;
         this._cancelAllPending();
         this.path = newPath;
     }

@@ -51,23 +51,51 @@ import { t, subscribe as subscribeI18n } from "./adapters/tauri-i18n.js";
 import { buildTree, flattenForRender } from "./folder-tree.js";
 import { icon } from "./icons.js";
 import { hideTooltipImmediate } from "./tooltip.js";
+import { isTauri } from "./util/is-tauri.js";
 
 const KNOWN_SUFFIXES = [".mangaplay.md", ".fountain.md", ".sup.md"];
+const KNOWN_SINGLE_SUFFIXES = [".mangaplay", ".fountain", ".sup", ".txt", ".md"];
 
 /**
- * Split a basename into (stem, suffix). Suffix is one of KNOWN_SUFFIXES or
- * "" when none match.
+ * Split a basename into (stem, suffix). Suffix is one of KNOWN_SUFFIXES,
+ * one of KNOWN_SINGLE_SUFFIXES, OR the last `.ext` segment when there's a
+ * single extension we don't specifically recognise. Returns `{ stem: name,
+ * suffix: "" }` only for files with no extension at all.
+ *
+ * This drives the rename input — the input value is initialised to the
+ * stem and the original suffix is re-appended verbatim on commit, so
+ * users can't change the extension through rename (intentional — wrong
+ * extension would break the slot's format detection).
+ *
  * @param {string} name
  * @returns {{ stem: string, suffix: string }}
  */
 function splitSuffix(name)
 {
+    if (!name) return { stem: "", suffix: "" };
+    const lower = name.toLowerCase();
+    // Double-extension forms first (longer match wins).
     for (const sfx of KNOWN_SUFFIXES)
     {
-        if (name.endsWith(sfx))
+        if (lower.endsWith(sfx))
         {
-            return { stem: name.slice(0, -sfx.length), suffix: sfx };
+            return { stem: name.slice(0, -sfx.length), suffix: name.slice(-sfx.length) };
         }
+    }
+    // Then registered single extensions.
+    for (const sfx of KNOWN_SINGLE_SUFFIXES)
+    {
+        if (lower.endsWith(sfx))
+        {
+            return { stem: name.slice(0, -sfx.length), suffix: name.slice(-sfx.length) };
+        }
+    }
+    // Fallback: anything after the last dot. Folders typically have no
+    // dot in their basename and pass through unchanged.
+    const dot = name.lastIndexOf(".");
+    if (dot > 0)
+    {
+        return { stem: name.slice(0, dot), suffix: name.slice(dot) };
     }
     return { stem: name, suffix: "" };
 }
@@ -83,6 +111,7 @@ function badgeFor(name)
     if (lower.endsWith(".sup.md")      || lower.endsWith(".sup"))       return "SUPERSCRIPT";
     if (lower.endsWith(".mangaplay.md") || lower.endsWith(".mangaplay")) return "MANGAPLAY";
     if (lower.endsWith(".fountain.md")  || lower.endsWith(".fountain"))  return "FOUNTAIN";
+    if (lower.endsWith(".txt"))                                          return "TXT";
     const idx = lower.lastIndexOf(".");
     if (idx > 0) return lower.slice(idx + 1).toUpperCase();
     return "FILE";
@@ -203,13 +232,13 @@ export function mountFolderList(container, files, opts = {})
 
     /**
      * Absolute path for a node — prefers the entry's own `path`, falls back
-     * to `<projectRoot>/project/<relPath>` when only a synthesised entry exists.
+     * to `<projectRoot>/<relPath>` when only a synthesised entry exists.
      * @param {TreeNode} node
      */
     function absPathFor(node)
     {
         if (node.entry && node.entry.path) return node.entry.path;
-        if (projectRoot) return `${projectRoot}/project/${node.relPath}`;
+        if (projectRoot) return `${projectRoot}/${node.relPath}`;
         return "";
     }
 
@@ -248,13 +277,12 @@ export function mountFolderList(container, files, opts = {})
             }
             row.append(disclosure);
         }
-        else
-        {
-            const spacer = document.createElement("span");
-            spacer.className = "folder-list-disclosure folder-list-disclosure-spacer";
-            spacer.setAttribute("aria-hidden", "true");
-            row.append(spacer);
-        }
+        // Files no longer get a 16px disclosure-spacer — the entry name sits
+        // flush with the row's left padding so the explorer reads as a
+        // left-aligned list. Folders still get the chevron (it carries
+        // expand/collapse interaction); the visual offset between folder
+        // names and file names is acceptable since folders are uncommon at
+        // depth 0 in this project layout.
 
         const nameEl = document.createElement("span");
         nameEl.className = "folder-list-name";
@@ -331,14 +359,14 @@ export function mountFolderList(container, files, opts = {})
 
     /**
      * Absolute path for a relPath using the same convention as `absPathFor`:
-     * `<projectRoot>/project/<relPath>`. Returns "" when projectRoot is
-     * unknown (jsdom / test).
+     * `<projectRoot>/<relPath>`. Returns "" when projectRoot is unknown
+     * (jsdom / test).
      * @param {string} relPath
      */
     function absPathForRel(relPath)
     {
         if (!projectRoot) return "";
-        return `${projectRoot}/project/${relPath}`;
+        return `${projectRoot}/${relPath}`;
     }
 
     /**
@@ -352,12 +380,14 @@ export function mountFolderList(container, files, opts = {})
     {
         const abs = absPathForRel(relPath);
         if (!abs) return;
-        const invoke = /** @type {any} */ (window).__TAURI__?.core?.invoke;
-        if (!invoke) return;
+        if (!isTauri()) return;
         const cmd = expand ? "fs_watch_add_subdir" : "fs_watch_remove_subdir";
-        invoke(cmd, { path: abs }).catch((e) =>
+        import("@tauri-apps/api/core").then(({ invoke }) =>
         {
-            console.warn(`[${cmd}] failed:`, e);
+            invoke(cmd, { path: abs }).catch((e) =>
+            {
+                console.warn(`[${cmd}] failed:`, e);
+            });
         });
     }
 
@@ -672,7 +702,7 @@ export function mountFolderList(container, files, opts = {})
         const srcEntry = entries.find((en) => en.name === srcRel);
         const srcAbs = (srcEntry && srcEntry.path)
             ? srcEntry.path
-            : (projectRoot ? `${projectRoot}/project/${srcRel}` : "");
+            : (projectRoot ? `${projectRoot}/${srcRel}` : "");
         if (!srcAbs || !newParentAbs) return;
 
         if (onMove)
@@ -794,7 +824,17 @@ export function mountFolderList(container, files, opts = {})
         const commit = async () =>
         {
             if (committed) return;
-            const raw = (input.value || "").trim();
+            let raw = (input.value || "").trim();
+            // Extension changes aren't allowed through rename — the slot's
+            // format detector keys off the suffix, and renaming
+            // `script.fountain` to `script.txt` would silently break
+            // parsing. If the user typed the original suffix back into the
+            // stem (e.g. they re-typed the whole filename), strip it so the
+            // re-append below doesn't produce `name.fountain.fountain`.
+            if (suffix && raw.toLowerCase().endsWith(suffix.toLowerCase()))
+            {
+                raw = raw.slice(0, -suffix.length);
+            }
             const newName = raw + suffix;
             if (newName === originalName)
             {
@@ -919,6 +959,33 @@ export function mountFolderList(container, files, opts = {})
                     || el.dataset.filename === name);
                 el.setAttribute("aria-current", isMatch ? "true" : "false");
             }
+        },
+        /**
+         * Scroll the active row into view and apply a 1s flash highlight so
+         * the user can locate it. No-op if there's no active row.
+         */
+        revealActive()
+        {
+            if (!activeFile) return;
+            /** @type {HTMLElement|null} */
+            let row = null;
+            for (const [relPath, el] of rowEls)
+            {
+                if (relPath === activeFile || el.dataset.filename === activeFile)
+                {
+                    row = el;
+                    break;
+                }
+            }
+            if (!row) return;
+            try { row.scrollIntoView({ block: "nearest", behavior: "instant" }); }
+            catch { try { row.scrollIntoView(); } catch {} }
+            row.classList.remove("is-flashing");
+            // Force reflow so the keyframe restarts when revealActive is
+            // called twice in quick succession.
+            void row.offsetWidth;
+            row.classList.add("is-flashing");
+            setTimeout(() => row && row.classList.remove("is-flashing"), 1100);
         },
         getRover()
         {

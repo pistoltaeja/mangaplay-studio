@@ -28,6 +28,7 @@
  */
 
 import { icon } from "../icons.js";
+import { escapeHtml } from "../util/escape-html.js";
 
 const MARGIN = 8;
 
@@ -122,17 +123,6 @@ function renderItems()
     });
 }
 
-/** @param {string} s */
-function escapeHtml(s)
-{
-    return String(s)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#39;");
-}
-
 /** First / next activatable item index walking with `step` (+1 / -1), wraps. */
 function nextActivatableIndex(from, step)
 {
@@ -215,9 +205,18 @@ function onDocKey(e)
 // Rename / Delete action would silently no-op.
 let mouseDownInsideMenu = false;
 
+// Set to a future performance.now() while we're still in the "menu just
+// opened" grace period. Any window-blur received before this time is
+// ignored — Windows / WebView2 sometimes fires a transient blur right
+// after the click that opened the menu (CDP Input.dispatchMouseEvent
+// reproduces it; physical mice rarely do). Without this, the menu opens
+// and closes on the same frame.
+let openedAtUntil = 0;
+
 function onBlur()
 {
     if (mouseDownInsideMenu) return;
+    if (performance.now() < openedAtUntil) return;   // ignore opener blur
     closeContextMenu();
 }
 function onResize() { closeContextMenu(); }
@@ -310,6 +309,11 @@ export function openContextMenu(opts)
     if (!wasOpen)
     {
         isOpen = true;
+        // Grace period: ignore window-blur for ~100ms after opening so a
+        // transient WebView2 / OS blur that fires "right after the opener
+        // click" doesn't dismiss the menu we just mounted. The user can
+        // still close by clicking outside or pressing Escape.
+        openedAtUntil = performance.now() + 100;
         installDocListeners();
     }
 }

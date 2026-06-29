@@ -54,5 +54,3 @@ export function fountain()
 {
     return new LanguageSupport(fountainLanguage);
 }
-
-export { fountainLanguage };

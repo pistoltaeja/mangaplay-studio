@@ -1,16 +1,20 @@
 import { Files, Palette, Settings,
          Columns2, PanelLeftClose, PanelLeftOpen,
          Folder, Bookmark, TableOfContents, X,
-         ArrowLeftRight, CircleUser,
+         ArrowLeft, ArrowRight, ArrowLeftRight, CircleUser,
          Copy, Trash2, Pencil, Plus, FilePlus, FolderPlus, Scissors,
          MoveUpRight, ChevronRight, ChevronLeft, ChevronDown,
-         Code, BookOpen, WandSparkles,
-         ChevronsDownUp, MonitorCog, Check } from "lucide";
+         Code, BookOpen, FileText, WandSparkles,
+         ChevronsDownUp, MonitorCog, Check, CircleHelp,
+         EllipsisVertical, Search, ChevronUp, ChartColumn, Wrench,
+         CloudUpload } from "lucide";
 
 const REGISTRY = {
     "files":             Files,
     "palette":           Palette,
     "settings":          Settings,
+    "arrow-left":        ArrowLeft,
+    "arrow-right":       ArrowRight,
     "arrow-left-right":  ArrowLeftRight,
     "columns-2":         Columns2,
     "panel-left-close":  PanelLeftClose,
@@ -33,10 +37,18 @@ const REGISTRY = {
     "chevron-down":      ChevronDown,
     "code":              Code,
     "book-open":         BookOpen,
+    "file-text":         FileText,
     "wand-sparkles":     WandSparkles,
     "chevrons-down-up":  ChevronsDownUp,
     "monitor-cog":       MonitorCog,
-    "check":             Check
+    "check":             Check,
+    "circle-help":       CircleHelp,
+    "ellipsis-vertical": EllipsisVertical,
+    "search":            Search,
+    "chevron-up":        ChevronUp,
+    "chart-column":      ChartColumn,
+    "wrench":            Wrench,
+    "cloud-upload":      CloudUpload
 };
 
 /**

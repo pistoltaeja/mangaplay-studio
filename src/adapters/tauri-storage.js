@@ -59,6 +59,12 @@ const STORAGE_DEFAULTS = {
         boldHeadings: false,
         boldAction: false,
         pageNumbers: true,
+        // Target indentation convention for the "Fix Structural Issues"
+        // button on mangaplay documents. See structural-fixer.js
+        // INDENT_WIDTHS for the spec. "B" is the editor's default (panels
+        // at column 0, dialogue at 4 spaces) and matches the codebase
+        // samples. Override via Settings.
+        structuralFixTargetConvention: 'B',
     },
     [STORAGE_KEYS.UI_SETTINGS]: {
         sidebarCollapsed: false,
@@ -390,7 +396,7 @@ function resolveDrawingId()
 // ── Tauri FS command wrappers ──────────────────────────────────────────────
 //
 // Thin JS shims over the `app_*` Tauri commands. They dispatch the same way
-// as `project.js` — through `window.__TAURI__.core.invoke` in the .exe, or
+// as `project.js` — through `@tauri-apps/api/core` invoke in the .exe, or
 // through the in-memory `_fakeFs` stub in the browser / jsdom test harness
 // (re-routed via `_invokeForTest` so the stub branches stay in one place).
 //
@@ -399,6 +405,7 @@ function resolveDrawingId()
 // `access-denied`, `project-is-open`, `not-found`.
 
 import { _invokeForTest } from "../project.js";
+import { isTauri } from "../util/is-tauri.js";
 
 /**
  * Dispatch a Tauri command, falling back to the browser fakefs stub. Throws
@@ -410,9 +417,10 @@ import { _invokeForTest } from "../project.js";
  */
 async function _invokeFs(cmd, args)
 {
-    if (typeof window !== "undefined" && window.__TAURI__?.core?.invoke)
+    if (isTauri())
     {
-        return window.__TAURI__.core.invoke(cmd, args);
+        const { invoke } = await import("@tauri-apps/api/core");
+        return invoke(cmd, args);
     }
     return _invokeForTest(cmd, args);
 }
@@ -433,29 +441,37 @@ export async function copyFile(path)
  * has no trash (freedesktop nosuid mount, etc.) — call `deleteFileForce` as
  * a follow-up after confirming with the user.
  * @param {string} path
+ * @param {string} [projectRoot] Absolute project-root path. When supplied and
+ *   the file is a script with an `artMap.scripts` entry in `project.json`,
+ *   the Rust side also trashes the mapped `.mangaart` file and drops the map
+ *   entry (Phase 4 of the .mangaart relocation plan). Omit for deletes
+ *   outside the open-project lifecycle (folder delete also skips art handling).
  * @returns {Promise<void>}
  */
-export async function deleteFile(path)
+export async function deleteFile(path, projectRoot)
 {
-    return _invokeFs("app_delete_file", { path });
+    return _invokeFs("app_delete_file", { path, projectRoot });
 }
 
 /**
  * Hard-delete a file, bypassing the trash. Only call this after the user
  * has explicitly confirmed via the "Delete permanently" prompt.
  * @param {string} path
+ * @param {string} [projectRoot] Same semantics as {@link deleteFile} — when
+ *   supplied, the matching art file is removed via `std::fs::remove_file`
+ *   (no trash) and the `artMap.scripts` entry is dropped.
  * @returns {Promise<void>}
  */
-export async function deleteFileForce(path)
+export async function deleteFileForce(path, projectRoot)
 {
-    return _invokeFs("app_delete_file_force", { path });
+    return _invokeFs("app_delete_file_force", { path, projectRoot });
 }
 
 /**
  * Create a new folder / mangaplay script / fountain script under `parent`.
  * The Rust side picks the next free `Untitled` name; returns the new path.
  * @param {string} parent
- * @param {"folder"|"mangaplay"|"fountain"} kind
+ * @param {"folder"|"mangaplay"|"fountain"|"superscript"|"text"} kind
  * @returns {Promise<string>}
  */
 export async function createFile(parent, kind)
@@ -470,11 +486,45 @@ export async function createFile(parent, kind)
  * @param {string} path
  * @param {string} newName
  * @param {boolean} currentlyOpen
+ * @param {string} [projectRoot] Absolute project-root path. When supplied, the
+ *   Rust side rewrites the `artMap.scripts` key in `project.json` so the
+ *   script→UUID mapping survives the rename. Omit for renames outside the
+ *   open-project lifecycle (the storyboard art file is never moved either way).
  * @returns {Promise<string>} New absolute path.
  */
-export async function renameFile(path, newName, currentlyOpen)
+export async function renameFile(path, newName, currentlyOpen, projectRoot)
 {
-    return _invokeFs("app_rename_file", { path, newName, currentlyOpen });
+    return _invokeFs("app_rename_file", { path, newName, currentlyOpen, projectRoot });
+}
+
+/**
+ * Open a Save-As dialog. Returns the chosen absolute path or `null` on cancel.
+ * When MPS_TEST_SAVE_DIR is set in the host process the Rust side skips the
+ * dialog and returns `<test-dir>/<defaultName>` directly.
+ *
+ * @param {string} defaultName  Suggested filename (e.g. "Big-Fish.fdx").
+ * @param {Array<[string, string[]]>} filters  e.g. [["Final Draft", ["fdx"]]]
+ * @returns {Promise<string|null>}
+ */
+export async function saveFileDialog(defaultName, filters)
+{
+    return _invokeFs("app_save_file_dialog", { defaultName, filters });
+}
+
+/**
+ * Write bytes (Uint8Array or number[]) to `path`. Creates parent directories
+ * as needed. Used by Export Screenplay for binary blobs (PDF, FadeIn ZIP)
+ * AND text outputs (Fountain, FDX, TXT) — both go through the same byte path
+ * so the writer doesn't have to track which format is binary.
+ *
+ * @param {string} path
+ * @param {Uint8Array|number[]} bytes
+ * @returns {Promise<void>}
+ */
+export async function writeBytes(path, bytes)
+{
+    const arr = bytes instanceof Uint8Array ? Array.from(bytes) : bytes;
+    return _invokeFs("app_write_bytes", { path, bytes: arr });
 }
 
 export {

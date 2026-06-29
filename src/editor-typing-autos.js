@@ -35,8 +35,13 @@ import { snippet, completionStatus } from "@codemirror/autocomplete";
  *  character so CM6 won't auto-activate on it). */
 const expandHashPage = snippet("# Page ${1:N}");
 
+/** Module-level gate set by `editorTypingAutos(format)`. The Page-X and
+ *  Panel-X action-line auto-promote rules only fire for mangaplay — fountain
+ *  and superscript share the same keymap but don't use `# Page` syntax. */
+let _format = "mangaplay";
+
 /** Effect — set or clear the dialogue block state. */
-export const setDialogueBlock = StateEffect.define();
+const setDialogueBlock = StateEffect.define();
 
 /**
  * State field tracking whether the editor is in a CHARACTER/dialogue typing
@@ -44,7 +49,7 @@ export const setDialogueBlock = StateEffect.define();
  *
  * @type {StateField<{ active: boolean, casing: "upper" | "mixed" }>}
  */
-export const dialogueBlock = StateField.define({
+const dialogueBlock = StateField.define({
     create()
     {
         return { active: false, casing: "mixed" };
@@ -122,6 +127,35 @@ function isParentheticalLine(t)
     return /^\s*\(.*\)\s*$/.test(t);
 }
 
+/** Detect a column-0 line that's a plausible CHARACTER cue: ALL CAPS
+ *  alphabetics with optional spaces / digits / common cue punctuation
+ *  (`. , - ' " &`). Allows a trailing parenthetical extension like
+ *  `(O.S.)` / `(THOUGHT)`. Rejects anything containing lowercase
+ *  letters or matching the SFX / scene-heading / transition shape. */
+function isCueShape(t)
+{
+    if (!t || t.length === 0) return false;
+    if (/[a-z]/.test(t)) return false;
+    // Reject other heading shapes that happen to be ALL CAPS.
+    if (/^# /.test(t)) return false;
+    if (/^Panel\b/i.test(t)) return false;
+    if (/^SFX[\s:]/i.test(t)) return false;
+    if (/^(INT|EXT|EST|INT\.\/EXT\.|INT\/EXT|EXT\/INT|I\/E)[\.\s]/i.test(t)) return false;
+    if (/\b(?:CUT|DISSOLVE|SMASH|MATCH|JUMP|SLAM|WIPE|IRIS|FADE)\s+(?:TO:|OUT\.|IN:)\s*$/.test(t)) return false;
+    // At least one capital letter must be present.
+    if (!/[A-Z]/.test(t)) return false;
+    // Restrict to letters / digits / spaces / standard cue punctuation.
+    return /^[A-Z0-9 .,'"&()\-]+$/.test(t);
+}
+
+/** Is `text` the dialogue-band indent string (4 spaces) for Convention B?
+ *  We treat any line consisting solely of 4 spaces as a "demote candidate"
+ *  for the Enter-twice exit path. */
+function isEmptyDialogueLine(t)
+{
+    return t === "    ";
+}
+
 /**
  * Enter handler — multiplexes by current line shape and dialogue-block state.
  *
@@ -144,6 +178,35 @@ function handleEnter(view)
     //    the cursor would orphan the close paren on its own line. Jump the
     //    insertion point to the END of the line first so the paren stays
     //    intact, then drop to a fresh dialogue line.
+    //
+    //    Demote case: pressing Enter on an EMPTY indented dialogue line
+    //    (the row we left blank after a previous Enter) means the user
+    //    is done with dialogue and wants to start a new action line.
+    //    Replace the blank-4-spaces line with a column-0 newline and exit
+    //    the dialogue block.
+    // Demote case (state-independent): pressing Enter on a line whose
+    // text is EXACTLY the 4-space dialogue indent demotes it to a
+    // column-0 action line. Triggered whether or not the dialogueBlock
+    // state field is active — the state can drift out of sync when the
+    // user manually types indented dialogue (e.g. via Tab + content,
+    // or by opening a file that already contains dialogue and clicking
+    // the indented row). The shape of the line is the unambiguous
+    // signal; we don't need the state.
+    if (isEmptyDialogueLine(line.text) && head === line.to)
+    {
+        // Replace the 4-space indent with a blank row + a fresh column-0
+        // action line. Source result: `…dialogue\n\n|` — the trailing
+        // empty row is gone, a separator blank stays, and the cursor
+        // sits at column 0 on a new line ready for an action sentence.
+        view.dispatch({
+            changes: { from: line.from, to: line.to, insert: "\n" },
+            selection: EditorSelection.cursor(line.from + 1),
+            effects: setDialogueBlock.of({ active: false, casing: "mixed" }),
+            scrollIntoView: true
+        });
+        return true;
+    }
+
     if (blk.active)
     {
         const insertText = "\n    ";
@@ -199,6 +262,102 @@ function handleEnter(view)
         view.dispatch({
             changes: { from: line.to, insert: insertText },
             selection: EditorSelection.cursor(line.to + insertText.length),
+            scrollIntoView: true
+        });
+        return true;
+    }
+
+    // 3b. Action-line `Page X` / `Page X SOMETHING` promote-to-new-page
+    //     (mangaplay-only). The user is editing inside an existing card
+    //     and types e.g. `Page 2 EXT. KITCHEN - DAY` then Enter. The
+    //     in-place split:
+    //       1. Replace the typed line with `# Page <text>\n\nPanel 1`.
+    //       2. Everything BELOW the original line stays where it is —
+    //          naturally falling under the new heading because the
+    //          page-region parser sees the next `# Page` and starts a
+    //          new region there.
+    //       3. The previous card ends where the typed line used to be;
+    //          any blank rows directly above the typed line are kept as
+    //          the previous card's trailing space.
+    //     Cursor drops at the end of the freshly inserted `Panel 1`.
+    //
+    //     The previous-line is checked so we ALWAYS emit a blank row
+    //     ahead of the new heading — without it the page-region walker
+    //     has no row to convert into the 14px inter-card gutter, and
+    //     the two cards render visually flush.
+    const PROMOTE_PAGE_RE = /^Page\s+(\S.*)$/i;
+    const pagePromoteMatch = line.text.match(PROMOTE_PAGE_RE);
+    if (_format === "mangaplay"
+        && pagePromoteMatch
+        && !isPageLine(line.text)
+        && !/^# /.test(line.text))
+    {
+        // Canonicalise leading "Page" word casing (PAGE / page → Page).
+        const tail = pagePromoteMatch[1];
+        const newHeading = `# Page ${tail}`;
+
+        // If the line ABOVE the typed `Page X` is non-blank, the doc
+        // looks like `Action\nPage 2` — replacing in-place would emit
+        // `Action\n# Page 2…` (no blank between them, no gutter). Pad
+        // with a leading newline so the result becomes
+        // `Action\n\n# Page 2…` — one blank, one gutter row.
+        let leadingBlank = "";
+        if (line.number > 1
+            && state.doc.line(line.number - 1).text.trim() !== "")
+        {
+            leadingBlank = "\n";
+        }
+        const insertText = `${leadingBlank}${newHeading}\n\nPanel 1`;
+
+        view.dispatch({
+            changes: { from: line.from, to: line.to, insert: insertText },
+            selection: EditorSelection.cursor(line.from + insertText.length),
+            scrollIntoView: true
+        });
+        return true;
+    }
+
+    // 3c. Action-line `Panel X` / `panel X` / `PANEL X` normalise-to-Panel.
+    //     The user typed e.g. `panel 2` as an action line and pressed Enter
+    //     — fix the casing then run the same blank-action insert branch 8
+    //     would do for a canonical `Panel N` line. Only fires when the
+    //     line is NOT already canonical (branch 8 handles those).
+    const PROMOTE_PANEL_RE = /^(panel|PANEL)\s+(\d+)(.*)$/;
+    const panelPromoteMatch = line.text.match(PROMOTE_PANEL_RE);
+    if (_format === "mangaplay" && panelPromoteMatch && !isPanelLine(line.text))
+    {
+        const num = panelPromoteMatch[2];
+        const rest = panelPromoteMatch[3] || "";
+        const normalized = `Panel ${num}${rest}`;
+        const insertText = `${normalized}\n\n`;
+        view.dispatch({
+            changes: { from: line.from, to: line.to, insert: insertText },
+            selection: EditorSelection.cursor(line.from + insertText.length),
+            scrollIntoView: true
+        });
+        return true;
+    }
+
+    // 3d. ALL-CAPS column-0 line + Enter → promote to CHARACTER cue and
+    //     drop into dialogue mode. The user types `DOROTHY` (or
+    //     `THE MACHINE (O.S.)`) as a column-0 action line; hitting
+    //     Enter normalises the line to `    DOROTHY\n    ` (4-space cue
+    //     indent + 4-space dialogue indent ready to type into) and
+    //     activates the dialogue-block state field so subsequent Enters
+    //     keep dropping indented dialogue rows. Only fires for mangaplay
+    //     and only when the cue is exactly at column 0 (so we don't
+    //     re-promote an already-indented line).
+    if (_format === "mangaplay"
+        && isCueShape(line.text)
+        && line.text.length > 0
+        && !line.text.startsWith(" ")
+        && head === line.to)
+    {
+        const insertText = `    ${line.text}\n    `;
+        view.dispatch({
+            changes: { from: line.from, to: line.to, insert: insertText },
+            selection: EditorSelection.cursor(line.from + insertText.length),
+            effects: setDialogueBlock.of({ active: true, casing: "mixed" }),
             scrollIntoView: true
         });
         return true;
@@ -611,8 +770,9 @@ function handleStar(view)
  *
  * @returns {import("@codemirror/state").Extension[]}
  */
-export function editorTypingAutos()
+export function editorTypingAutos(format = "mangaplay")
 {
+    _format = format;
     return [
         dialogueBlock,
         upperCaseFilter,

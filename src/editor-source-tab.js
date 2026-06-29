@@ -88,8 +88,6 @@ function indentLines(view)
     // Expand the selection to cover every newly-inserted unit so subsequent
     // Tab presses keep all the lines selected (VSCode behaviour).
     const insertedTotal = unitLen * changes.length;
-    const newAnchor = sel.anchor + (sel.anchor === sel.from ? 0 : insertedTotal);
-    const newHead = sel.head + (sel.head === sel.from ? 0 : insertedTotal);
 
     view.dispatch({
         changes,
@@ -99,13 +97,6 @@ function indentLines(view)
         ),
         scrollIntoView: true
     });
-    // Note: we replace the selection bookkeeping with a simpler "select
-    // every touched line" range because precise shift bookkeeping with
-    // partial-line selections is brittle. Callers expect the selection to
-    // grow with the inserted text — that's what VSCode does.
-    // (The unused `newAnchor`/`newHead` locals stay above as a reference
-    // for the alternative behaviour if we change our minds later.)
-    void newAnchor; void newHead;
     return true;
 }
 

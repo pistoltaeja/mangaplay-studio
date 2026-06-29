@@ -1,7 +1,7 @@
 // @ts-check
 /**
  * editor-fold-persistence.js — read/write per-project page-fold state to
- * `<projectDir>/mangaplay_settings/fold-state.json`.
+ * `<projectDir>/_mangaplaystudio/settings/fold-state.json`.
  *
  * The `.mangaplay.md` source file is never mutated. Fold state is purely a
  * desktop-app view concern, stored in a side-channel JSON file.
@@ -26,7 +26,10 @@
 
 import { Prec } from "@codemirror/state";
 import { EditorView, ViewPlugin } from "@codemirror/view";
-import { foldedRanges, foldCode } from "@codemirror/language";
+import { foldCode } from "@codemirror/language";
+import { PAGE_LINE_RE } from "./editor-line-regexes.js";
+import { isPageFolded } from "./editor-page-fold.js";
+import { isTauri } from "./util/is-tauri.js";
 
 /** Posix-style path join — `project.js` consistently uses forward slashes
  *  for invoke arguments, including on Windows. */
@@ -58,15 +61,15 @@ function getActiveProjectDir()
  */
 function foldStatePath(projectDir)
 {
-    return joinPath(projectDir, "mangaplay_settings", "fold-state.json");
+    return joinPath(projectDir, "_mangaplaystudio", "settings", "fold-state.json");
 }
 
-/** Tauri invoke shim. Mirrors project.js — call window.__TAURI__.core.invoke. */
+/** Tauri invoke shim. Mirrors project.js — call @tauri-apps/api/core invoke. */
 async function tauriInvoke(cmd, args)
 {
-    const w = /** @type {any} */ (window);
-    if (!w.__TAURI__ || !w.__TAURI__.core) throw new Error("Tauri unavailable");
-    return w.__TAURI__.core.invoke(cmd, args);
+    if (!isTauri()) throw new Error("Tauri unavailable");
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke(cmd, args);
 }
 
 /**
@@ -116,11 +119,6 @@ async function writeFoldState(projectDir, foldedPages)
     }
 }
 
-/**
- * Match line text to the page-heading regex used by editor-page-fold.js.
- * Kept in sync with that file's PAGE_LINE_RE — same regex shape.
- */
-const PAGE_LINE_RE = /^# [Pp][Aa][Gg][Ee]\b/;
 
 /**
  * Walk the doc and return a Map from page number (1-based ordinal of page
@@ -156,21 +154,10 @@ function listPageLines(state)
  */
 function currentlyFoldedOrdinals(state)
 {
-    const folded = foldedRanges(state);
     const result = [];
     for (const { ordinal, line } of listPageLines(state))
     {
-        let isFolded = false;
-        folded.between(line.from, line.to + 2, (rangeFrom) =>
-        {
-            if (rangeFrom >= line.to)
-            {
-                isFolded = true;
-                return false;
-            }
-            return undefined;
-        });
-        if (isFolded) result.push(ordinal);
+        if (isPageFolded(state, line)) result.push(ordinal);
     }
     return result;
 }

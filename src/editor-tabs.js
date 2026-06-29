@@ -23,21 +23,7 @@
 import { stripFormatExtensions } from "./lang-registry.js";
 import { icon } from "./icons.js";
 import { t } from "./adapters/tauri-i18n.js";
-
-/**
- * Escape a string for safe insertion into an HTML attribute or text node.
- * @param {string} s
- * @returns {string}
- */
-function escapeHtml(s)
-{
-    return String(s)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#39;");
-}
+import { escapeHtml } from "./util/escape-html.js";
 
 /**
  * Resolve the label for a slot. Untitled scratch tabs (no path, empty

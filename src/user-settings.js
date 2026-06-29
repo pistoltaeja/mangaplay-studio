@@ -20,12 +20,13 @@
  * In-memory cache so reads after the first call are sync via getSetting().
  */
 
+import { isTauri } from "./util/is-tauri.js";
+
 /** Tauri invoke helper — falls back to a stub outside Tauri so jsdom tests
- *  can import this module without window.__TAURI__ being present. */
+ *  can import this module without the Tauri runtime being present. */
 async function invoke(cmd, args)
 {
-    const t = /** @type {any} */ (globalThis.window || globalThis).__TAURI__;
-    if (!t || !t.core || typeof t.core.invoke !== "function")
+    if (!isTauri())
     {
         // Mirror the default shape so callers get sensible behaviour even
         // when running headless. Save is a no-op; load returns defaults.
@@ -37,13 +38,16 @@ async function invoke(cmd, args)
                 appVersionCreated: "0.0.0",
                 lastProjectPath: null,
                 lastSettingsTab: "general",
+                spellcheckEnabled: true,
+                spellcheckLanguage: null,
             };
         }
         if (cmd === "user_settings_save") return undefined;
         if (cmd === "path_exists") return false;
         throw new Error("Tauri unavailable");
     }
-    return t.core.invoke(cmd, args);
+    const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
+    return tauriInvoke(cmd, args);
 }
 
 let cache = /** @type {Record<string, any> | null} */ (null);
@@ -103,6 +107,26 @@ export async function pathExists(path)
     if (!path) return false;
     try { return await invoke("path_exists", { path }); }
     catch { return false; }
+}
+
+/**
+ * One-time seed for the `spellcheckLanguage` key. If the persisted value
+ * is null (new user OR existing user on first upgrade), runs the system-
+ * locale detector and writes the result. Subsequent calls return the
+ * cached value without touching the detector again.
+ * @returns {Promise<string>}
+ */
+export async function ensureSpellcheckSeed()
+{
+    await loadUserSettings();
+    const cur = cache && cache.spellcheckLanguage;
+    if (cur) return cur;
+    const { detectSystemSpellcheckLocale } = await import("./system-locale-detector.js");
+    let detected = "en-US";
+    try { detected = await detectSystemSpellcheckLocale(); }
+    catch (_) { /* keep en-US fallback */ }
+    await saveUserSettings({ spellcheckLanguage: detected });
+    return detected;
 }
 
 /** Reset cache — only used by tests. */

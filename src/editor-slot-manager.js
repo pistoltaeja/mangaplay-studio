@@ -16,7 +16,7 @@
  */
 
 import { buildEditor } from "./mps-editor.js";
-import { formatForFilename, stripFormatExtensions } from "./lang-registry.js";
+import { formatForFilename } from "./lang-registry.js";
 
 /**
  * @typedef {object} EditorSlot
@@ -365,8 +365,7 @@ export class EditorSlotManager
 
     /**
      * Snapshot for session persistence. Scratch tabs (path === null) are
-     * persisted as placeholders only — body is not stored (locked decision
-     * #8 in the plan).
+     * persisted as placeholders only — body is not stored.
      * @returns {{ openTabs: Array<{ id: string, path: string|null }>, activeTabId: string|null }}
      */
     serialize()
@@ -377,6 +376,3 @@ export class EditorSlotManager
         };
     }
 }
-
-// Re-export for callers that want the label helper alongside the manager.
-export { stripFormatExtensions };

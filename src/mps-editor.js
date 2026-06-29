@@ -11,6 +11,9 @@ import { editorCut, editorCopy, editorPaste, editorPastePlain } from "./editor-c
 import { t } from "./adapters/tauri-i18n.js";
 import { formatForFilename, languageExtensionsFor } from "./lang-registry.js";
 import { editorSourceTab } from "./editor-source-tab.js";
+import { getSpellcheckState, getSpellcheckConfig } from "./spellcheck-state.js";
+import { combinedLinter } from "./combined-linter.js";
+import { forceLinting } from "@codemirror/lint";
 
 /**
  * @typedef {"source"|"text"|"visual"} EditorMode
@@ -50,6 +53,12 @@ function extensionsForMode(mode, format)
         // navigation matches what users expect from a text editor — left
         // out and Tab falls through to the browser default (focus shift).
         //
+        // Lint diagnostics ARE enabled for mangaplay / fountain / superscript
+        // formats via combinedLinter() — Source mode still wants parser
+        // grammar squiggles (WARN_PAGE_LOWERCASE, EDITOR_PAGE_OUT_OF_ORDER,
+        // EDITOR_UNKNOWN_PANEL_TAG, etc). general-text and superscript-bin
+        // skip the linter — there's no parser grammar to surface.
+        //
         // drawSelection() is intentionally NOT included here — Source
         // mode uses the browser-native selection so the highlight paints
         // reliably under WebView2 (the CM6 selection layer fails to
@@ -57,7 +66,49 @@ function extensionsForMode(mode, format)
         // `::selection { background-color: transparent !important }` on
         // .cm-line, which would suppress any native selection styling we
         // add via CSS, so it must be omitted, not just visually hidden.
-        return editorSourceTab();
+        // Source mode opts in to WebView2 native spellcheck via the
+        // contenteditable's `spellcheck` + `lang` attributes. The
+        // contentDOM is the editable surface so contentAttributes hits the
+        // right element.
+        //
+        // Three subtleties:
+        //   1. The facet uses the function form so CM6 re-reads on every
+        //      update — toggle flips propagate without a Compartment swap.
+        //   2. `lang` is set alongside `spellcheck` so Chromium picks the
+        //      right dictionary. Without it the WebView falls back to
+        //      <html lang>, which is the UI locale, not what the user
+        //      chose in the Text Editor settings.
+        //   3. We rely on the facet, but ALSO set the attribute imperatively
+        //      after mount (see buildEditor → applySpellcheckAttrs). Some
+        //      WebView2 builds latch their spellcheck decision on first
+        //      paint from the attribute value present at that moment;
+        //      if the state was seeded after the view mounted, the facet
+        //      eventually wins but the squiggle paint never wakes up.
+        const ext = [
+            editorSourceTab(),
+            EditorView.contentAttributes.of(() =>
+            {
+                const s = getSpellcheckState();
+                if (!s.enabled) return null;
+                return { spellcheck: "true", lang: spellcheckHtmlLang(s.language) };
+            }),
+            // CM6's baseTheme sets `-webkit-user-modify: read-write-plaintext-only`
+            // on contenteditable .cm-content as a paste-safety measure. Chromium
+            // (and therefore WebView2) explicitly disables the native spellchecker
+            // on any element with that property set to plaintext-only — it can't
+            // safely insert correction markup there. Override it back to the
+            // standard `read-write` so squiggles paint. Paste safety is unaffected
+            // because our editorPaste / editorPastePlain handlers already
+            // intercept and sanitise paste at the keymap layer.
+            EditorView.theme({
+                ".cm-content": { WebkitUserModify: "read-write" }
+            })
+        ];
+        if (format === "mangaplay" || format === "fountain" || format === "superscript")
+        {
+            ext.push(combinedLinter(getSpellcheckConfig, format));
+        }
+        return ext;
     }
     // "text" (the default) and "visual" (CM not visible but state survives)
     // get the full mangaplay surface. drawSelection() is omitted across
@@ -128,7 +179,110 @@ export function buildEditor(parent, opts = {}) {
     /** @type {any} */ (window).__mpsActiveEditorView = view;
     /** @type {any} */ (window).__mpsBuildEditorMenu = () => buildEditorMenu(view);
 
+    activeViews.add(view);
+
+    // Belt-and-braces: set the attribute imperatively on first mount so
+    // WebView2 sees `spellcheck="true"` at first paint, not a brief flash
+    // of CM6's hardcoded `"false"` default. The facet wins on subsequent
+    // updates; this just prevents the boot race.
+    applySpellcheckAttrs(view);
+
     return view;
+}
+
+/**
+ * Map a spellcheck language code to the BCP-47 value the WebView2
+ * spellchecker expects in `lang=`. Identity for everything except the
+ * three single-tag codes we accept (which already match BCP-47).
+ * @param {string | null | undefined} code
+ * @returns {string}
+ */
+function spellcheckHtmlLang(code)
+{
+    if (!code) return "en-US";
+    return String(code);
+}
+
+/**
+ * Push the live spellcheck state onto a view's contentDOM directly.
+ * Idempotent — called from buildEditor (initial mount) and from
+ * applySpellcheckToAllViews (toggle / language change).
+ * @param {EditorView} view
+ */
+function applySpellcheckAttrs(view)
+{
+    try
+    {
+        const dom = view.contentDOM;
+        if (!dom) return;
+        const s = getSpellcheckState();
+        if (s.enabled)
+        {
+            dom.setAttribute("spellcheck", "true");
+            dom.setAttribute("lang", spellcheckHtmlLang(s.language));
+        }
+        else
+        {
+            dom.setAttribute("spellcheck", "false");
+            dom.removeAttribute("lang");
+        }
+    }
+    catch (_) { /* view detached or DOM not ready */ }
+}
+
+/**
+ * Track live EditorView instances so settings-modal can reconfigure them
+ * when the spellcheck toggle or language changes. For v1 there's one
+ * editor at a time per the buildEditor comment, but a Set keeps us honest
+ * if that changes.
+ * @type {Set<EditorView>}
+ */
+const activeViews = new Set();
+
+/**
+ * Reconfigure every live EditorView's language compartment so the new
+ * spellcheck state takes effect immediately. Source-mode views pick up
+ * the new `spellcheck` content attribute on the same dispatch. Visual
+ * editors in the DOM get the toggle pushed onto their editable fields
+ * via the component's `applySpellcheckState` method.
+ */
+export function applySpellcheckToAllViews()
+{
+    const enabled = getSpellcheckState().enabled;
+
+    for (const v of activeViews)
+    {
+        const compartment = /** @type {Compartment|null} */ (
+            /** @type {any} */ (v).__mpsLanguageCompartment
+        );
+        if (!compartment) continue;
+        const format = /** @type {any} */ (v).__mpsFormat || "mangaplay";
+        const effective = currentEditorMode === "visual" ? "text" : currentEditorMode;
+        try
+        {
+            v.dispatch({ effects: compartment.reconfigure(extensionsForMode(effective, format)) });
+        }
+        catch (_) { /* view detached; skip */ }
+
+        // Imperative attribute write to defeat WebView2's first-paint
+        // latching. The facet would catch up on the next update, but if
+        // we're toggling OFF→ON we want squiggles immediately.
+        applySpellcheckAttrs(v);
+    }
+
+    if (typeof document !== "undefined")
+    {
+        const visuals = document.querySelectorAll("mps-visual-editor");
+        for (const el of visuals)
+        {
+            const fn = /** @type {any} */ (el).applySpellcheckState;
+            if (typeof fn === "function")
+            {
+                try { fn.call(el, enabled); }
+                catch (_) { /* ignore */ }
+            }
+        }
+    }
 }
 
 /**
@@ -151,6 +305,13 @@ export function setEditorViewMode(view, mode)
     view.dispatch({
         effects: compartment.reconfigure(extensionsForMode(effective, format))
     });
+    // Force the linter to schedule against the newly-installed
+    // extensions. Without this the lint stays stale (or empty) until the
+    // next docChanged — which after Visual round-trips can be seconds
+    // away. forceLinting arms CM6's lint timer immediately; the linter's
+    // configured 250ms delay still throttles the actual run.
+    try { forceLinting(view); }
+    catch (_) { /* mode/format has no linter — fine */ }
 }
 
 /**

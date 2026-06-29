@@ -52,8 +52,33 @@
     --mps-primary-hover: #409cff;
 
     /* --window-controls-inset removed.
-       Consumers now read --tauri-frame-controls-width (auto-injected on :root by
-       tauri-plugin-frame) with a 138px fallback for the pre-injection frame. */
+       Consumers now read --tauri-frame-controls-width (defined on :root in app.css,
+       138px = three 46px buttons matching the in-flow #window-controls block). */
+
+    /* === Website-shared tokens — override in dark mode =================
+     * The website's theme.css declares these for white-background contexts;
+     * the desktop dark theme needs them remapped so the surfaces match the
+     * editor / panel palette.
+     *   --mps-editor-bg       drives .editor-area-top-bar background
+     *                         (and the visual-editor surface). Must match
+     *                         the CM6 editor body (#1e1e1e) so the top bar
+     *                         reads as part of the editor, not a white strip.
+     *   --mps-screenplay-paper drives mps-screenplay .screenplay-content
+     *                         background. User-requested #262626.
+     *   --mps-screenplay-ink   drives screenplay body text colour. Must be
+     *                         white on the dark paper.
+     *   --mps-screenplay-ink-muted drives subdued screenplay text (scene
+     *                         numbers, parentheticals) — lighten enough to
+     *                         stay readable on the dark paper.
+     *
+     * --mps-page-bg is deliberately NOT overridden — the storyboard canvas
+     * page (the artist's drawing surface) stays white in dark mode. The
+     * desk AROUND the page (the mps-canvas host background) is darkened
+     * via the app.css override below, not via this token. */
+    --mps-editor-bg:           #1e1e1e;
+    --mps-screenplay-paper:    var(--grey-dark);
+    --mps-screenplay-ink:      #ffffff;
+    --mps-screenplay-ink-muted: #c0c0c0;
 }
 
 html[data-theme="dark"]

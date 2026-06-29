@@ -65,5 +65,3 @@ const mangaplayLanguage = LRLanguage.define({
 export function mangaplay() {
     return new LanguageSupport(mangaplayLanguage);
 }
-
-export { mangaplayLanguage };

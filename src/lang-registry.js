@@ -11,7 +11,7 @@
 import { mangaplay } from "./codemirror-lang-mangaplay.js";
 import { fountain } from "./codemirror-lang-fountain.js";
 import { mangaplayHighlighting } from "./mangaplay-highlight.js";
-import { editorLinter } from "./editor-linter.js";
+import { combinedLinter, lazySpellcheckLinter } from "./combined-linter.js";
 import { editorSnippets } from "./editor-snippets.js";
 import { editorTypingAutos } from "./editor-typing-autos.js";
 import { editorPageFold } from "./editor-page-fold.js";
@@ -19,6 +19,13 @@ import { editorFoldPersistence } from "./editor-fold-persistence.js";
 import { editorLineIndent } from "./editor-line-indent.js";
 import { editorPanelTagStyle } from "./editor-panel-tag-style.js";
 import { editorPageRegion } from "./editor-page-region.js";
+import { editorMetaRegion } from "./editor-meta-region.js";
+import { getSpellcheckConfig } from "./spellcheck-state.js";
+// spellcheck-linter.js / harper-linter.js / harper.js are deliberately NOT
+// imported here — combinedLinter() and lazySpellcheckLinter() both
+// dynamic-import them inside the lint callback. The Fountain branch uses
+// lazySpellcheckLinter (spell-only, no parser warnings — Fountain isn't
+// .mangaplay), the Mangaplay branch uses combinedLinter (parser + spell).
 
 /**
  * @typedef {"mangaplay" | "fountain" | "superscript" | "superscript-bin" | "general-text"} EditorFormat
@@ -65,24 +72,21 @@ export function languageExtensionsFor(format)
     }
     if (format === "fountain")
     {
-        return [fountain(), mangaplayHighlighting()];
+        return [fountain(), mangaplayHighlighting(), lazySpellcheckLinter(getSpellcheckConfig)];
     }
     // mangaplay + superscript share the Mangaplay grammar + highlight today.
-    // editorSnippets() bundles the `#` page snippet AND the character/vocab
-    // autocomplete that used to live in mangaplayAutocomplete() — they share
-    // a single autocompletion() config because CM6's `override` facet only
-    // honours the last-applied value.
     return [
         mangaplay(),
         mangaplayHighlighting(),
         editorSnippets(),
-        editorLinter(),
-        ...editorTypingAutos(),
+        combinedLinter(getSpellcheckConfig, format),
+        ...editorTypingAutos(format),
         ...editorPageFold(),
         editorFoldPersistence(),
         ...editorLineIndent(),
         ...editorPanelTagStyle(),
-        ...editorPageRegion()
+        ...editorPageRegion(),
+        ...editorMetaRegion()
     ];
 }
 

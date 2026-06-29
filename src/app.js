@@ -5,15 +5,55 @@
  * FSM: booting → probing → loading-recent → start-screen/empty → opening-project → mounting-views → ready
  */
 
+import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+
+// withGlobalTauri = false in tauri.conf.json, so the legacy `window.__TAURI__`
+// helper object is gone. The internals marker `__TAURI_INTERNALS__` stays
+// regardless — use it as the boolean "are we inside the .exe?" probe.
+import { isTauri } from "./util/is-tauri.js";
+
 import { EditorSlotManager } from "./editor-slot-manager.js";
 import { mountEditorTabs } from "./editor-tabs.js";
 import { mountEmptyTabCta } from "./empty-tab-cta.js";
-import { buildScreenplay, updateScreenplay } from "./mps-screenplay.js";
+import { mountRightPaneEmpty } from "./right-pane-empty.js";
+// Side-import — registers customElements.define('mps-screenplay', MPSScreenplay).
+// The website component reads from RuntimeStorage; no imperative driver needed.
+import "../../websites/mangaplay.studio/src/components/mps-screenplay.js";
 import { initCanvas } from "./mps-canvas.js";
-import { openProject, saveScript, saveMeta, loadMangaart, saveMangaart, updateMangaartPage, clearMangaartCache, getMangaartCache, loadRecent, updateRecent, removeRecent, pickProjectFolder, createNewProject, createUntitled, debouncedSave, listProjectScripts, listProjectTree, readFile, getLastPageIndex, setLastPageIndex, getTabSnapshot, setTabSnapshot, LayoutLegacyError, MigrationCrashedError } from "./project.js";
+import { openProject, saveScript, saveMeta, loadMangaart, saveMangaart, updateMangaartPage, clearMangaartCache, getMangaartCache, loadRecent, updateRecent, removeRecent, pickProjectFolder, createNewProject, createUntitled, debouncedSave, listProjectScripts, listProjectTree, readFile, getLastPageIndex, setLastPageIndex, getTabSnapshot, setTabSnapshot } from "./project.js";
 import { getBroker } from "./active-script-broker.js";
-import { showMigrationModal } from "./migration-modal.js";
 import { showBanner } from "./toast.js";
+import {
+    hasFixableIssues,
+    fixIssues,
+    setMangaplayTargetConvention,
+} from "./structural-fixer.js";
+import {
+    PersistentStorage as _StructuralFixerStorage,
+    STORAGE_KEYS as _StructuralFixerKeys,
+} from "./adapters/tauri-storage.js";
+
+/**
+ * Read the user's preferred indent convention from manga_settings and
+ * push it into the fixer module. Called from both the click handler and
+ * the disabled-state refresh hook so the setting takes effect immediately
+ * after the user changes it without needing a relaunch.
+ */
+function syncStructuralFixerConvention()
+{
+    try
+    {
+        const settings = _StructuralFixerStorage.get(
+            _StructuralFixerKeys.MANGA_SETTINGS, {}) || {};
+        const want = settings.structuralFixTargetConvention;
+        if (want === "A" || want === "B" || want === "C")
+        {
+            setMangaplayTargetConvention(want);
+        }
+    }
+    catch (_) { /* fall back to module default */ }
+}
 import { parseScript, parseFountain, parseSuperscript } from "@mangaplay-studio/core";
 import { formatForFilename } from "./lang-registry.js";
 import { getRuntimeStorage } from "@mangaplay-studio/core/state";
@@ -32,8 +72,28 @@ import {
     applyMetaBeforeFirstPaint,
 } from "./shell-restore.js";
 import { openSettingsModal } from "./settings-modal.js";
-import { loadUserSettings, saveUserSettings, getUserSetting, getLastProjectPathInvalid } from "./user-settings.js";
+import { openHelpModal } from "./help-modal.js";
+import {
+    mountGoogleDocsFooter,
+    setActiveScript as setGoogleDocsActiveScript,
+    notifyEdit as notifyGoogleDocsEdit,
+    destroyGoogleDocsFooter,
+    getGoogleDocsGearClickHandler,
+    refreshActiveScript as refreshGoogleDocsActiveScript
+} from "./google-docs-sync/footer-bootstrap.js";
+import { getAccessToken, getCurrentProfile } from "./auth/google-oauth.js";
+import { uuid as generateUuid } from "./google-docs-sync/uuid.js";
+import { mountAppFooter } from "./app-footer.js";
+import { loadUserSettings, saveUserSettings, getUserSetting, getLastProjectPathInvalid, ensureSpellcheckSeed, pathExists } from "./user-settings.js";
+import { isMobileLike, isStandalone, isMobile, getUxMode, setActivePane } from "./ux-mode.js";
+import { transition as fsmTransition, STATES, subscribe as fsmSubscribe } from "./state-machine.js";
+import { reportError } from "./error-router.js";
+import { initIap, initAnalytics, initAccount } from "./boot-placeholders.js";
+import { hasWindowChrome } from "./adapters/platform-capabilities.js";
+import { wireWindowControls } from "./window-controls.js";
+import { setSpellcheckState } from "./spellcheck-state.js";
 import { normalizePath, initPathHelpers } from "./util/paths.js";
+import { basename } from "./util/basename.js";
 import { applyColorScheme } from "./theme.js";
 import { applyScreenplayFont, applyEditorFont } from "./font-prefs.js";
 import { initialise as initI18n, getLanguage, t, subscribe as subscribeI18n } from "./adapters/tauri-i18n.js";
@@ -42,13 +102,114 @@ import { wireTooltipI18nLiveUpdates } from "./tooltip-i18n.js";
 import { shouldAutoResume, renameProject, renameFolder, moveFolder, revealInExplorer } from "./project.js";
 // Side-effect imports: register web components.
 import "./components/mps-lang-select.js";
-import "./components/mps-picker-shell.js";
+// `mps-picker-shell` is lazy-imported inside the standalone branch of boot()
+// — review item #1. Phase 2 DCE can then drop the picker bundle entirely
+// from mobile builds. The picker-shell DOM element is NOT in index.html
+// anymore; standalone boot() creates it via document.createElement after
+// the dynamic import resolves.
 // Register `<mps-visual-editor>` and the three-state mode toggle. Both are
 // side-effect imports — the files self-register via `customElements.define`.
 import "./components/mps-visual-editor.js";
 import "./components/mps-editor-mode-toggle.js";
 import { setEditorViewMode, setEditorMode } from "./mps-editor.js";
 import { formatScript as visualFormatScript } from "./services/format-script.js";
+import { EditorView } from "@codemirror/view";
+import { mountOutline } from "./left-pane-outline.js";
+import { mountStatistics } from "./left-pane-statistics.js";
+
+/** @type {string|null} */
+let _cachedClientId = null;
+
+/**
+ * Per-install UUID stored in user-settings.json. Used as `mpsClientId` on
+ * Google Docs sync locks so concurrent writers can be distinguished.
+ * @returns {string}
+ */
+function getOrCreateClientId()
+{
+    if (_cachedClientId) return _cachedClientId;
+    let id = getUserSetting("mpsClientId", null);
+    if (!id || typeof id !== "string")
+    {
+        id = generateUuid();
+        try { saveUserSettings({ mpsClientId: id }); } catch (_) { /* best-effort */ }
+    }
+    _cachedClientId = id;
+    return id;
+}
+
+// Tests need a way to drive Tauri APIs from the CDP eval context, where
+// bare module specifiers ("@tauri-apps/api/window") don't resolve and
+// withGlobalTauri=false means window.__TAURI__ is undefined. Expose the
+// pieces the smoke suite actually uses.
+if (typeof window !== "undefined")
+{
+    window.__mpsTest = {
+        getCurrentWindow,
+        invoke: (cmd, args) => window.__TAURI_INTERNALS__.invoke(cmd, args),
+    };
+}
+
+// ── Release-only browser-shortcut guard ──
+//
+// `__MPS_RELEASE_KEY_GUARD__` is a compile-time constant substituted by
+// `scripts/build-bundle.js`'s Bun.build `define` map: `true` for the
+// minified release bundle, `false` for the dev bundle. The minifier
+// dead-code-eliminates the entire block in release when the substitution
+// folds the condition; in dev the substituted `false` skips the listener
+// at runtime so caveman keeps F5 reload, F7 caret browsing, etc.
+//
+// Block list intentionally OMITS F12 / Ctrl+Shift+I / Ctrl+Shift+J — those
+// are handled at the WebView2 layer by the cargo `devtools` feature gate
+// (DevTools is physically unavailable in release builds).
+//
+// Threat model: "user accidentally hits F5 mid-edit and loses unsaved
+// work", NOT adversarial. The JS handler is bypassable by anyone with the
+// .exe; that's an acknowledged tradeoff documented in the release-
+// hardening plan. Real upstream fix requires Tauri to expose
+// `browser_accelerator_keys` on `WebviewWindowBuilder` (tracked as a
+// follow-up).
+//
+// Capture phase + early install (top of boot path, before any user
+// interaction) so other listeners can't preventDefault first and let the
+// browser default fire.
+//
+// `__MPS_RELEASE_KEY_GUARD__` is a bare-identifier compile-time constant
+// injected by Bun.build's `define`. The ts-check pragma at the top of the
+// file doesn't know about it; silence with a one-line ignore.
+// @ts-ignore __MPS_RELEASE_KEY_GUARD__ injected by build-bundle.js define
+if (__MPS_RELEASE_KEY_GUARD__)
+{
+    window.addEventListener('keydown', (e) =>
+    {
+        const k = e.key;
+        const ctrl = e.ctrlKey || e.metaKey;
+        const blocked =
+            k === 'F5' || k === 'F7' || k === 'F11' ||
+            (ctrl && (k === 'r' || k === 'R' || k === 'u' || k === 'U'));
+        if (blocked)
+        {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+    }, { capture: true });
+}
+
+// export-screenplay-modal pulls in @mangaplay-studio/core/export (jszip,
+// pdf-lib font resolvers, etc.). Lazy-imported on first menu open so the
+// boot chunk stays free of export-only deps. Cached as a module-level
+// promise so repeat opens reuse the chunk.
+/** @type {Promise<typeof import("./export-screenplay-modal.js")>|null} */
+let exportScreenplayModalPromise = null;
+async function openExportScreenplayModal(opts)
+{
+    if (!exportScreenplayModalPromise)
+    {
+        exportScreenplayModalPromise = import("./export-screenplay-modal.js");
+    }
+    const mod = await exportScreenplayModalPromise;
+    return mod.openExportScreenplayModal(opts);
+}
 
 // ── State messages ──
 /**
@@ -79,6 +240,15 @@ let currentState = "booting";
 let bootStartedAt = performance.now();
 const MIN_DISPLAY_MS = 400;
 
+// Benchmark instrumentation — populated by markBench() at key boot/init points.
+// Read by tests/driver/benchmark-smoke.js via Runtime.evaluate. No-op outside
+// dev tests (the ledger is tiny and writes are O(1)).
+/** @type {Record<string, number>} */
+const bench = { bootStartedAt };
+/** @type {any} */ (window).__mpsBenchmark = bench;
+function markBench(label) { bench[label] = performance.now(); }
+markBench("scriptParsed");
+
 /** @type {import("./editor-slot-manager.js").EditorSlotManager | null} */
 let slotManager = null;
 
@@ -87,6 +257,71 @@ let editorTabs = null;
 
 /** @type {ReturnType<typeof import("./empty-tab-cta.js").mountEmptyTabCta> | null} */
 let emptyTabCta = null;
+
+/** @type {ReturnType<typeof import("./right-pane-empty.js").mountRightPaneEmpty> | null} */
+let rightPaneEmpty = null;
+
+/**
+ * Track whether the current active slot is the path-null placeholder.
+ * Updated by onSlotActivated; consumed by recomputeRightPaneEmpty() so the
+ * parse-time hook (publishParsedScript) doesn't have to reach into the slot
+ * manager itself.
+ */
+let activeSlotIsPlaceholder = true;
+
+/**
+ * Format of the active slot. Drives the "screenplay not supported" overlay
+ * and the right-pane toggle guard. Updated by onSlotActivated.
+ * @type {import("./lang-registry.js").EditorFormat}
+ */
+let activeFormat = "mangaplay";
+
+/**
+ * True when `format` has a screenplay surface (mangaplay / fountain /
+ * superscript). Plain text and binary .sup don't.
+ * @param {import("./lang-registry.js").EditorFormat} format
+ */
+function formatSupportsScreenplay(format)
+{
+    return format === "mangaplay" || format === "fountain" || format === "superscript";
+}
+
+/**
+ * Recompute the right-pane empty-state overlays + paint-widget dim state.
+ * Called from onSlotActivated (when the active tab changes) and from
+ * publishParsedScript (when the parsed AST changes — i.e. text edits).
+ * @param {{ scenesCount?: number } | null} parsedHint
+ */
+function recomputeRightPaneEmpty(parsedHint)
+{
+    if (!rightPaneEmpty) return;
+    const noDoc = activeSlotIsPlaceholder === true;
+    let noScreenplay = false;
+    let unsupportedScreenplayForFormat = false;
+    if (!noDoc)
+    {
+        // Plain text / binary .sup have no screenplay surface — show a
+        // dedicated message when the user is on the screenplay side of the
+        // slider for one of these formats.
+        unsupportedScreenplayForFormat = !formatSupportsScreenplay(activeFormat);
+        if (!unsupportedScreenplayForFormat)
+        {
+            // Use the parsed scenes count if the caller passed one; otherwise
+            // derive an emptiness heuristic from currentDoc directly. The hint
+            // path is preferred because the parser already knows about boneyards
+            // and title-page noise that would otherwise mark the doc as non-empty.
+            if (parsedHint && typeof parsedHint.scenesCount === "number")
+            {
+                noScreenplay = parsedHint.scenesCount === 0;
+            }
+            else
+            {
+                noScreenplay = currentDoc.trim().length === 0;
+            }
+        }
+    }
+    rightPaneEmpty.update({ noDoc, noScreenplay, unsupportedScreenplayForFormat });
+}
 
 /**
  * Backward-compat accessor: returns the active slot's CodeMirror view, or
@@ -98,12 +333,40 @@ function getActiveView()
     return slotManager?.getActive()?.view ?? null;
 }
 
-/** @type {import("@codemirror/view").EditorView | null} */
-let screenplayView = null;
+// Debug-only global so the CDP driver tests can inspect the active CM view
+// (cursor line, doc length, scroll). The hot path doesn't read this — it's a
+// pure debugging hook. The getter is updated lazily because slotManager
+// initialises after this module-level block runs.
+/** @type {any} */ (window).__mpsActiveView = () => getActiveView();
+
 /** @type {any} */
 let canvasApi = null;
 /** @type {HTMLElement | null} */
 let modeToggleEl = null;
+/**
+ * App Footer controller — owns the bottom-right 200×30 panel (mode button,
+ * word/char counts, Google Docs sync gear). Set when the shell first builds
+ * #app-footer; survives project switches (no destroy on project teardown,
+ * unlike modeToggleEl which lives inside the editor-area top bar).
+ * @type {import("./app-footer.js").AppFooterController|null}
+ */
+let appFooter = null;
+/**
+ * Bridge to the project-scoped `applyEditorMode(mode, opts)` closure. Set by
+ * the editor boot block so `applyAllowedModesForFormat` can request a
+ * one-shot downgrade when the active slot's format doesn't support the
+ * persisted mode.
+ * @type {((mode: "source"|"text"|"visual", opts?: { persist?: boolean }) => Promise<void>) | null}
+ */
+let applyEditorModeRef = null;
+/** @type {HTMLElement|null} */
+let editorAreaTopBarEl = null;
+/** @type {HTMLButtonElement|null} */
+let editorBarPagePrevBtn = null;
+/** @type {HTMLButtonElement|null} */
+let editorBarPageNextBtn = null;
+/** @type {HTMLButtonElement|null} */
+let editorBarFixIssuesBtn = null;
 /**
  * The <mps-visual-editor> element appended to <mps-editor-host> while the
  * user is in Visual mode. Module-scope so `destroyCurrentProjectViews` can
@@ -113,6 +376,10 @@ let modeToggleEl = null;
  * @type {HTMLElement | null}
  */
 let visualEditorEl = null;
+/** @type {ReturnType<typeof mountOutline> | null} */
+let outlineView = null;
+/** @type {ReturnType<typeof mountStatistics> | null} */
+let statisticsView = null;
 /** One-shot guard for `wireShellOnce()` — static-DOM listeners must NEVER stack. */
 let shellWired = false;
 /** Cached current document text — single source for screenplay/canvas/save fan-out. */
@@ -137,21 +404,6 @@ let folderList = null;
 let platform = { os: "browser", mode: "browser" };
 /** @type {any[]} */
 let recentProjects = [];
-
-/**
- * Feature flag for the v2 project layout migration modal.
- *
- * Opt-out (default ON): setting `localStorage["mps.layoutV2"] = "false"` is
- * the emergency disable. When OFF, opening a legacy-layout project silently
- * skips the migration prompt and the editor mounts empty — documented as a
- * known v1 limitation. New projects always use v2 (Rust-side default), so
- * the flag only governs the modal trigger.
- */
-const LAYOUT_V2_ENABLED = (() =>
-{
-    try { return localStorage.getItem("mps.layoutV2") !== "false"; }
-    catch { return true; }
-})();
 
 /**
  * Route a meta.json save through the broker so destructive ops can drain.
@@ -187,7 +439,7 @@ function queueAppSettingsSave(partial)
         const value = _appSettingsPending;
         _appSettingsPending = {};
         _appSettingsTimer = null;
-        try { await window.__TAURI__.core.invoke("app_settings_set", { value }); }
+        try { await invoke("app_settings_set", { value }); }
         catch (e) { console.warn("queueAppSettingsSave failed:", e); }
     }, 500);
 }
@@ -198,7 +450,7 @@ async function flushAppSettings()
     _appSettingsTimer = null;
     const value = _appSettingsPending;
     _appSettingsPending = {};
-    try { await window.__TAURI__.core.invoke("app_settings_set", { value }); }
+    try { await invoke("app_settings_set", { value }); }
     catch (e) { console.warn("flushAppSettings failed:", e); }
 }
 
@@ -214,9 +466,10 @@ let saveFailureBannerShown = false;
 
 // ── Tauri platform probe ──
 async function probePlatform() {
-    if (window.__TAURI__) {
+    if (isTauri()) {
         try {
-            const p = await window.__TAURI__.core.invoke("app_platform");
+            /** @type {any} */
+            const p = await invoke("app_platform");
             return { os: p.os, mode: "tauri" };
         } catch {
             return { os: "unknown", mode: "tauri" };
@@ -250,10 +503,11 @@ async function loadAppSettings()
         windowWidth: null,
         windowHeight: null,
     };
-    if (!window.__TAURI__) return DEFAULTS;
+    if (!isTauri()) return DEFAULTS;
     try
     {
-        const v = await window.__TAURI__.core.invoke("app_settings_get");
+        /** @type {any} */
+        const v = await invoke("app_settings_get");
         const viewModeOk = (v?.viewMode === "dual"
             || v?.viewMode === "solo-mangaplay"
             || v?.viewMode === "solo-storyboard"
@@ -289,11 +543,50 @@ async function loadAppSettings()
 }
 
 // ── DOM helpers ──
-/** @param {string} state */
+/**
+ * Apply a top-level app state: write `[data-app-state]`, tick the inline
+ * boot screen, fade in chrome on `"ready"`. The FSM in `state-machine.js`
+ * owns the policy (allowed transitions per mode); this function owns the
+ * side effects every state change must run.
+ *
+ * @param {string} state
+ */
 export function setAppState(state) {
     currentState = state;
     document.documentElement.setAttribute("data-app-state", state);
+    markBench(`state:${state}`);
 
+    // Tick the inline boot screen for stages the user sees during cold
+    // boot. The boot screen is the canvas we paint on between paint and
+    // PROJECT; once chrome is revealed the boot screen is faded.
+    const boot = /** @type {any} */ (window).__mpsBoot;
+    if (boot && typeof boot.update === "function")
+    {
+        switch (state)
+        {
+            case "booting":
+                boot.update("bundle", t("mangaplay-studio.boot.stage.loadingApp") || "Loading app…");
+                break;
+            case "probing":
+            case "loading-recent":
+                // Fold into the settings stage — Rust-IPC heavy step.
+                boot.update("settings", t("mangaplay-studio.boot.stage.loadingSettings") || "Restoring preferences…");
+                break;
+            case "opening-project":
+            {
+                const name = currentProject?.name || "";
+                const tpl = t("mangaplay-studio.boot.stage.openingProject");
+                const msg = (tpl && tpl !== "mangaplay-studio.boot.stage.openingProject")
+                    ? tpl.replace("{name}", name)
+                    : `Opening ${name || "project"}…`;
+                boot.update("project", msg);
+                break;
+            }
+            default: break;
+        }
+    }
+
+    // Legacy DOM hooks for any code still attaching to [data-state-message].
     const msgEl = document.querySelector("[data-state-message]");
     if (msgEl) {
         let msg = stateMessage(state);
@@ -303,29 +596,18 @@ export function setAppState(state) {
         msgEl.textContent = msg;
     }
 
-    const loadingScreen = document.getElementById("loading-screen");
-    const startScreen = document.getElementById("start-screen");
-
-    // Show start-screen UI when entering start-screen or empty state.
-    if (state === "start-screen" || state === "empty") {
-        if (loadingScreen) loadingScreen.classList.add("fade-out");
-        if (startScreen) startScreen.hidden = false;
-    }
-
     if (state === "ready") {
         const elapsed = performance.now() - bootStartedAt;
         const delay = Math.max(0, MIN_DISPLAY_MS - elapsed);
         setTimeout(() => {
-            if (loadingScreen) loadingScreen.classList.add("fade-out");
-            if (startScreen) startScreen.classList.add("fade-out");
             const chrome = document.getElementById("app-chrome");
             if (chrome) {
                 chrome.hidden = false;
                 chrome.classList.add("fade-in");
                 requestAnimationFrame(() => chrome.classList.remove("fade-in"));
             }
-            // Fully hide start screen so it can't intercept clicks
-            setTimeout(() => { if (startScreen) startScreen.hidden = true; }, 250);
+            // Fade out the inline boot screen.
+            if (boot && typeof boot.done === "function") boot.done();
         }, delay);
     }
 }
@@ -676,6 +958,7 @@ function setViewMode(mode) {
     if (slider)
     {
         slider.setAttribute("data-active", showScreenplay ? "screenplay" : "storyboard");
+        _renderTopbarPagination?.();
     }
 
     // Track lastSoloMode for restore
@@ -750,29 +1033,16 @@ export function showError(msg, errorClass = "fatal.config") {
                 }
                 try {
                     setAppState("opening-project");
-                    const opened = await tryOpenProjectWithMigration(chosenPath);
-                    if (opened.status === "cancelled")
-                    {
-                        setAppState("start-screen");
-                        return;
-                    }
-                    if (opened.status === "readonly")
-                    {
-                        currentProject = await openReadOnlyShell(opened.projectPath);
-                    }
-                    else
-                    {
-                        currentProject = opened.project;
-                    }
+                    currentProject = await openProject(chosenPath);
                     // Expose project dir to editor extensions (page-fold persistence).
                     /** @type {any} */ (window).__mpsCurrentProjectDir = currentProject?.path || null;
                     // Start the FS watcher for the new project root so
                     // external edits flow through project-fs-changed.
                     try
                     {
-                        if (window.__TAURI__?.core?.invoke && currentProject?.path)
+                        if (isTauri() && currentProject?.path)
                         {
-                            await window.__TAURI__.core.invoke("fs_watch_start", { path: currentProject.path });
+                            await invoke("fs_watch_start", { path: currentProject.path });
                         }
                     }
                     catch (e) { console.warn("[fs_watch_start] failed:", e); }
@@ -785,7 +1055,6 @@ export function showError(msg, errorClass = "fatal.config") {
                     await mountProjectViews();
                     setAppState("ready");
                     setSaveState("saved");
-                    if (currentProject?.readOnly) showBanner("Open in read-only — migrate to edit");
                 } catch (err) {
                     showError(err instanceof Error ? err.message : String(err), "permissions.doc_access_revoked");
                 }
@@ -843,7 +1112,7 @@ function wireLeftPaneResize()
 /**
  * Toggle `data-narrow-topbar` on #app-chrome when the storyboard pane is
  * narrow enough that the absolute-positioned [C]/[D] action buttons would
- * crowd against #topbar-pagination's natural in-flow position. CSS reacts
+ * crowd against #topbar-storyboard-pagination's natural in-flow position. CSS reacts
  * by fading pagination + divider out so they don't half-overlap the buttons.
  *
  * Threshold derived empirically from button positions: at 280px storyboard
@@ -1035,6 +1304,74 @@ function wireLeftPaneToggle()
     });
 }
 
+/**
+ * Mount the Outline + Statistics subviews. Called once on first project mount;
+ * idempotent (re-mounts are skipped because the modules subscribe to the
+ * runtime store, which persists across project swaps).
+ */
+function wireLeftSubviews()
+{
+    if (!outlineView)
+    {
+        try { outlineView = mountOutline({ onJump: jumpToScene }); }
+        catch (e) { console.warn("[outline] mount failed:", e); }
+    }
+    if (!statisticsView)
+    {
+        try { statisticsView = mountStatistics(); }
+        catch (e) { console.warn("[statistics] mount failed:", e); }
+    }
+}
+
+/**
+ * Scroll the active editor (or canvas) to a scene's source line.
+ * Branches on the current editor mode — Source / Text scroll the CM view;
+ * Visual jumps to the page that contains the scene's line.
+ *
+ * @param {{ line: number, sceneIdx: number }} info
+ */
+function jumpToScene(info)
+{
+    const slot = slotManager?.getActive();
+    if (!slot) return;
+    /** @type {string} */
+    const mode = /** @type {any} */ (modeToggleEl)?.mode || "text";
+    if (mode === "visual")
+    {
+        const canvasEl = /** @type {any} */ (document.querySelector("mps-canvas"));
+        let pageIndex = 0;
+        if (canvasEl && typeof canvasEl.findPageIndexByLine === "function")
+        {
+            try { pageIndex = canvasEl.findPageIndexByLine(info.line) || 0; }
+            catch (e) { console.warn("[jumpToScene] findPageIndexByLine threw:", e); }
+        }
+        document.dispatchEvent(new CustomEvent("page-change", {
+            detail: { pageIndex, direction: 0 }
+        }));
+        document.dispatchEvent(new CustomEvent("screenplay-scroll-to-page", {
+            detail: { pageIndex }
+        }));
+        return;
+    }
+    const view = slot.view;
+    if (!view) return;
+    try
+    {
+        const totalLines = view.state.doc.lines;
+        const target = Math.min(Math.max(info.line + 1, 1), totalLines);
+        const lineObj = view.state.doc.line(target);
+        view.dispatch({
+            selection: { anchor: lineObj.from },
+            effects: EditorView.scrollIntoView(lineObj.from, { y: "start", yMargin: 8 })
+        });
+        view.focus();
+    }
+    catch (e)
+    {
+        console.warn("[jumpToScene] dispatch failed:", e);
+    }
+}
+
 async function switchSubview(name)
 {
     const pane = document.getElementById("left-pane");
@@ -1063,8 +1400,10 @@ async function switchSubview(name)
         outgoingEl.style.opacity = "";
     }
 
-    // Reveal incoming
-    incomingEl.style.display = "block";
+    // Reveal incoming. Clear the inline display so the stylesheet drives
+    // (some subviews need `display: flex` for internal scroll-host sizing;
+    // hard-coding "block" here would override that and break their layout).
+    incomingEl.style.display = "";
     incomingEl.style.opacity = "0";
     void incomingEl.offsetHeight;               // force reflow
     incomingEl.style.opacity = "1";
@@ -1083,7 +1422,7 @@ function applySubview(name)
     if (!pane) return;
     pane.dataset.subview = name;
 
-    for (const sub of ["folder", "bookmarks"])
+    for (const sub of ["folder", "bookmarks", "outline", "statistics"])
     {
         const el = document.getElementById(`subview-${sub}`);
         if (!el) continue;
@@ -1129,10 +1468,12 @@ function restoreShellMeta()
     {
         applyLeftPaneCollapsedState(true);
     }
-    if (settings.activeSubview === "bookmarks")
-    {
-        applySubview("bookmarks");
-    }
+    const validSubviews = ["folder", "bookmarks", "outline", "statistics"];
+    const bootSubview = (typeof settings.activeSubview === "string"
+        && validSubviews.includes(settings.activeSubview))
+        ? settings.activeSubview
+        : "folder";
+    applySubview(bootSubview);
 }
 
 let swappingProject = false;
@@ -1148,7 +1489,7 @@ function refreshProjectSwitcher()
     const btn = /** @type {HTMLButtonElement|null} */ (document.getElementById("project-switcher-btn"));
     if (!btn) return;
     const label = currentProject?.meta?.title
-        || (currentProject?.path?.split(/[\\/]/).pop() ?? "(no project)");
+        || (basename(currentProject?.path) || "(no project)");
     const labelEl = btn.querySelector(".project-switcher-label");
     if (labelEl) labelEl.textContent = label;
     btn.disabled = swappingProject;
@@ -1332,31 +1673,24 @@ async function switchProject(path)
         // Flush the OLD project's pending writes first — safe / non-destructive.
         await flushCurrentProjectMeta();
 
-        // Pre-flight the open. If it fails or the user cancels the migration
-        // modal, the old project is still fully mounted and we just bail.
+        // Pre-flight the open. If it fails, the old project is still fully
+        // mounted and we just bail.
         let opened;
         try
         {
-            opened = await tryOpenProjectWithMigration(path);
+            opened = await openProject(path);
         }
         catch (err)
         {
             console.error("[switchProject] open failed", err);
             return;
         }
-        if (!opened || opened.status === "cancelled") return;
+        if (!opened) return;
 
         // Open succeeded — NOW it's safe to tear down the previous project's views.
         destroyCurrentProjectViews();
 
-        if (opened.status === "readonly")
-        {
-            currentProject = await openReadOnlyShell(opened.projectPath);
-        }
-        else
-        {
-            currentProject = opened.project;
-        }
+        currentProject = opened;
         /** @type {any} */ (window).__mpsCurrentProjectDir = currentProject?.path || null;
 
         // Start the FS watcher for the new project root. Rust's
@@ -1364,9 +1698,9 @@ async function switchProject(path)
         // project swaps don't leak threads.
         try
         {
-            if (window.__TAURI__?.core?.invoke && currentProject?.path)
+            if (isTauri() && currentProject?.path)
             {
-                await window.__TAURI__.core.invoke("fs_watch_start", { path: currentProject.path });
+                await invoke("fs_watch_start", { path: currentProject.path });
             }
         }
         catch (e) { console.warn("[fs_watch_start] failed:", e); }
@@ -1466,11 +1800,9 @@ function wireEmptyState()
         try
         {
             await createUntitled(currentProject.path);
-            // Already-open project; if layout changed under us (unlikely)
-            // tryOpenProjectWithMigration handles the modal.
-            const reopened = await tryOpenProjectWithMigration(currentProject.path);
-            if (reopened.status !== "ok") return;
-            currentProject = reopened.project;
+            const reopened = await openProject(currentProject.path);
+            if (!reopened) return;
+            currentProject = reopened;
             getBroker().setActive(currentProject.scriptPath);
             try { await mountFolderExplorer(); }
             catch (e) { console.debug("folder list mount failed:", e); }
@@ -1515,13 +1847,6 @@ function wireEmptyState()
 function onMpsChangeFromSlot(slot, text)
 {
     currentDoc = text;
-    // Read-only mode: swallow autosave + dirty markers. The editor remains
-    // typable for inspection but nothing persists. Banner explains why.
-    if (currentProject?.readOnly)
-    {
-        if (debouncedScreenplayUpdate) debouncedScreenplayUpdate(text);
-        return;
-    }
     setSaveState("dirty");
     if (debouncedScreenplayUpdate) debouncedScreenplayUpdate(text);
     if (canvasApi && typeof canvasApi.setScript === "function")
@@ -1529,6 +1854,16 @@ function onMpsChangeFromSlot(slot, text)
         canvasApi.setScript(text);
     }
     if (debouncedScriptSave) debouncedScriptSave(text);
+    // Fix Structural Issues button tracks the source buffer — refresh
+    // whenever the doc changes so the icon reflects current state.
+    try { window.__mpsRefreshFixIssuesBtn?.(); } catch (_) {}
+    // Google Docs sync state machine — notify of local edits so the gear
+    // moves from idle → local-ahead without any network call.
+    try { if (slot?.path) notifyGoogleDocsEdit(); }
+    catch (e) { console.warn("[google-docs] notifyEdit threw:", e); }
+    // App Footer word / char counts — debounced recount (150ms).
+    try { appFooter?.notifyDocChanged(); }
+    catch (e) { console.debug("[app-footer] notifyDocChanged threw:", e); }
 }
 
 /**
@@ -1557,15 +1892,152 @@ function onSlotActivated(slot)
             "tab-activated"
         );
     }
+    activeSlotIsPlaceholder = slot.path === null;
+    activeFormat = slot.format;
+    // Sync the folder-explorer highlight to the active tab. Cheap DOM
+    // attribute flip — no fs hit, no re-mount.
+    try { folderList?.setActive(slot.path ? basename(slot.path) : null); }
+    catch (_e) { /* explorer may not be mounted yet during boot */ }
     publishParsedScript(currentDoc);
     // Empty-tab CTA visible only when the active slot is the placeholder
     // ("Create New file" tab — no path on disk).
     emptyTabCta?.setVisible(slot.path === null);
+    // Right-pane empty-state overlays follow the same signal. publishParsedScript
+    // already recomputes the no-screenplay branch, so this call only needs to
+    // handle the "no doc" toggle — but invoking it once here keeps the wiring
+    // simple even if publishParsedScript bails early on unknown formats.
+    recomputeRightPaneEmpty(null);
+    // Sync the editor-mode toggle to what this file's format supports.
+    // .txt → Source only; .fountain → Source + Text; .sup* → Source only
+    // (Text grammar is the mangaplay highlighter for now; binary .sup has no
+    // editable surface). Mangaplay supports all three. If the persisted /
+    // current editor mode isn't in the allowed set, downgrade to the highest
+    // allowed mode (Visual > Text > Source).
+    applyAllowedModesForFormat(slot.format);
+    try { window.__mpsRefreshFixIssuesBtn?.(); } catch (_) {}
+    // Hand the activated slot to the Google Docs sync state machine.
+    // forwardSlashPath is the canonical project-relative key shape used by
+    // the sync entry store. When the slot has no on-disk path (the empty
+    // placeholder tab), detach so the footer hides.
+    try
+    {
+        if (currentProject && slot.path)
+        {
+            const proj = currentProject.path;
+            const projNorm = proj.replace(/\\/g, "/");
+            const slotNorm = slot.path.replace(/\\/g, "/");
+            let rel = slotNorm.startsWith(projNorm + "/")
+                ? slotNorm.slice(projNorm.length + 1)
+                : slot.basename;
+            void setGoogleDocsActiveScript({
+                projectPath: proj,
+                scriptRelPath: rel,
+                basename: slot.basename
+            });
+        }
+        else
+        {
+            void setGoogleDocsActiveScript(null);
+        }
+    }
+    catch (e) { console.warn("[google-docs] setActiveScript threw:", e); }
+    // App Footer counts follow the active slot.
+    try { appFooter?.recountNow(); }
+    catch (e) { console.debug("[app-footer] recountNow threw:", e); }
+}
+
+/**
+ * Map an EditorFormat to the editor modes it supports.
+ *
+ *   mangaplay         → [source, text, visual]
+ *   fountain          → [source, text]
+ *   superscript       → [source] (+ alpha warning shown in the top bar)
+ *   superscript-bin   → [source] (+ alpha warning shown in the top bar)
+ *   general-text      → [source]
+ *
+ * @param {import("./lang-registry.js").EditorFormat} format
+ * @returns {Array<"source"|"text"|"visual">}
+ */
+function allowedModesForFormat(format)
+{
+    switch (format)
+    {
+        case "mangaplay":        return ["source", "text", "visual"];
+        case "fountain":         return ["source", "text"];
+        case "superscript":      return ["source"];
+        case "superscript-bin":  return ["source"];
+        default:                 return ["source"]; // general-text / .txt
+    }
+}
+
+/**
+ * Sync the mode-toggle's allowed set + the top bar's `data-format` (drives the
+ * SuperScript alpha warning pill) for the given format. If the current editor
+ * mode isn't in the allowed set, request a one-shot downgrade through the
+ * project-scoped `applyEditorMode` (persists, so the new lower mode sticks).
+ *
+ * @param {import("./lang-registry.js").EditorFormat} format
+ */
+function applyAllowedModesForFormat(format)
+{
+    const allowed = allowedModesForFormat(format);
+    if (editorAreaTopBarEl)
+    {
+        editorAreaTopBarEl.setAttribute("data-format", format);
+    }
+    if (modeToggleEl)
+    {
+        /** @type {any} */ (modeToggleEl).allowedModes = allowed;
+    }
+    if (applyEditorModeRef && modeToggleEl)
+    {
+        const current = /** @type {any} */ (modeToggleEl).mode;
+        if (!allowed.includes(current))
+        {
+            // Walk Visual → Text → Source for the highest allowed downgrade.
+            const order = ["visual", "text", "source"];
+            const downgrade = /** @type {any} */ (
+                order.find((m) => allowed.includes(/** @type {any} */ (m)))
+            ) || "source";
+            void applyEditorModeRef(downgrade);
+        }
+    }
+    // Format change → re-evaluate pagination chevron enable/disable on both
+    // the global topbar cluster and the editor-area bar. Pagination gates
+    // on format ("mangaplay" enables, others disable), so the chevron state
+    // must refresh whenever the active slot's format flips even if the
+    // editor mode itself didn't change.
+    if (_renderTopbarPagination)
+    {
+        try { _renderTopbarPagination(); }
+        catch (e) { console.debug("[pagination] render after format change failed:", e); }
+    }
+    if (editorBarPagePrevBtn && editorBarPageNextBtn)
+    {
+        if (format === "mangaplay")
+        {
+            const prevLabel = t("ui.paint.prevPage") || "Previous page";
+            const nextLabel = t("ui.paint.nextPage") || "Next page";
+            editorBarPagePrevBtn.setAttribute("data-tooltip", prevLabel);
+            editorBarPagePrevBtn.setAttribute("data-tooltip-side", "bottom");
+            editorBarPageNextBtn.setAttribute("data-tooltip", nextLabel);
+            editorBarPageNextBtn.setAttribute("data-tooltip-side", "bottom");
+            editorBarPagePrevBtn.disabled = _paginationPageIndex <= 0;
+            editorBarPageNextBtn.disabled = _paginationPageIndex >= _paginationTotalPages - 1;
+        }
+        else
+        {
+            editorBarPagePrevBtn.disabled = true;
+            editorBarPageNextBtn.disabled = true;
+            editorBarPagePrevBtn.removeAttribute("data-tooltip");
+            editorBarPageNextBtn.removeAttribute("data-tooltip");
+        }
+    }
 }
 
 /**
  * Debounced session-persistence. Writes the serialized tab snapshot to
- * `<project>/mangaplay_settings/session.json` via the existing FS commands.
+ * `<project>/_mangaplaystudio/settings/session.json` via the existing FS commands.
  * 250 ms debounce matches the fold-state persistence cadence; safe to spam
  * from `onTabsChanged`.
  */
@@ -1605,6 +2077,7 @@ function slideToRightPaneView(nextMode)
     {
         slider.setAttribute("data-view-sliding", "");
         slider.setAttribute("data-active", targetActive);
+        _renderTopbarPagination?.();
 
         const onEnd = () =>
         {
@@ -1655,6 +2128,12 @@ function wireStoryboardSwitcher()
         btn.setAttribute("aria-label", `Switch to ${willShowNext}`);
         try { refreshTooltipFor(btn); } catch {}
 
+        // When the active file's format has no screenplay surface (plain
+        // text / binary .sup), the slider still slides to Screenplay so
+        // the toggle feels responsive — but the inline "not supported"
+        // overlay covers the screenplay area instead of the empty/broken
+        // panel. The overlay is driven by recomputeRightPaneEmpty +
+        // the slider's data-active attribute (see right-pane-empty.js).
         slideToRightPaneView(next);
     });
 }
@@ -1671,7 +2150,149 @@ function wireSettingsButton()
 }
 
 /**
- * Wire the top-bar pagination cluster (#topbar-pagination). Mirrors the
+ * Bottom-of-sidebar account button. Visible only while signed in; click
+ * opens the Settings modal on the Account tab. Avatar src + visibility
+ * are driven by `mps:authChanged`.
+ */
+async function wireRailAccount()
+{
+    const btn = /** @type {HTMLButtonElement|null} */ (document.getElementById("btn-rail-account"));
+    if (!btn) return;
+    const avatar = /** @type {HTMLImageElement|null} */ (btn.querySelector(".rail-account-avatar"));
+
+    const apply = (detail) =>
+    {
+        const picture = detail && detail.picture;
+        if (picture && avatar)
+        {
+            avatar.src = picture;
+            avatar.alt = detail.name || "";
+            btn.hidden = false;
+        }
+        else
+        {
+            btn.hidden = true;
+            if (avatar) avatar.removeAttribute("src");
+        }
+    };
+
+    try
+    {
+        const { onAuthChanged, getCurrentProfile } = await import("./auth/google-oauth.js");
+        apply(getCurrentProfile());
+        onAuthChanged(apply);
+    }
+    catch (e) { console.warn("[wireRailAccount] auth import failed:", e); }
+
+    btn.addEventListener("click", () =>
+    {
+        try { openSettingsModal("account"); }
+        catch (e) { console.error("openSettingsModal(account) failed:", e); }
+    });
+}
+
+function wireHelpButton()
+{
+    const btn = /** @type {HTMLElement|null} */ (document.getElementById("btn-app-help"));
+    if (!btn) return;
+    btn.addEventListener("click", () =>
+    {
+        try { openHelpModal(); }
+        catch (e) { console.error("openHelpModal failed:", e); }
+    });
+}
+
+// Home button — opens the same Help / About modal as `#btn-app-help` (the
+// circle-help icon in the left-pane footer). The Home button is otherwise
+// passive: it doesn't switch subviews, it just surfaces the application
+// info popup so the brand icon doubles as a "what is this app" entry point.
+function wireHomeButton()
+{
+    const btn = /** @type {HTMLElement|null} */ (document.getElementById("btn-subview-folder"));
+    if (!btn) return;
+    btn.addEventListener("click", () =>
+    {
+        try { openHelpModal(); }
+        catch (e) { console.error("openHelpModal failed:", e); }
+    });
+}
+
+// Storyboard pagination state. Drives only the Storyboard canvas page
+// (mps-canvas). The Visual Editor scrolls independently and does NOT follow
+// these chevrons. Shared between the global #topbar-storyboard-pagination
+// cluster and the editor-area top bar's chevron buttons so both surfaces stay
+// in sync without a second event subscription chain.
+let _paginationPageIndex = 0;
+let _paginationTotalPages = 1;
+/** Optional label override sourced from the parsed `# Page X` id. */
+let _paginationPageLabel = null;
+/** @type {Array<(state: { pageIndex: number, totalPages: number }) => void>} */
+const _paginationSubscribers = [];
+/** @type {(() => void) | null} Stashed by wireTopbarPagination so slider sites can re-invoke. */
+let _renderTopbarPagination = null;
+
+/**
+ * Dispatch `page-change` + `screenplay-scroll-to-page` events. mps-canvas
+ * listens for the former and advances `store.currentPageIndex`; the
+ * screenplay component scrolls on the latter.
+ * @param {number} dir
+ */
+function paginationNavigate(dir)
+{
+    const newIndex = _paginationPageIndex + dir;
+    if (newIndex < 0 || newIndex >= _paginationTotalPages) return;
+    document.dispatchEvent(new CustomEvent("page-change", {
+        detail: { pageIndex: newIndex, direction: dir }
+    }));
+    document.dispatchEvent(new CustomEvent("screenplay-scroll-to-page", {
+        detail: { pageIndex: newIndex }
+    }));
+}
+
+/**
+ * Register a callback fired with `{ pageIndex, totalPages }` whenever
+ * pagination state changes. The callback is invoked immediately with the
+ * current state so subscribers can hydrate their UI without waiting for
+ * the next change.
+ * @param {(state: { pageIndex: number, totalPages: number }) => void} cb
+ */
+function subscribePaginationState(cb)
+{
+    if (typeof cb !== "function") return;
+    _paginationSubscribers.push(cb);
+    try { cb({ pageIndex: _paginationPageIndex, totalPages: _paginationTotalPages }); }
+    catch (e) { console.debug("[pagination] subscriber seed failed:", e); }
+}
+
+function _notifyPaginationSubscribers()
+{
+    const snap = { pageIndex: _paginationPageIndex, totalPages: _paginationTotalPages };
+    for (const cb of _paginationSubscribers)
+    {
+        try { cb(snap); }
+        catch (e) { console.debug("[pagination] subscriber failed:", e); }
+    }
+}
+
+/**
+ * Resolve the active slot's file format ("mangaplay", "fountain", ...) for
+ * pagination chevron gating. Storyboard pagination is only meaningful for
+ * `.mangaplay` sources — other formats keep the chevrons visible but disabled.
+ * Prefer `slotManager.getActive().format`; fall back to the `data-format`
+ * attribute stamped on the editor-area top bar by `syncFormatToTopBar` so the
+ * helper is robust during early-boot ordering.
+ * @returns {string | null}
+ */
+function getActivePaginationFormat()
+{
+    const fromSlot = slotManager?.getActive()?.format;
+    if (fromSlot) return fromSlot;
+    const bar = document.querySelector(".editor-area-top-bar");
+    return bar?.getAttribute("data-format") ?? null;
+}
+
+/**
+ * Wire the top-bar pagination cluster (#topbar-storyboard-pagination). Mirrors the
  * paint widget's pw-pagination-group: click dispatches `page-change`,
  * `page-state-update` updates the label + disabled state. Hidden until
  * the first state-update arrives so the row stays clean before the canvas
@@ -1679,53 +2300,53 @@ function wireSettingsButton()
  */
 function wireTopbarPagination()
 {
-    const wrap = document.getElementById("topbar-pagination");
+    const wrap = document.getElementById("topbar-storyboard-pagination");
     const prev = document.getElementById("btn-page-prev");
     const next = document.getElementById("btn-page-next");
     const label = document.getElementById("topbar-page-label");
     if (!wrap || !prev || !next || !label) return;
 
-    let pageIndex = 0;
-    let totalPages = 1;
-
-    const navigate = (dir) =>
-    {
-        const newIndex = pageIndex + dir;
-        if (newIndex < 0 || newIndex >= totalPages) return;
-        // Same event the paint-widget pagination dispatches. mps-canvas
-        // listens and advances store.currentPageIndex.
-        document.dispatchEvent(new CustomEvent("page-change", {
-            detail: { pageIndex: newIndex, direction: dir }
-        }));
-        document.dispatchEvent(new CustomEvent("screenplay-scroll-to-page", {
-            detail: { pageIndex: newIndex }
-        }));
-    };
-
-    prev.addEventListener("click", () => navigate(-1));
-    next.addEventListener("click", () => navigate(1));
+    prev.addEventListener("click", () => paginationNavigate(-1));
+    next.addEventListener("click", () => paginationNavigate(1));
 
     const render = () =>
     {
+        const numeric = _paginationPageLabel != null ? _paginationPageLabel : String(_paginationPageIndex + 1);
         try
         {
-            const labelText = `${t("ui.paint.page") || "Page"} ${pageIndex + 1}`;
-            label.textContent = labelText;
+            label.textContent = `${t("ui.paint.page") || "Page"} ${numeric}`;
         }
         catch
         {
-            label.textContent = `Page ${pageIndex + 1}`;
+            label.textContent = `Page ${numeric}`;
         }
-        /** @type {HTMLButtonElement} */ (prev).disabled = pageIndex <= 0;
-        /** @type {HTMLButtonElement} */ (next).disabled = pageIndex >= totalPages - 1;
+        const slider = document.querySelector(".right-pane-slider");
+        const screenplayActive = slider?.getAttribute("data-active") === "screenplay";
+        const format = getActivePaginationFormat();
+        const formatPaginates = format === "mangaplay";
+        if (screenplayActive || !formatPaginates)
+        {
+            /** @type {HTMLButtonElement} */ (prev).disabled = true;
+            /** @type {HTMLButtonElement} */ (next).disabled = true;
+            label.setAttribute("data-disabled", "");
+        }
+        else
+        {
+            /** @type {HTMLButtonElement} */ (prev).disabled = _paginationPageIndex <= 0;
+            /** @type {HTMLButtonElement} */ (next).disabled = _paginationPageIndex >= _paginationTotalPages - 1;
+            label.removeAttribute("data-disabled");
+        }
+        _notifyPaginationSubscribers();
     };
+    _renderTopbarPagination = render;
 
     document.addEventListener("page-state-update", (e) =>
     {
         const d = /** @type {CustomEvent} */ (e).detail;
         if (!d) return;
-        if (Number.isFinite(d.pageIndex)) pageIndex = d.pageIndex;
-        if (Number.isFinite(d.totalPages)) totalPages = d.totalPages;
+        if (Number.isFinite(d.pageIndex)) _paginationPageIndex = d.pageIndex;
+        if (Number.isFinite(d.totalPages)) _paginationTotalPages = d.totalPages;
+        _paginationPageLabel = d.pageLabel != null ? String(d.pageLabel) : null;
         if (wrap.hasAttribute("hidden")) wrap.removeAttribute("hidden");
         render();
     });
@@ -1741,10 +2362,13 @@ function wireTopbarPagination()
         const canvas = /** @type {any} */ (document.querySelector("mps-canvas"));
         const state = canvas?.store?.state;
         if (!state) return false;
-        const total = state.script?.pages?.length ?? 0;
+        const pages = state.script?.pages ?? [];
+        const total = pages.length;
         if (total <= 0) return false;
-        pageIndex = state.currentPageIndex ?? 0;
-        totalPages = total;
+        _paginationPageIndex = state.currentPageIndex ?? 0;
+        _paginationTotalPages = total;
+        const cur = pages[_paginationPageIndex];
+        _paginationPageLabel = cur?.id != null ? String(cur.id) : null;
         if (wrap.hasAttribute("hidden")) wrap.removeAttribute("hidden");
         render();
         return true;
@@ -1890,9 +2514,34 @@ function publishParsedScript(text)
     try
     {
         const format = formatForFilename(currentProject?.scriptBasename);
-        if (format === "general-text" || format === "superscript-bin")
+        if (format === "superscript-bin")
         {
-            // Unknown / binary types skip the live-parse step entirely.
+            // Binary .sup files have no editable text surface — skip.
+            return;
+        }
+        if (format === "general-text")
+        {
+            // Plain text files don't have a script grammar, but the user still
+            // gets a single blank canvas page they can draw on. Publish a
+            // minimal one-page AST so mps-canvas mounts a drawable page. The
+            // page id is stable per-file (via the basename) so per-page
+            // drawing persistence keys cleanly.
+            const stem = (currentProject?.scriptBasename || "untitled")
+                .replace(/\.[^.]+$/, "");
+            getRuntimeStorage().update({
+                script: {
+                    pages: [{ id: "1", panels: [] }],
+                    pagesById: { "1": { id: "1", panels: [] } },
+                    metadata: { format: "text", title: stem },
+                    titlePage: {},
+                    readingDirection: "LTR"
+                },
+                scriptFormat: "text",
+                readingDirection: "LTR"
+            });
+            document.dispatchEvent(new CustomEvent("paint-state-request"));
+            document.dispatchEvent(new CustomEvent("mangaplay:settingsChanged"));
+            recomputeRightPaneEmpty(null);
             return;
         }
         let ast;
@@ -1937,6 +2586,10 @@ function publishParsedScript(text)
     {
         console.warn("[live-parse] parseScript failed (probably bad input):", e?.message);
     }
+    // Refresh the right-pane empty-state after every parse so the
+    // "Please begin writing in the Text Editor…" overlay clears as soon as
+    // the user types real content.
+    recomputeRightPaneEmpty(null);
 }
 
 /**
@@ -1959,9 +2612,9 @@ async function enterManageProjects()
     // Stop the FS watcher (best-effort).
     try
     {
-        if (window.__TAURI__?.core?.invoke)
+        if (isTauri())
         {
-            await window.__TAURI__.core.invoke("fs_watch_stop");
+            await invoke("fs_watch_stop");
         }
     }
     catch (e) { console.debug("[manage] fs_watch_stop failed:", e); }
@@ -2000,7 +2653,7 @@ async function enterManageProjects()
             try
             {
                 const topName = (recentProjects.find((r) => r.path === path)?.resolvedName)
-                    || path.split(/[\\/]/).pop()
+                    || basename(path)
                     || path;
                 shell.setOpening(t("mangaplay-studio.boot.opening.openingNamed", { name: topName }), 0.2);
                 shell.setPhase("opening");
@@ -2032,127 +2685,27 @@ async function enterManageProjects()
 }
 
 /**
- * Transition the shell from auto-resume/opening back to the picker so the
- * migration modal renders on top of a stable surface. Idempotent.
- */
-function transitionToPicker()
-{
-    const shell = /** @type {any} */ (document.getElementById("picker-shell"));
-    if (!shell) return;
-    try
-    {
-        shell.style.display = "";
-        shell.classList.remove("fade-out");
-        shell.setRecent(recentProjects || []);
-        shell.setLastPathInvalid(getLastProjectPathInvalid());
-        shell.setPhase("picker");
-    }
-    catch (e) { console.warn("[migration] transitionToPicker failed:", e); }
-}
-
-/**
- * Open a project, surfacing the migration modal for legacy/crashed layouts.
- *
- * Resolutions:
- *   { status: "ok", project }            — caller proceeds with normal flow
- *   { status: "readonly", projectPath }  — caller mounts read-only
- *   { status: "cancelled" }              — caller bails to picker
- *
- * If `LAYOUT_V2_ENABLED` is false the migration modal is suppressed; the
- * legacy throw bubbles up as `{ status: "cancelled" }` with a console warn.
- *
- * @param {string} projectPath
- * @param {{ fromAutoResume?: boolean }} [opts]
- * @returns {Promise<{ status: "ok", project: any } | { status: "readonly", projectPath: string } | { status: "cancelled" }>}
- */
-async function tryOpenProjectWithMigration(projectPath, opts = {})
-{
-    try
-    {
-        const project = await openProject(projectPath);
-        return { status: "ok", project };
-    }
-    catch (err)
-    {
-        if (err instanceof LayoutLegacyError || err instanceof MigrationCrashedError)
-        {
-            if (!LAYOUT_V2_ENABLED)
-            {
-                console.warn(
-                    "[layout-v2] Migration modal disabled by flag; project will open empty:",
-                    projectPath
-                );
-                return { status: "cancelled" };
-            }
-            if (opts.fromAutoResume)
-            {
-                transitionToPicker();
-            }
-            const layoutInfo = err.layoutInfo;
-            const result = await showMigrationModal({
-                projectPath: err.projectPath,
-                layoutInfo,
-            });
-            return result;
-        }
-        throw err;
-    }
-}
-
-/**
- * Construct a synthetic project shell for the "Open read-only" branch of
- * the migration modal.
- *
- * V1 limitation: legacy scripts at the root aren't read here. The shell
- * renders an empty editor with a banner instructing the user to migrate
- * before editing — same UX recommended by the plan §1.5.
- *
- * @param {string} projectPath
- */
-async function openReadOnlyShell(projectPath)
-{
-    const name = projectPath.split(/[\\/]/).pop() || projectPath;
-    return {
-        path: projectPath,
-        name,
-        script: "",
-        scriptPath: null,
-        scriptBasename: "Untitled.mangaplay.md",
-        drawings: {},
-        meta: { viewMode: "dual", lastSoloMode: "solo-storyboard" },
-        readOnly: true,
-    };
-}
-
-/**
- * Refresh the folder explorer. Cheap remount via the existing mountFolderList.
- */
-/**
  * Enrich script entries from `list_project_scripts` with `kind` + absolute
  * `path` so the folder-explorer rows carry data-kind / data-path attributes.
  *
  * The Rust shape is `{ name, modifiedAt, createdAt }` where `name` is the
- * relative path from `<projectRoot>/project/`. For v1 every entry is a file
- * (folder rows aren't rendered yet); the schema groundwork is in place for
- * when they're added.
+ * forward-slash relative path from `<projectRoot>/`. Every entry is a file.
  *
  * @param {Array<any>} scripts
  * @param {string} projectRoot
  * @returns {Array<{name:string,kind:"file",path:string,modifiedAt:number,createdAt:number}>}
  */
 /**
- * The v2 layout always stores user scripts under `<projectRoot>/project/`.
- * `list_project_scripts` walks whatever directory it's given and emits names
- * relative to that — so we MUST pass it `<projectRoot>/project/` so the names
- * stay as bare basenames. Passing the project root would emit `project/foo.md`
- * names, which break enrichScripts' path joining and break inline rename.
+ * Flat v2 layout: scripts live at `<projectRoot>/`. The walker emits names
+ * relative to that, so passing the root produces bare basenames or
+ * `subfolder/file.mangaplay.md` style rel-paths.
  *
  * @param {string} projectRoot
  * @returns {Promise<Array<any>>}
  */
 async function listScriptsForProject(projectRoot)
 {
-    return listProjectScripts(`${projectRoot}/project`);
+    return listProjectScripts(projectRoot);
 }
 
 function enrichScripts(scripts, projectRoot)
@@ -2162,13 +2715,13 @@ function enrichScripts(scripts, projectRoot)
     {
         if (typeof s === "string")
         {
-            return { name: s, kind: "file", path: `${projectRoot}/project/${s}`, modifiedAt: 0, createdAt: 0 };
+            return { name: s, kind: "file", path: `${projectRoot}/${s}`, modifiedAt: 0, createdAt: 0 };
         }
         const name = String(s.name || "");
         // Tree entries carry their own `path` + `kind`; pass through when
         // present so folder rows render with the correct absolute path.
         const kind = s.kind === "folder" ? "folder" : "file";
-        const path = s.path ? String(s.path) : `${projectRoot}/project/${name}`;
+        const path = s.path ? String(s.path) : `${projectRoot}/${name}`;
         return {
             name,
             kind,
@@ -2207,7 +2760,7 @@ async function mountFolderExplorer()
     const scripts = await listTreeForProject(currentProject.path);
     const enriched = enrichScripts(scripts, currentProject.path);
     const active = currentProject.scriptPath
-        ? currentProject.scriptPath.split(/[\\/]/).pop()
+        ? basename(currentProject.scriptPath)
         : null;
     const listEl = document.querySelector("#subview-folder .folder-list");
     if (!listEl) return;
@@ -2237,13 +2790,14 @@ async function mountFolderExplorer()
                 // app_move_path returns) suppresses the "renamed
                 // externally" banner. The destination basename is the same
                 // as the source's; the new path is parent/basename.
-                const basename = srcAbs.split(/[\\/]/).pop() || "";
-                const dstAbs = newParentAbs.replace(/[\\/]+$/, "") + "/" + basename;
+                const baseName = basename(srcAbs);
+                const dstAbs = newParentAbs.replace(/[\\/]+$/, "") + "/" + baseName;
                 markSelfChange(srcAbs);
                 markSelfChange(dstAbs);
-                await window.__TAURI__.core.invoke("app_move_path", {
+                await invoke("app_move_path", {
                     srcPath: srcAbs,
                     newParent: newParentAbs,
+                    projectRoot: currentProject?.path,
                 });
                 // Refresh the explorer so the user sees the new layout
                 // immediately. The project-fs-changed listener will also
@@ -2253,11 +2807,11 @@ async function mountFolderExplorer()
             catch (err)
             {
                 const code = String((err && err.message) || err || "unknown");
-                const basename = srcAbs.split(/[\\/]/).pop() || "file";
-                const dstName = newParentAbs.split(/[\\/]/).pop() || "destination";
+                const baseName = basename(srcAbs) || "file";
+                const dstName = basename(newParentAbs) || "destination";
                 if (code.includes("target-exists"))
                 {
-                    showBanner(`${basename} already exists in ${dstName}`);
+                    showBanner(`${baseName} already exists in ${dstName}`);
                 }
                 else if (code.includes("move-into-descendant"))
                 {
@@ -2299,12 +2853,6 @@ async function refreshExplorer()
  * @type {string | null}
  */
 let lastRightClickedFolder = null;
-/**
- * Last folder the user focused in the explorer. Same v1 caveat as above.
- * @type {string | null}
- */
-let lastFocusedFolder = null;
-
 /**
  * The single contextmenu router. Walks from the event target up the DOM
  * looking for a known consumer root. Returns the menu items to show, or
@@ -2374,7 +2922,6 @@ function buildFileMenu(ctx)
     return [
         { id: "reveal", label: t("mangaplay-studio.menu.file.showInExplorer"), icon: "move-up-right", onSelect: tap("file-reveal", () => { revealInExplorer(ctx.path).catch((e) => console.warn("reveal failed:", e)); }) },
         { kind: "divider" },
-        { id: "copy",   label: t("mangaplay-studio.menu.file.copy"),   icon: "copy",     onSelect: tap("file-copy",   () => onCopy(ctx.path)) },
         { id: "rename", label: t("mangaplay-studio.menu.file.rename"), icon: "pencil",   onSelect: tap("file-rename", () => onBeginRename(ctx.filename)) },
         { kind: "divider" },
         { id: "delete", label: t("mangaplay-studio.menu.file.delete"), icon: "trash-2",  danger: true, onSelect: tap("file-delete", () => onDelete(ctx.path)) },
@@ -2400,26 +2947,196 @@ function buildExplorerMenu()
 {
     const parent = parentForCreation();
     const disabled = parent === null;
+    const root = currentProject?.path || null;
     return [
         { id: "new-folder",      label: t("mangaplay-studio.menu.explorer.newFolder"),      icon: "folder-plus", disabled, onSelect: () => onCreate(parent, "folder") },
         { id: "new-storyboard",  label: t("mangaplay-studio.menu.explorer.newStoryboard"),  icon: "file-plus",   disabled, onSelect: () => onCreate(parent, "mangaplay") },
         { id: "new-screenplay",  label: t("mangaplay-studio.menu.explorer.newScreenplay"),  icon: "file-plus",   disabled, onSelect: () => onCreate(parent, "fountain") },
-        { id: "new-superscript", label: t("mangaplay-studio.menu.explorer.newSuperscript"), icon: "file-plus",   disabled, onSelect: () => onCreate(parent, "superscript") },
+        { id: "new-text-file",   label: t("mangaplay-studio.menu.explorer.newTextFile"),    icon: "file-plus",   disabled, onSelect: () => onCreate(parent, "text") },
+        { kind: "divider" },
+        { id: "reveal-root",     label: t("mangaplay-studio.menu.explorer.showProjectRootInExplorer"), icon: "move-up-right", disabled: !root, onSelect: () => { if (root) revealInExplorer(root).catch((e) => console.warn("reveal failed:", e)); } },
     ];
 }
 
 /**
+ * Build the editor's "More Options" menu. Reads the active slot state to
+ * decide which items are disabled. The labels reuse the existing right-click
+ * menu locale keys where possible so the two surfaces stay in sync (rename /
+ * delete / show-in-explorer).
+ *
+ * Items: Rename · Export Screenplay (placeholder — full export ships next) ·
+ * Find (placeholder) · Show in System Explorer · Reveal Navigator · Delete.
+ * @returns {Array<any>}
+ */
+function buildEditorMoreOptionsMenu()
+{
+    const slot = slotManager?.getActive();
+    const path = slot?.path || null;
+    const basename = slot?.basename || "";
+    const format = /** @type {any} */ (slot)?.format || "general-text";
+    const isPlaceholder = !path;
+    const baseDisabled = isPlaceholder;
+    const exportDisabled = baseDisabled
+        || format === "general-text"
+        || format === "superscript-bin";
+    return [
+        { id: "rename", label: t("mangaplay-studio.menu.file.rename"), icon: "pencil",
+          disabled: baseDisabled,
+          onSelect: () => { if (path) openRenameFileFlow(path, basename); } },
+        { id: "export", label: t("mangaplay-studio.menu.editor.exportScreenplay") || "Export Screenplay",
+          icon: "file-text",
+          disabled: exportDisabled,
+          onSelect: () =>
+          {
+              const state = getRuntimeStorage().state || {};
+              void openExportScreenplayModal({
+                  script: state.script,
+                  scriptFormat: state.scriptFormat,
+                  sourceText: currentDoc,
+                  basename: slotManager?.getActive()?.basename || basename || "Untitled",
+                  localPath: path || "",
+              });
+          } },
+        { id: "publish-google-doc",
+          label: t("mangaplay-studio.menu.editor.publishGoogleDoc") || "Publish Google Doc",
+          icon: "cloud-upload",
+          disabled: exportDisabled,
+          onSelect: async () =>
+          {
+              const state = getRuntimeStorage().state || {};
+              // Derive scriptRelPath from project root + slot's absolute
+              // path so BUG-001 cache write has the keys it needs. Mirrors
+              // the derivation in setGoogleDocsActiveScript above.
+              let projectPath = "";
+              let scriptRelPath = "";
+              if (currentProject && path)
+              {
+                  projectPath = currentProject.path || "";
+                  const projNorm = projectPath.replace(/\\/g, "/");
+                  const slotNorm = String(path).replace(/\\/g, "/");
+                  scriptRelPath = slotNorm.startsWith(projNorm + "/")
+                      ? slotNorm.slice(projNorm.length + 1)
+                      : (slotManager?.getActive()?.basename || basename || "");
+              }
+              try
+              {
+                  const [mod, authMod] = await Promise.all([
+                      import("./google-docs-sync/publish-modal.js"),
+                      import("./auth/google-oauth.js"),
+                  ]);
+                  await mod.openPublishModal({
+                      script: state.script,
+                      scriptFormat: state.scriptFormat,
+                      sourceText: currentDoc,
+                      basename: slotManager?.getActive()?.basename || basename || "Untitled",
+                      localPath: path || "",
+                      projectPath,
+                      scriptRelPath,
+                      authClient: {
+                          getAccessToken: (opts) => authMod.getAccessToken(opts),
+                      },
+                  });
+                  // Refresh footer's SyncStateMachine so the gear flips
+                  // Grey → Blue immediately. See BUG-001.
+                  await refreshGoogleDocsActiveScript();
+              }
+              catch (e) { console.warn("[publish-google-doc] open failed:", e); }
+          } },
+        { kind: "divider" },
+        { id: "find", label: t("mangaplay-studio.menu.editor.find") || "Find",
+          icon: "search",
+          disabled: baseDisabled,
+          onSelect: () => {
+              showBanner(t("mangaplay-studio.menu.editor.findComingSoon")
+                  || "Find is on the next sprint — coming soon.");
+          } },
+        { kind: "divider" },
+        { id: "reveal", label: t("mangaplay-studio.menu.file.showInExplorer"),
+          icon: "move-up-right",
+          disabled: isPlaceholder,
+          onSelect: () => { if (path) { revealInExplorer(path).catch((e) => console.warn("reveal failed:", e)); } } },
+        { id: "reveal-navigator", label: t("mangaplay-studio.menu.editor.revealNavigator") || "Reveal Navigator",
+          icon: "panel-left-open",
+          disabled: isPlaceholder,
+          onSelect: () => { showNavigator(); } },
+        { kind: "divider" },
+        { id: "delete", label: t("mangaplay-studio.menu.file.delete"), icon: "trash-2",
+          danger: true,
+          disabled: baseDisabled,
+          onSelect: () => { if (path) onDelete(path); } },
+    ];
+}
+
+/**
+ * Open the More Options context menu anchored to the button.
+ * @param {HTMLElement} anchor
+ */
+function openEditorMoreOptionsMenu(anchor)
+{
+    if (!anchor) return;
+    try
+    {
+        const rect = anchor.getBoundingClientRect();
+        const items = buildEditorMoreOptionsMenu();
+        openContextMenu({
+            x: Math.round(rect.left),
+            y: Math.round(rect.bottom + 2),
+            items,
+        });
+    }
+    catch (e) { console.warn("[more-options] open failed:", e); }
+}
+
+/**
+ * Ensure the left pane is expanded, switch the navigator subview to "folder",
+ * and surface the active file's row (flash + scroll-into-view).
+ */
+function showNavigator()
+{
+    try { applyLeftPaneCollapsedState(false); } catch {}
+    queueAppSettingsSave({ leftPaneCollapsed: false });
+    void switchSubview("folder");
+    requestAnimationFrame(() =>
+    {
+        try
+        {
+            if (folderList && typeof /** @type {any} */ (folderList).revealActive === "function")
+            {
+                /** @type {any} */ (folderList).revealActive();
+            }
+        }
+        catch (e) { console.debug("[reveal-navigator] revealActive failed:", e); }
+    });
+}
+
+/**
+ * Open the Rename File flow. v1: route through the explorer's existing
+ * inline-rename UX (handleRename already syncs tab + explorer + meta). A
+ * dedicated modal is the next milestone.
+ *
+ * @param {string} _path
+ * @param {string} filename
+ */
+function openRenameFileFlow(_path, filename)
+{
+    if (!filename) return;
+    // Reveal the navigator first so the user sees the rename input land in
+    // the explorer row.
+    showNavigator();
+    requestAnimationFrame(() => onBeginRename(filename));
+}
+
+/**
  * Resolve the parent folder for a `New …` action. Returns null when no
- * project is open OR the project is read-only — the menu items render in a
- * disabled state in those cases so the user discovers the affordance.
+ * project is open — the menu items render in a disabled state so the user
+ * discovers the affordance.
  * @returns {string | null}
  */
 function parentForCreation()
 {
-    if (!currentProject || currentProject.readOnly) return null;
+    if (!currentProject) return null;
     if (lastRightClickedFolder) return lastRightClickedFolder;
-    if (lastFocusedFolder) return lastFocusedFolder;
-    return joinPath(currentProject.path, "project");
+    return currentProject.path;
 }
 
 /**
@@ -2576,7 +3293,7 @@ async function replaceActiveTab(newPath)
         //    the active slot's CM6 view (same format) or rebuilds it
         //    (different format), and updates path/basename/format on the
         //    slot record. The active slot becomes the new file's slot.
-        const newBase = newPath.split(/[\\/]/).pop() || "";
+        const newBase = basename(newPath);
         const format = /** @type {any} */ (formatForFilename(newBase));
         if (slotManager)
         {
@@ -2661,22 +3378,41 @@ async function replaceActiveTab(newPath)
  */
 const __mpsSelfChanges = new Map();
 
-/** @param {string} path */
-function markSelfChange(path)
+/**
+ * Mark a path as self-mutated. Default TTL 5s — wide enough that the
+ * watcher's debounce (and any atomic-write fan-out into multiple events)
+ * lands inside the window. Pass `ttlMs` to shorten for high-frequency
+ * mutations (e.g. autosave) so genuine external edits aren't suppressed
+ * for too long.
+ * @param {string} path
+ * @param {number} [ttlMs] default 5000
+ */
+function markSelfChange(path, ttlMs = 5000)
 {
     if (!path) return;
-    __mpsSelfChanges.set(normalizePath(path), Date.now() + 5000);
+    __mpsSelfChanges.set(normalizePath(path), Date.now() + ttlMs);
 }
 
-/** @param {string} path @returns {boolean} */
+/**
+ * A single self-initiated write can fan out into multiple watcher events
+ * (atomic rename → "deleted" then "modified", on some platforms). So
+ * consume is a TTL window peek, NOT a single-use take — any event within
+ * the window is treated as self. The map entry expires on its own; we
+ * don't delete on read.
+ * @param {string} path @returns {boolean}
+ */
 function consumeSelfChange(path)
 {
     if (!path) return false;
     const key = normalizePath(path);
     const expiry = __mpsSelfChanges.get(key);
     if (expiry === undefined) return false;
-    __mpsSelfChanges.delete(key);
-    return expiry > Date.now();
+    if (expiry <= Date.now())
+    {
+        __mpsSelfChanges.delete(key);
+        return false;
+    }
+    return true;
 }
 
 async function handleRename(oldPath, newBasename)
@@ -2696,7 +3432,8 @@ async function handleRename(oldPath, newBasename)
             // old path. Pass currentlyOpen: false — the Rust safety net's purpose
             // is to refuse renames when the UI forgot to drain. We did drain.
             markSelfChange(oldPath);
-            const result = await renameFile(oldPath, newBasename, /*currentlyOpen=*/ false);
+            const projectRoot = currentProject?.path;
+            const result = await renameFile(oldPath, newBasename, /*currentlyOpen=*/ false, projectRoot);
             if (log) log("info", "handleRename", `ipc-ok result=${result}`);
             if (typeof result === "string")
             {
@@ -2707,14 +3444,14 @@ async function handleRename(oldPath, newBasename)
             {
                 broker.unlock(result);
                 // Update the active slot so its tab label + dataset.path
-                // reflect the new name. The legacy currentProject mirror
-                // below is kept until other call sites migrate.
+                // reflect the new name, and mirror the new path/basename
+                // onto currentProject (other modules read it directly).
                 const activeSlot = slotManager?.getActive();
                 if (activeSlot) slotManager.renamePath(activeSlot.tabId, result);
                 if (currentProject)
                 {
                     currentProject.scriptPath = result;
-                    const base = result.split(/[\\/]/).pop();
+                    const base = basename(result);
                     if (base) currentProject.scriptBasename = base;
                 }
             }
@@ -2767,7 +3504,8 @@ async function onDelete(path)
             try
             {
                 markSelfChange(path);
-                await deleteFile(path);
+                const projectRoot = currentProject?.path;
+                await deleteFile(path, projectRoot);
                 if (log) log("info", "onDelete", "ipc-ok via trash");
             }
             catch (err)
@@ -2784,7 +3522,8 @@ async function onDelete(path)
                     });
                     if (!force) return;
                     markSelfChange(path);
-                    await deleteFileForce(path);
+                    const projectRoot = currentProject?.path;
+                    await deleteFileForce(path, projectRoot);
                     if (log) log("info", "onDelete", "ipc-ok via force-delete");
                 }
                 else
@@ -2827,7 +3566,7 @@ async function onDelete(path)
  * keyboard path that bypasses `disabled`.
  *
  * @param {string | null} parent
- * @param {"folder"|"mangaplay"|"fountain"|"superscript"} kind
+ * @param {"folder"|"mangaplay"|"fountain"|"superscript"|"text"} kind
  */
 async function onCreate(parent, kind)
 {
@@ -2881,7 +3620,6 @@ let projectFsChangedWired = false;
  * that needs to detach the listener cleanly (see plan
  * path-portability-and-watcher-followups.md N1).
  */
-let projectFsChangedUnlisten = null;
 async function wireProjectFsChangedListener()
 {
     // One-shot: project-fs-changed handler watches `currentProject` by closure,
@@ -2893,13 +3631,13 @@ async function wireProjectFsChangedListener()
     projectFsChangedWired = true;
     try
     {
-        const w = window.__TAURI__?.window?.getCurrentWindow?.();
+        const w = isTauri() ? getCurrentWindow() : null;
         if (!w || typeof w.listen !== "function")
         {
             projectFsChangedWired = false;
             return;
         }
-        projectFsChangedUnlisten = await w.listen("project-fs-changed", async ({ payload }) =>
+        await w.listen("project-fs-changed", async ({ payload }) =>
         {
             try
             {
@@ -2948,7 +3686,7 @@ async function wireProjectFsChangedListener()
                     if (currentProject)
                     {
                         currentProject.scriptPath = change.to ?? null;
-                        const newBase = (change.to || "").split(/[\\/]/).pop();
+                        const newBase = basename(change.to);
                         if (newBase) currentProject.scriptBasename = newBase;
                     }
                     showBanner(t("mangaplay-studio.banner.fileRenamedExternally"));
@@ -2980,7 +3718,7 @@ async function wireProjectFsChangedListener()
                     // trailing refreshExplorer() picks up the mtime change.
                     if (broker.isActivePath(payload.path))
                     {
-                        const base = payload.path.split(/[\\/]/).pop();
+                        const base = basename(payload.path);
                         showBanner(t("mangaplay-studio.banner.fileModifiedExternally", { file: base }));
                     }
                 }
@@ -3016,7 +3754,6 @@ async function wireProjectFsChangedListener()
 async function mountProjectViews() {
     const editorEl = document.querySelector("mps-editor-host");
     const canvasEl = document.querySelector("mps-canvas");
-    const screenplayEl = document.querySelector("mps-screenplay");
 
     // Autosave: routed through the ActiveScriptBroker so destructive ops
     // (rename / delete / migrate) can drain pending writes before mutating.
@@ -3026,12 +3763,19 @@ async function mountProjectViews() {
     debouncedScriptSave = (text) =>
     {
         if (!currentProject || !currentProject.scriptPath) return;
-        if (currentProject.readOnly) return;
         broker.scheduleScriptSave(text, async (latest) =>
         {
             setSaveState("saving");
             try
             {
+                // Mark the path as a self-change so the FS watcher swallows
+                // any events the atomic write emits — a single atomic write
+                // can fan out into "deleted" then "modified" depending on
+                // notify-rs behaviour, so consumeSelfChange is now a TTL
+                // window peek (not single-take). Short TTL keeps the window
+                // tight so genuine external edits aren't suppressed for
+                // longer than the watcher debounce.
+                markSelfChange(currentProject.scriptPath, 1500);
                 await saveScript(currentProject.scriptPath, latest);
                 setSaveState("saved");
                 if (saveFailureBannerShown) saveFailureBannerShown = false;
@@ -3055,7 +3799,6 @@ async function mountProjectViews() {
     // and the right-pane screenplay re-renders from the same source of truth.
     debouncedScreenplayUpdate = debouncedSave((text) => {
         publishParsedScript(text);
-        if (screenplayView) updateScreenplay(screenplayView, text);
     }, SCREENPLAY_DEBOUNCE_MS);
 
     if (editorEl)
@@ -3311,10 +4054,77 @@ async function mountProjectViews() {
                 }
             }
 
+            // Mirror the mode onto the editor-area top bar so other
+            // attribute-driven UI (e.g. format pill visibility) can react.
+            // Pagination is NO LONGER gated on mode — it follows the active
+            // file format instead (mangaplay → enabled, anything else →
+            // visible-but-disabled), so the user can paginate the Storyboard
+            // canvas from text / source / visual alike. tooltip.js keys off
+            // attr presence, so we drop `data-tooltip` while disabled to
+            // suppress the hover.
+            if (editorAreaTopBarEl)
+            {
+                editorAreaTopBarEl.setAttribute("data-mode", mode);
+            }
+            if (editorBarPagePrevBtn && editorBarPageNextBtn)
+            {
+                const format = getActivePaginationFormat();
+                if (format === "mangaplay")
+                {
+                    const prevLabel = t("ui.paint.prevPage") || "Previous page";
+                    const nextLabel = t("ui.paint.nextPage") || "Next page";
+                    editorBarPagePrevBtn.setAttribute("data-tooltip", prevLabel);
+                    editorBarPagePrevBtn.setAttribute("data-tooltip-side", "bottom");
+                    editorBarPageNextBtn.setAttribute("data-tooltip", nextLabel);
+                    editorBarPageNextBtn.setAttribute("data-tooltip-side", "bottom");
+                    editorBarPagePrevBtn.disabled = _paginationPageIndex <= 0;
+                    editorBarPageNextBtn.disabled = _paginationPageIndex >= _paginationTotalPages - 1;
+                }
+                else
+                {
+                    editorBarPagePrevBtn.disabled = true;
+                    editorBarPageNextBtn.disabled = true;
+                    editorBarPagePrevBtn.removeAttribute("data-tooltip");
+                    editorBarPageNextBtn.removeAttribute("data-tooltip");
+                }
+            }
+            if (editorBarFixIssuesBtn)
+            {
+                const slot = slotManager?.getActive();
+                const supportedFormat = slot?.format === "mangaplay"
+                    || slot?.format === "fountain";
+                if (supportedFormat)
+                {
+                    const fixLabel = t("ui.visualEditor.fixStructuralIssues",
+                        "Fix Structural Issues");
+                    editorBarFixIssuesBtn.setAttribute("data-tooltip", fixLabel);
+                    editorBarFixIssuesBtn.setAttribute("data-tooltip-side", "bottom");
+                    editorBarFixIssuesBtn.setAttribute("aria-label", fixLabel);
+                    if (typeof window.__mpsRefreshFixIssuesBtn === "function")
+                    {
+                        try { window.__mpsRefreshFixIssuesBtn(); } catch (_) {}
+                    }
+                    else
+                    {
+                        editorBarFixIssuesBtn.disabled = true;
+                    }
+                }
+                else
+                {
+                    editorBarFixIssuesBtn.disabled = true;
+                    editorBarFixIssuesBtn.removeAttribute("data-tooltip");
+                }
+            }
+
             // Remember module-side so future buildEditor() calls match.
             setEditorMode(mode);
             editorMode = mode;
             modeToggleEl.mode = mode;
+            // Mode sync contract — single switchboard fans out to every
+            // surface that displays current mode. App Footer's Mode Button
+            // reflects the new icon; never tracks its own state.
+            try { appFooter?.setMode(mode); }
+            catch (e) { console.debug("[mode-switch] appFooter.setMode threw:", e); }
 
             // Restore keyboard focus to the editor after a mode switch.
             // Without this, the toggle button (a plain <button>) keeps focus
@@ -3340,19 +4150,178 @@ async function mountProjectViews() {
             }
         }
 
-        // Float the mode toggle top-right of the editor host. CSS in
-        // app.css handles the absolute positioning; we only mount it.
+        // 44px top bar across the editor host. Carries the pagination
+        // chevrons on the left and the mode toggle on the right. The bar
+        // overlays all three editor surfaces (Text / Source / Visual) so
+        // a single chrome serves every mode. CSS in app.css owns the
+        // positioning; we only build the shell + wire its children.
         if (editorEl)
         {
-            editorEl.appendChild(modeToggleEl);
+            editorAreaTopBarEl = document.createElement("div");
+            editorAreaTopBarEl.className = "editor-area-top-bar";
+
+            editorBarPagePrevBtn = /** @type {HTMLButtonElement} */ (
+                document.createElement("button")
+            );
+            editorBarPagePrevBtn.type = "button";
+            editorBarPagePrevBtn.className = "editor-bar-page-prev";
+            editorBarPagePrevBtn.innerHTML = icon("arrow-left", { size: 16 });
+            editorBarPagePrevBtn.addEventListener("click", () =>
+            {
+                if (editorBarPagePrevBtn?.disabled) return;
+                paginationNavigate(-1);
+            });
+
+            editorBarPageNextBtn = /** @type {HTMLButtonElement} */ (
+                document.createElement("button")
+            );
+            editorBarPageNextBtn.type = "button";
+            editorBarPageNextBtn.className = "editor-bar-page-next";
+            editorBarPageNextBtn.innerHTML = icon("arrow-right", { size: 16 });
+            editorBarPageNextBtn.addEventListener("click", () =>
+            {
+                if (editorBarPageNextBtn?.disabled) return;
+                paginationNavigate(1);
+            });
+
+            editorAreaTopBarEl.appendChild(editorBarPagePrevBtn);
+            editorAreaTopBarEl.appendChild(editorBarPageNextBtn);
+
+            // Fix Structural Issues — lucide wrench icon, sits right after
+            // the page next chevron. Active only for mangaplay / fountain
+            // formats (see mode-bridge above). Click rewrites the active
+            // CM6 buffer via the pure source-text fixers in
+            // ./structural-fixer.js. Disabled state refreshed via the
+            // `window.__mpsRefreshFixIssuesBtn` window hook below.
+            editorBarFixIssuesBtn = /** @type {HTMLButtonElement} */ (
+                document.createElement("button")
+            );
+            editorBarFixIssuesBtn.type = "button";
+            editorBarFixIssuesBtn.className = "editor-bar-fix-issues";
+            editorBarFixIssuesBtn.innerHTML = icon("wrench", { size: 16 });
+            editorBarFixIssuesBtn.addEventListener("click", () =>
+            {
+                if (editorBarFixIssuesBtn?.disabled) return;
+                const slot = slotManager?.getActive();
+                const view = slot?.view;
+                if (!view) return;
+                syncStructuralFixerConvention();
+                const before = view.state.doc.toString();
+                const after = fixIssues(slot.format, before);
+                if (after === before) return;
+                view.dispatch({
+                    changes: { from: 0, to: view.state.doc.length, insert: after }
+                });
+            });
+            editorAreaTopBarEl.appendChild(editorBarFixIssuesBtn);
+
+            // Sync hook — mps-visual-editor calls this from its _render
+            // wrapper after every AST round-trip so the disabled state of
+            // the icon always reflects the current set of fixable issues.
+            // Returns silently when no visual editor is mounted (text /
+            // source mode), when the button hasn't been built yet, or
+            // when the top bar is not in visual mode.
+            window.__mpsRefreshFixIssuesBtn = () =>
+            {
+                if (!editorBarFixIssuesBtn) return;
+                const slot = slotManager?.getActive();
+                const view = slot?.view;
+                const supported = slot
+                    && (slot.format === "mangaplay" || slot.format === "fountain");
+                if (!view || !supported)
+                {
+                    editorBarFixIssuesBtn.disabled = true;
+                    editorBarFixIssuesBtn.removeAttribute("data-tooltip");
+                    editorBarFixIssuesBtn.removeAttribute("aria-label");
+                    return;
+                }
+                // Tooltip is also set in the applyEditorMode bridge, but
+                // we re-stamp here so it survives a slot activation that
+                // doesn't trigger a mode switch (e.g. opening a Fountain
+                // file directly into its default mode).
+                const fixLabel = t("ui.visualEditor.fixStructuralIssues",
+                    "Fix Structural Issues");
+                editorBarFixIssuesBtn.setAttribute("data-tooltip", fixLabel);
+                editorBarFixIssuesBtn.setAttribute("data-tooltip-side", "bottom");
+                editorBarFixIssuesBtn.setAttribute("aria-label", fixLabel);
+                syncStructuralFixerConvention();
+                const text = view.state.doc.toString();
+                editorBarFixIssuesBtn.disabled = !hasFixableIssues(slot.format, text);
+            };
+
+            // SuperScript alpha warning pill. Visibility driven by the
+            // `data-format` attribute on the top bar (set by syncFormatToTopBar
+            // when the active slot changes). The element stays mounted so we
+            // don't churn the DOM on every format flip.
+            const superscriptWarningEl = document.createElement("span");
+            superscriptWarningEl.className = "editor-bar-superscript-warning";
+            superscriptWarningEl.textContent = t("mangaplay-studio.banner.superscriptAlpha")
+                || "SuperScript is in alpha — expect bugs";
+            editorAreaTopBarEl.appendChild(superscriptWarningEl);
+
+            editorAreaTopBarEl.appendChild(modeToggleEl);
+
+            // More Options button — opens a context menu (Rename, Show in
+            // Explorer, Reveal Navigator, Delete File). Styled to match the
+            // mode toggle button (same .mps-editor-mode-toggle-btn class) so
+            // the two sit visually together.
+            const moreOptionsBtn = /** @type {HTMLButtonElement} */ (
+                document.createElement("button")
+            );
+            moreOptionsBtn.type = "button";
+            moreOptionsBtn.id = "btn-editor-more-options";
+            moreOptionsBtn.className = "mps-editor-mode-toggle-btn editor-bar-more-options";
+            moreOptionsBtn.innerHTML = icon("ellipsis-vertical", { size: 18 });
+            const moreOptionsLabel = t("mangaplay-studio.menu.editor.moreOptionsTooltip")
+                || "More Options";
+            moreOptionsBtn.setAttribute("aria-label", moreOptionsLabel);
+            moreOptionsBtn.setAttribute("data-tooltip", moreOptionsLabel);
+            moreOptionsBtn.setAttribute("data-tooltip-side", "left");
+            moreOptionsBtn.addEventListener("click", () =>
+            {
+                openEditorMoreOptionsMenu(moreOptionsBtn);
+                if (moreOptionsBtn) moreOptionsBtn.blur();
+            });
+            editorAreaTopBarEl.appendChild(moreOptionsBtn);
+
+            editorEl.appendChild(editorAreaTopBarEl);
+
+            // Reflect pagination state on the chevron buttons. Only honoured
+            // when the active slot's format is `mangaplay` — other formats
+            // keep the chevrons visible but disabled (gate enforced in the
+            // applyEditorMode bridge above). Read `data-format` off the
+            // editor-area top bar (stamped by syncFormatToTopBar) so we don't
+            // need to re-resolve via slotManager on every page-state event.
+            subscribePaginationState(({ pageIndex, totalPages }) =>
+            {
+                if (!editorBarPagePrevBtn || !editorBarPageNextBtn) return;
+                if (editorAreaTopBarEl?.getAttribute("data-format") !== "mangaplay") return;
+                editorBarPagePrevBtn.disabled = pageIndex <= 0;
+                editorBarPageNextBtn.disabled = pageIndex >= totalPages - 1;
+            });
+
             modeToggleEl.addEventListener("mps:mode-change", (ev) =>
             {
                 const next = /** @type {any} */ (ev).detail?.mode;
                 if (next) { void applyEditorMode(next); }
             });
+            // Expose the closure to module-level helpers so format-driven
+            // downgrades (applyAllowedModesForFormat) can re-route through
+            // the same single switchboard.
+            applyEditorModeRef = applyEditorMode;
             // Seed the initial mode (also reconfigures Compartments for
             // pre-existing slots, mounts Visual if needed).
             void applyEditorMode(editorMode);
+            // Apply allowed-mode constraints + warning pill for the active
+            // slot's format. onSlotActivated re-applies this whenever the
+            // user switches tabs.
+            try
+            {
+                const initialFormat = slotManager?.getActive()?.format
+                    || /** @type {any} */ (formatForFilename(currentProject?.scriptBasename || ""));
+                applyAllowedModesForFormat(initialFormat);
+            }
+            catch (e) { console.debug("[mode-init] allowed-modes seed failed:", e); }
         }
         // ────────────────────────────────────────────────────────────────────
 
@@ -3428,6 +4397,8 @@ async function mountProjectViews() {
             }
         );
 
+        rightPaneEmpty = mountRightPaneEmpty();
+
         // Boot — restore prior tab snapshot if any. Each restored entry
         // either references a file path (read from disk; skipped on read
         // failure) or carries a null path (fresh "New tab" placeholder).
@@ -3449,7 +4420,7 @@ async function mountProjectViews() {
                         try
                         {
                             const text = (await readFile(entry.path)) ?? "";
-                            const base = entry.path.split(/[\\/]/).pop() || "";
+                            const base = basename(entry.path);
                             slotManager.openNew(
                                 entry.path,
                                 text,
@@ -3526,7 +4497,6 @@ async function mountProjectViews() {
         const debouncedMangaartSave = (pageId) =>
         {
             if (!currentProject) return;
-            if (currentProject.readOnly) return;
             const key = String(pageId ?? "_all");
             // Payload is the mangaart cache itself — we don't snapshot here
             // because saveMangaart re-reads the live cache. Pass the cache
@@ -3617,11 +4587,6 @@ async function mountProjectViews() {
         });
     }
 
-    if (screenplayEl) {
-        const initialDoc = currentProject?.script || "";
-        screenplayView = buildScreenplay(screenplayEl, initialDoc);
-    }
-
     // Apply initial view mode from app settings (shell layout is app-wide).
     const __shellSettings = globalThis.__MPS_APP_SETTINGS__ || {};
     if (__shellSettings.viewMode) {
@@ -3644,6 +4609,119 @@ async function mountProjectViews() {
     restoreShellMeta();
     refreshProjectSwitcher();
     updateEmptyState();
+
+    // ── App Footer + Google Docs sync gear (Phase 3+) ───────────────────
+    // The App Footer is the 200×30 bottom-right panel owning the mode
+    // button, word / char counts, and the Google Docs sync gear. It's
+    // built once per app lifetime; project switches just call
+    // setMode / recountNow / setSyncState on the same controller.
+    //
+    // mountGoogleDocsFooter no longer creates its own DOM — it accepts the
+    // gear-controller adapter below so the SyncStateMachine drives the
+    // shared App Footer instead of a separate full-width bar.
+    try
+    {
+        const footerHost = /** @type {HTMLElement|null} */ (
+            document.getElementById("app-footer"));
+        if (footerHost && !appFooter)
+        {
+            appFooter = mountAppFooter({
+                host: footerHost,
+                getActiveSlot: () => slotManager?.getActive() || null,
+                applyEditorMode: (mode) =>
+                {
+                    // Re-route through whatever applyEditorMode closure the
+                    // current project mount installed (matches the top-bar
+                    // toggle's path). Bridge ref because the closure is
+                    // captured per-mount.
+                    if (applyEditorModeRef) return applyEditorModeRef(mode);
+                },
+                getEditorMode: () =>
+                {
+                    // Read the live attribute on modeToggleEl — the single
+                    // source of truth post-applyEditorMode. Falls back to
+                    // "text" on cold boot before applyEditorMode runs.
+                    return /** @type {any} */ (
+                        modeToggleEl?.getAttribute("mode") || "text");
+                },
+                getDocumentText: () =>
+                {
+                    // Visual mode reads the AST in RuntimeStorage; serialise
+                    // before counting. Text / Source read the active CM
+                    // slot via the manager's getActiveSlot bridge.
+                    try
+                    {
+                        const mode = modeToggleEl?.getAttribute("mode");
+                        if (mode === "visual")
+                        {
+                            const script = getRuntimeStorage().state?.script;
+                            if (typeof script === "string") return script;
+                            if (script && typeof script === "object")
+                            {
+                                return visualFormatScript(/** @type {any} */ (script));
+                            }
+                            return "";
+                        }
+                    }
+                    catch (e) { console.debug("[app-footer] visual read threw:", e); }
+                    const slot = slotManager?.getActive();
+                    return slot?.view?.state?.doc?.toString?.() || "";
+                }
+            });
+            // Wire the gear's click to the bootstrap handler that opens the
+            // publish modal (when unsynced) or the sync popover.
+            appFooter.setGearClickHandler(getGoogleDocsGearClickHandler());
+            appFooter.show();
+        }
+
+        if (appFooter)
+        {
+            // Mount the Google Docs sync state-machine bootstrap against the
+            // App Footer's gear controller. Adapter exposes the four mutators
+            // bootstrap needs (setSyncState / setLockState / show / hide /
+            // getAnchorEl / setFilename).
+            mountGoogleDocsFooter({
+                setSyncState: (state) => appFooter?.setSyncState(state),
+                setLockState: (state) => appFooter?.setLockState(state),
+                show: () => appFooter?.show(),
+                hide: () => { /* keep footer visible even when no GDoc */ },
+                getAnchorEl: () => /** @type {HTMLElement} */ (appFooter?.gearEl),
+                setFilename: (_name) => { /* shown in the sync popover header */ }
+            }, {
+                getAuthToken: async () =>
+                {
+                    try { return await getAccessToken({ allowRefresh: true }); }
+                    catch (_) { return null; }
+                },
+                getUserProfile: () =>
+                {
+                    const p = getCurrentProfile();
+                    return { name: p?.name || p?.email || null };
+                },
+                getClientId: () => getOrCreateClientId(),
+                getScriptContext: () =>
+                {
+                    const slot = slotManager?.getActive();
+                    return {
+                        format: slot?.format || "text",
+                        sourceText: slot?.view?.state?.doc?.toString?.() || ""
+                    };
+                }
+            });
+
+            // Seed the mode icon + counts now that the footer is mounted.
+            try
+            {
+                const initialMode = /** @type {any} */ (
+                    modeToggleEl?.getAttribute("mode") || "text");
+                appFooter.setMode(initialMode);
+            }
+            catch (e) { console.debug("[app-footer] initial setMode threw:", e); }
+            try { appFooter.recountNow(); }
+            catch (e) { console.debug("[app-footer] initial recount threw:", e); }
+        }
+    }
+    catch (err) { console.warn("[app-footer] mount failed:", err); }
 }
 
 /**
@@ -3665,6 +4743,24 @@ async function wireShellOnce()
         el.outerHTML = icon(el.dataset.icon, { size: 16, class: "icon" });
     }
 
+    // Mount the mobile / tablet bottom tabbar. Lazy-import so standalone
+    // builds Phase-2-DCE drop the component module. Idempotent — the
+    // component constructor guards on isMobileLike().
+    if (isMobileLike())
+    {
+        try
+        {
+            await import("./components/mps-mobile-tabbar.js");
+            if (!document.querySelector("mps-mobile-tabbar"))
+            {
+                const tabbar = document.createElement("mps-mobile-tabbar");
+                tabbar.id = "mps-mobile-tabbar";
+                document.body.appendChild(tabbar);
+            }
+        }
+        catch (e) { console.warn("[wireShellOnce] tabbar mount failed:", e); }
+    }
+
     // Tooltip system — registers a single delegated handler for [data-tooltip] elements.
     wireDeclarativeTooltips();
 
@@ -3675,8 +4771,12 @@ async function wireShellOnce()
     wireTopbarPagination();
     wirePageIndexSessionWriteThrough();
     wireLeftPaneToggle();
+    wireLeftSubviews();
     wireEmptyState();
     wireSettingsButton();
+    wireHelpButton();
+    wireHomeButton();
+    wireRailAccount();
 
     // Left-click on a folder-list-row opens that file in the editor. Skipped
     // when the click target is inside the inline-rename input (the input
@@ -3718,11 +4818,15 @@ async function wireShellOnce()
         });
     }
 
-    // §6 — when the window is maximized / restored / resized, force the canvas
+    // When the window is maximized / restored / resized, force the canvas
     // to re-fit. ResizeObserver inside the website canvas can sample a stale
     // measurement mid-transition; the Tauri-side onResized fires post-settle.
+    // Mobile / tablet windows are fixed-size — skip the listener (no resize
+    // can happen, and the persist-size code below would try to save bogus
+    // mobile geometry into settings.json).
     try
     {
+        if (!hasWindowChrome()) throw new Error("skip-no-chrome");
         const winMod = await import("@tauri-apps/api/window");
         const w = winMod.getCurrentWindow();
         await w.onResized(() =>
@@ -3775,8 +4879,67 @@ async function wireShellOnce()
     }
     catch (e)
     {
-        console.warn("[wireShellOnce] tauri window.onResized unavailable:", e?.message);
+        // "skip-no-chrome" — expected on mobile/tablet (fixed-size window,
+        // no resize listener to install).
+        if (e?.message !== "skip-no-chrome")
+        {
+            console.warn("[wireShellOnce] tauri window.onResized unavailable:", e?.message);
+        }
     }
+
+    // Mount the hand-rolled #window-controls (min / max / close) — replaces
+    // tauri-plugin-frame's eval-injected buttons. Gated internally on
+    // hasWindowChrome() so mobile / tablet skip.
+    try { await wireWindowControls(); }
+    catch (e) { console.warn("[wireShellOnce] wireWindowControls failed:", e?.message); }
+
+    // Double-click on empty regions of #top-bar toggles window maximize, matching
+    // the native titlebar behaviour above it. Skip clicks that originate on
+    // interactive descendants so buttons and labels stay clickable. Mobile /
+    // tablet windows have no maximize concept — guard with hasWindowChrome().
+    const topBarEl = document.getElementById("top-bar");
+    if (topBarEl && hasWindowChrome())
+    {
+        topBarEl.addEventListener("dblclick", async (e) =>
+        {
+            const t = /** @type {HTMLElement} */ (e.target);
+            if (t.closest("button, a, input, [role='button']")) return;
+            try
+            {
+                const winMod = await import("@tauri-apps/api/window");
+                await winMod.getCurrentWindow().toggleMaximize();
+            }
+            catch (err) { console.warn("[top-bar dblclick] toggleMaximize failed:", err?.message); }
+        });
+    }
+}
+
+// ── Mobile auto-create helper ──
+/**
+ * Create (or pick a numbered-suffix variant of) the default mobile project
+ * under the user-data dir. Reviewed item #5: the Rust `project_create_new`
+ * impl unconditionally overwrites meta.json + seed file, so the JS pre-check
+ * + numbered suffix is load-bearing — not optional.
+ *
+ * @param {{forceNew?: boolean}} [opts]
+ * @returns {Promise<string>} canonical project path
+ */
+async function ensureMobileDefaultProject(opts = {})
+{
+    const userDataDir = await invoke("user_data_dir");
+    let candidate = `${userDataDir}/MyFirstProject`;
+    if (opts.forceNew || (await pathExists(candidate)))
+    {
+        let n = 2;
+        // 9999 cap mirrors the pathological fallback in fs_helpers.rs.
+        while ((await pathExists(`${userDataDir}/MyFirstProject (${n})`)) && n < 9999) n++;
+        candidate = `${userDataDir}/MyFirstProject (${n})`;
+    }
+    // Strip the parent prefix to get just the name for project_create_new.
+    const name = candidate.substring(userDataDir.length + 1);
+    const path = await createNewProject(userDataDir, name);
+    await saveUserSettings({ lastProjectPath: path });
+    return path;
 }
 
 // ── Boot sequence ──
@@ -3806,10 +4969,9 @@ async function boot() {
         // re-logged (would loop), so we swallow its rejection.
         const forwardToRustLog = (level, tag, msg) => {
             try {
-                const invokeFn = /** @type {any} */ (window).__TAURI__?.core?.invoke;
-                if (typeof invokeFn === "function")
+                if (isTauri())
                 {
-                    invokeFn("app_log_message", {
+                    invoke("app_log_message", {
                         level,
                         tag: String(tag || "").slice(0, 64),
                         message: String(msg || "").slice(0, 4096),
@@ -3831,27 +4993,12 @@ async function boot() {
             forwardToRustLog("warn", "console", args.map(String).join(" "));
         };
 
-        // Existing JS crash reporting + forward to Rust log.
-        window.addEventListener("error", (event) => {
-            const crashEntry = {
-                at: new Date().toISOString(),
-                message: event.message,
-                filename: event.filename,
-                lineno: event.lineno,
-                colno: event.colno,
-                stack: event.error?.stack || "",
-            };
-            // Log to console as backup (Rust panic hook will write to disk)
-            console.error("CRASH:", JSON.stringify(crashEntry));
-            forwardToRustLog("error", "uncaught", `${event.filename}:${event.lineno} ${event.message}\n${event.error?.stack || ""}`);
-        });
-
-        window.addEventListener("unhandledrejection", (event) => {
-            const reason = event.reason;
-            const msg = (reason && (reason.stack || reason.message)) || String(reason);
-            console.error("UNHANDLED REJECTION:", reason);
-            forwardToRustLog("error", "rejection", msg);
-        });
+        // NOTE: window.addEventListener("error" | "unhandledrejection") is
+        // installed once at module-load by error-router.js. error-router's
+        // reportError() calls console.error("[error-router] ..."), which
+        // hits the patched console.error above and forwards to Rust. So
+        // there's only ONE installer for global error capture, with the
+        // taxonomy + surface routing applied uniformly.
 
         // Expose a tagged logger for explicit telemetry from critical paths
         // (onCopy/onDelete/handleRename/onCreate). The handlers call this
@@ -3863,7 +5010,9 @@ async function boot() {
         // i18n init — auto-detect OS locale via navigator.language /
         // navigator.languages so the picker shows the right language on
         // first boot. Setting language for downstream t() calls.
-        initI18n();
+        // Awaited because the active locale's dictionary is now lazy-loaded;
+        // every downstream `t()` callsite depends on it being resident.
+        await initI18n();
 
         // Tooltip i18n bootstrap — walks [data-i18n-tooltip] now and on
         // every mps-lang-change, mapping localised strings into the
@@ -3884,9 +5033,9 @@ async function boot() {
             if (!code) return;
             try
             {
-                if (window.__TAURI__?.core?.invoke)
+                if (isTauri())
                 {
-                    await window.__TAURI__.core.invoke("app_settings_set", {
+                    await invoke("app_settings_set", {
                         value: { language: code },
                     });
                 }
@@ -3897,9 +5046,9 @@ async function boot() {
             }
         });
 
-        // §10 — fetch app-wide settings AND apply colorScheme BEFORE the
-        // chrome unhides (FOUC prevention). loadingScreen + chrome both
-        // honour [data-theme], so this needs to happen before either paints.
+        // Fetch app-wide settings AND apply colorScheme BEFORE the chrome
+        // unhides (FOUC prevention). loadingScreen + chrome both honour
+        // [data-theme], so this needs to happen before either paints.
         const appSettings = await loadAppSettings();
         applyColorScheme(appSettings.colorScheme);
         applyScreenplayFont(appSettings.screenplayFont);
@@ -3910,7 +5059,7 @@ async function boot() {
         if (appSettings.language)
         {
             const { setLanguage } = await import("./adapters/tauri-i18n.js");
-            setLanguage(appSettings.language);
+            await setLanguage(appSettings.language);
         }
         // Stash for later use (mountViews reads from currentProject + here).
         globalThis.__MPS_APP_SETTINGS__ = appSettings;
@@ -3959,54 +5108,151 @@ async function boot() {
         // boot path keeps working even if the Rust command misbehaves.
         try { await loadUserSettings(); }
         catch (e) { console.debug("loadUserSettings failed:", e); }
+        markBench("userSettingsLoaded");
 
-        // Auto-resume gate. If a top recent entry exists AND its folder is
-        // present AND the user did not hold Shift / set MPS_NO_AUTO_RESUME,
-        // skip the picker and go straight to opening that project.
-        const autoResume = await shouldAutoResume();
-        const topRecent = recentProjects[0];
-        const canAutoResume = autoResume
-            && topRecent
-            && topRecent.exists !== false
-            && !!topRecent.path;
-
-        const shell = /** @type {any} */ (document.getElementById("picker-shell"));
-        let chosenPath = "";
-
-        if (canAutoResume)
+        // Fire-and-forget Google OAuth rehydrate. Boot must NOT block on
+        // Google reachability — ensureRehydrated() reads the local keyring
+        // + user-settings cache and only fires a silent refresh in the
+        // background if the cached token is expired.
+        try
         {
-            // Skip the picker entirely. Show the opening card on the dark
-            // surface so the cold boot lands directly there.
-            chosenPath = topRecent.path;
-            if (shell)
+            const { ensureRehydrated } = await import("./auth/google-oauth.js");
+            ensureRehydrated().catch((e) => { console.debug("auth rehydrate failed:", e); });
+        }
+        catch (e) { console.debug("auth import failed:", e); }
+
+        // Seed spellcheckLanguage once from the OS locale, then push the
+        // resolved values into the runtime spellcheck-state module so the
+        // CM6 linter has a live config the first time it runs.
+        try
+        {
+            const seeded = await ensureSpellcheckSeed();
+            const enabled = getUserSetting("spellcheckEnabled", true);
+            setSpellcheckState({ enabled, language: seeded });
+
+            // Warm Harper's WorkerLinter in the background so the first lint
+            // after the user types isn't blocked on WASM compilation. Only
+            // when the resolved tier is A (English) — other tiers don't use
+            // Harper. Fire-and-forget; the actual lint path tolerates a
+            // not-yet-ready worker via Harper's internal queue.
+            if (enabled)
             {
-                shell.setOpening(topRecent.resolvedName || topRecent.name || chosenPath, 0.1);
-                shell.setPhase("opening");
+                try
+                {
+                    const { resolveTier } = await import("./spellcheck-tier.js");
+                    const cfg = resolveTier(seeded);
+                    if (cfg.tier === "A")
+                    {
+                        const { warmupHarper } = await import("./harper-linter.js");
+                        warmupHarper(cfg.dialect);
+                    }
+                }
+                catch (e) { console.debug("Harper warmup skipped:", e); }
             }
-            setAppState("start-screen"); // keep legacy state for compat
+        }
+        catch (e) { console.debug("ensureSpellcheckSeed failed:", e); }
+
+        // Run the placeholder boot substages — IAP / Analytics / Account.
+        // Empty bodies today; future plans replace the helper bodies in
+        // src/boot-placeholders.js without changing the FSM shape or
+        // call-site count.
+        await initIap();
+        await initAnalytics();
+        await initAccount();
+
+        // Pre-warm pdf-lib so the first PDF export doesn't have to download the
+        // ~400KB chunk inline, and (more importantly) so every export consumer
+        // shares ONE pdf-lib instance — multiple dynamic-import sites would
+        // otherwise each get their own copy, which fails with
+        // "Cannot assign to read only property 'toString'" on PDFHeader.
+        import("@mangaplay-studio/core/export").then(m => m.preloadPdfLib()).catch(() => {});
+
+        let chosenPath = "";
+        /** @type {any} */
+        let shell = null;
+
+        if (isMobileLike())
+        {
+            // Mobile / tablet UX: never show the picker. Auto-open the
+            // user's last project if it's still there, else auto-create
+            // a "MyFirstProject" inside the user-data dir.
+            chosenPath = getUserSetting("lastProjectPath", null);
+            const looksValid = chosenPath
+                && (await pathExists(`${chosenPath}/_mangaplaystudio/project.json`));
+            if (!looksValid)
+            {
+                try { chosenPath = await ensureMobileDefaultProject(); }
+                catch (e)
+                {
+                    reportError(e, { origin: "project-create" });
+                    return;
+                }
+            }
+            // Render an "opening project" caption via the inline boot
+            // screen; no picker-shell to update in mobile.
+            setAppState("opening-project");
         }
         else
         {
-            if (recentProjects.length > 0) {
-                setAppState("start-screen");
-            } else {
-                setAppState("empty");
+            // Standalone UX: dynamic-import the picker-shell only here so
+            // mobile/tablet builds can Phase-2-DCE drop it. Also create
+            // the `<mps-picker-shell>` element at runtime — index.html
+            // no longer hardcodes it.
+            await import("./components/mps-picker-shell.js");
+            let pkr = /** @type {any} */ (document.getElementById("picker-shell"));
+            if (!pkr)
+            {
+                pkr = document.createElement("mps-picker-shell");
+                pkr.id = "picker-shell";
+                pkr.setAttribute("data-phase", "bootstrap");
+                document.body.appendChild(pkr);
             }
+            shell = pkr;
 
-            // Wait for the user to pick a project (recent, new, or open-folder).
-            const isTauri = !!window.__TAURI__;
-            chosenPath = isTauri
-                ? await renderStartScreen()
-                : await Promise.race([
-                    renderStartScreen(),
-                    new Promise((resolve) => setTimeout(() => resolve(""), 500)),
-                ]);
+            // Auto-resume gate. If a top recent entry exists AND its
+            // folder is present AND the user did not hold Shift / set
+            // MPS_NO_AUTO_RESUME, skip the picker and go straight to
+            // opening that project.
+            const autoResume = await shouldAutoResume();
+            const topRecent = recentProjects[0];
+            const canAutoResumeBase = autoResume
+                && topRecent
+                && topRecent.exists !== false
+                && !!topRecent.path;
+            const hasProjectJson = canAutoResumeBase
+                ? await pathExists(`${topRecent.path}/_mangaplaystudio/project.json`)
+                : false;
+            const canAutoResume = canAutoResumeBase && hasProjectJson;
 
-            // If nothing was chosen (cancelled / nothing valid), stay on the
-            // start screen instead of trying to open an empty path.
-            if (!chosenPath) {
-                setAppState(recentProjects.length > 0 ? "start-screen" : "empty");
-                return;
+            if (canAutoResume)
+            {
+                chosenPath = topRecent.path;
+                if (shell)
+                {
+                    shell.setOpening(topRecent.resolvedName || topRecent.name || chosenPath, 0.1);
+                    shell.setPhase("opening");
+                }
+                setAppState("start-screen"); // paint briefly; opening-project transition follows
+            }
+            else
+            {
+                if (recentProjects.length > 0) {
+                    setAppState("start-screen");
+                } else {
+                    setAppState("empty");
+                }
+
+                chosenPath = isTauri()
+                    ? await renderStartScreen()
+                    : await Promise.race([
+                        renderStartScreen(),
+                        new Promise((resolve) => setTimeout(() => resolve(""), 500)),
+                    ]);
+
+                if (!chosenPath) {
+                    setAppState(recentProjects.length > 0 ? "start-screen" : "empty");
+                    return;
+                }
             }
         }
 
@@ -4014,7 +5260,7 @@ async function boot() {
         if (shell && chosenPath)
         {
             const topName = (recentProjects.find((r) => r.path === chosenPath)?.resolvedName)
-                || chosenPath.split(/[\\/]/).pop()
+                || basename(chosenPath)
                 || chosenPath;
             shell.setOpening(t("mangaplay-studio.boot.opening.openingNamed", { name: topName }), 0.2);
             shell.setPhase("opening");
@@ -4025,27 +5271,34 @@ async function boot() {
         {
             if (shell)
             {
-                shell.setOpening(msg || t("mangaplay-studio.boot.opening.openingNamed", { name: (chosenPath.split(/[\\/]/).pop() || chosenPath) }), v);
+                shell.setOpening(msg || t("mangaplay-studio.boot.opening.openingNamed", { name: (basename(chosenPath) || chosenPath) }), v);
             }
         };
 
         try {
             bumpProgress(0.35, t("mangaplay-studio.boot.opening.readingProject"));
-            const opened = await tryOpenProjectWithMigration(chosenPath, { fromAutoResume: canAutoResume });
-            if (opened.status === "cancelled")
+            try
             {
-                // Modal cancelled → return to picker, do NOT proceed to mount.
-                setAppState(recentProjects.length > 0 ? "start-screen" : "empty");
-                transitionToPicker();
-                return;
+                currentProject = await openProject(chosenPath);
             }
-            if (opened.status === "readonly")
+            catch (openErr)
             {
-                currentProject = await openReadOnlyShell(opened.projectPath);
-            }
-            else
-            {
-                currentProject = opened.project;
+                // Review item #5: corrupted project.json on mobile has no
+                // picker to fall back to. Re-create the default project
+                // with a numbered suffix and retry once. Standalone path
+                // re-throws to fall through to the existing showError +
+                // picker recovery.
+                if (isMobileLike())
+                {
+                    console.warn("[boot] openProject failed in mobile mode, re-creating:", openErr);
+                    chosenPath = await ensureMobileDefaultProject({ forceNew: true });
+                    await saveUserSettings({ lastProjectPath: chosenPath }).catch(() => {});
+                    currentProject = await openProject(chosenPath);
+                }
+                else
+                {
+                    throw openErr;
+                }
             }
             // Expose project dir to editor extensions (page-fold persistence).
             /** @type {any} */ (window).__mpsCurrentProjectDir = currentProject?.path || null;
@@ -4053,9 +5306,9 @@ async function boot() {
             // edits flow through project-fs-changed.
             try
             {
-                if (window.__TAURI__?.core?.invoke && currentProject?.path)
+                if (isTauri() && currentProject?.path)
                 {
-                    await window.__TAURI__.core.invoke("fs_watch_start", { path: currentProject.path });
+                    await invoke("fs_watch_start", { path: currentProject.path });
                 }
             }
             catch (e) { console.warn("[fs_watch_start] failed:", e); }
@@ -4141,7 +5394,6 @@ async function boot() {
         bumpProgress(1.0, t("mangaplay-studio.boot.opening.ready"));
         setAppState("ready");
         setSaveState("saved");
-        if (currentProject?.readOnly) showBanner("Open in read-only — migrate to edit");
 
         // Multi-window listener — Tauri only. Fires whenever any window in
         // this app mutates the project FS. The other window's broker either
@@ -4178,10 +5430,9 @@ async function boot() {
         // button, which calls the right per-window register internally.
         // Same for the app menu — listen via __TAURI__.event.listen with
         // the now-granted capability.
-        const tauriWindow = window.__TAURI__?.window;
-        if (tauriWindow?.getCurrentWindow) {
+        if (isTauri()) {
             try {
-                const wnd = tauriWindow.getCurrentWindow();
+                const wnd = getCurrentWindow();
                 await wnd.onCloseRequested(async (evt) => {
                     // Prevent the OS-driven close so we can flush first.
                     // After flush, destroy the window to actually exit.
@@ -4201,7 +5452,7 @@ async function boot() {
             if (!e.ctrlKey && !e.metaKey) return;
             if (e.key.toLowerCase() !== "q") return;
             e.preventDefault();
-            const w = window.__TAURI__?.window?.getCurrentWindow?.();
+            const w = isTauri() ? getCurrentWindow() : null;
             if (w) await w.close();
         });
 
@@ -4245,6 +5496,12 @@ async function flushCurrentProjectMeta()
  */
 function destroyCurrentProjectViews()
 {
+    // Google Docs footer owns its own state machine + DOM — tear them down
+    // first so the project's slotManager teardown doesn't race the footer's
+    // setActiveScript(null) call.
+    try { destroyGoogleDocsFooter(); }
+    catch (e) { console.warn("[google-docs] destroyGoogleDocsFooter threw:", e); }
+
     if (slotManager)
     {
         for (const slot of slotManager.list())
@@ -4262,10 +5519,11 @@ function destroyCurrentProjectViews()
     }
     try { editorTabs?.destroy(); } catch {}
     editorTabs = null;
-    if (screenplayView) { try { screenplayView.destroy(); } catch {} screenplayView = null; }
     // emptyTabCta mounts a fresh .empty-tab-cta overlay into <mps-editor-host>
     // on every mount; without explicit teardown the overlays stack.
     if (emptyTabCta) { try { emptyTabCta.destroy(); } catch {} emptyTabCta = null; }
+    // rightPaneEmpty owns an i18n subscription; release it before re-mount.
+    if (rightPaneEmpty) { try { rightPaneEmpty.destroy(); } catch {} rightPaneEmpty = null; }
     // initCanvas attaches a document-level `drawing-save-complete` listener
     // and tracks the host element via a module-level ref; destroy() removes
     // the listener and clears the ref so the next mount starts clean.
@@ -4278,6 +5536,11 @@ function destroyCurrentProjectViews()
         try { modeToggleEl.parentNode?.removeChild(modeToggleEl); } catch {}
         modeToggleEl = null;
     }
+    // The bridge to the project-scoped applyEditorMode closure dies with the
+    // mount it captured — clear it so format-driven downgrades don't reach
+    // into a torn-down view between project swaps.
+    applyEditorModeRef = null;
+    editorAreaTopBarEl = null;
     // When the user was in Visual mode, applyEditorMode lazily appended a
     // <mps-visual-editor> to <mps-editor-host>. Without removal here, the
     // next project's first switch into Visual mode appends ANOTHER one (the
@@ -4332,16 +5595,23 @@ async function flushAndShutdown(wnd) {
     // on process exit either way.
     try
     {
-        if (window.__TAURI__?.core?.invoke)
+        if (isTauri())
         {
-            await window.__TAURI__.core.invoke("fs_watch_stop");
+            await invoke("fs_watch_stop");
         }
     }
     catch (e) { console.warn("[fs_watch_stop] failed:", e); }
 
+    try
+    {
+        const { disposeHarper } = await import("./harper-linter.js");
+        disposeHarper();
+    }
+    catch (e) { console.warn("[disposeHarper] failed:", e); }
+
     // ALWAYS destroy the window. If the flush above threw, we still get out.
     try {
-        const target = wnd || window.__TAURI__?.window?.getCurrentWindow?.();
+        const target = wnd || (isTauri() ? getCurrentWindow() : null);
         if (target?.destroy) {
             await target.destroy();
         } else if (target?.close) {

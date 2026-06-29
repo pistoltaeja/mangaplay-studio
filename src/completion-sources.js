@@ -3,8 +3,6 @@
  * completion-sources.js — Characters and Vocabulary autocomplete for CM6.
  */
 
-import { autocompletion } from "@codemirror/autocomplete";
-
 /**
  * Extract declared characters from the document text.
  * @param {string} text
@@ -25,21 +23,6 @@ function extractVocabulary(text) {
     const match = text.match(/^Vocabulary:\s*(.+)$/m);
     if (!match) return [];
     return match[1].split(",").map(s => s.trim()).filter(Boolean);
-}
-
-/**
- * Read characters + vocabulary from a parsed Screenplay object.
- * Preferred over raw-regex extraction once a Screenplay is available
- * (parser already split + trimmed + filtered).
- *
- * @param {{ characters?: string[], vocabulary?: string[] }} screenplay
- * @returns {{ characters: string[], vocabulary: string[] }}
- */
-export function extractFromScreenplay(screenplay) {
-    return {
-        characters: screenplay?.characters ?? [],
-        vocabulary: screenplay?.vocabulary ?? []
-    };
 }
 
 /**
@@ -77,15 +60,4 @@ export function mangaplayCompletions(opts = {}) {
 
         return options.length > 0 ? { from: word.from, options } : null;
     };
-}
-
-/**
- * CM6 extension: mangaplay autocomplete.
- * @returns {import("@codemirror/autocomplete").Extension}
- */
-export function mangaplayAutocomplete() {
-    return autocompletion({
-        override: [mangaplayCompletions()],
-        maxRenderedOptions: 20,
-    });
 }

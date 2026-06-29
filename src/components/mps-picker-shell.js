@@ -15,9 +15,7 @@
  *   - mps-picker-remove  { detail: { path } }   user dismissed a recent
  *   - mps-picker-rename-project { detail: { path, displayName, scope } }
  *   - mps-picker-rename-folder  { detail: { path, newBasename } }
- *   - mps-picker-move-folder    { detail: { path } }
  *   - mps-picker-reveal         { detail: { path } }
- *   - mps-picker-copy-id        { detail: { id } }
  *
  * Animation is owned by CSS — switching phases is a single attribute write
  * and CSS cross-fades the .picker-body vs .opening-body containers.
@@ -27,6 +25,7 @@ import "./mps-lang-select.js";
 import { SUPPORTED_LANGUAGES_LIST } from "../adapters/languages.js";
 import { t, subscribe } from "../adapters/tauri-i18n.js";
 import { pathExists } from "../user-settings.js";
+import { escapeHtml } from "../util/escape-html.js";
 
 class MpsPickerShell extends HTMLElement
 {
@@ -91,7 +90,6 @@ class MpsPickerShell extends HTMLElement
 
     /** Public API */
     setRecent(list) { this._recent = list || []; this._render(); }
-    setAppVersion(v) { this._appVersion = v || ""; this._render(); }
     setLastPathInvalid(flag) { this._lastPathInvalid = !!flag; this._render(); }
     setOpening(name, progress) {
         this._openingMsg = name || "";
@@ -259,8 +257,21 @@ class MpsPickerShell extends HTMLElement
         // Window controls — call Tauri's window API directly. The picker
         // shell sits over any native titlebar overlay, so without these
         // buttons there's no way to minimise or close from the picker.
+        // Mobile / tablet windows have no chrome to control; guard with
+        // hasWindowChrome() (defence in depth — the picker isn't rendered
+        // in mobile mode anyway).
+        const guardChrome = async () =>
+        {
+            try
+            {
+                const { hasWindowChrome } = await import("../adapters/platform-capabilities.js");
+                return hasWindowChrome();
+            }
+            catch (_) { return true; }
+        };
         this.querySelector(".pkr-tb-btn[data-tb-action='minimize']")?.addEventListener("click", async () =>
         {
+            if (!(await guardChrome())) return;
             try
             {
                 const w = await import("@tauri-apps/api/window");
@@ -270,6 +281,7 @@ class MpsPickerShell extends HTMLElement
         });
         this.querySelector(".pkr-tb-btn[data-tb-action='close']")?.addEventListener("click", async () =>
         {
+            if (!(await guardChrome())) return;
             try
             {
                 const w = await import("@tauri-apps/api/window");
@@ -598,18 +610,11 @@ class MpsPickerShell extends HTMLElement
         this._render();
         switch (action)
         {
-            case "copy-id":
-                if (r.id) { try { navigator.clipboard?.writeText?.(r.id); } catch (_) {} }
-                this._emit("mps-picker-copy-id", { id: r.id || "" });
-                break;
             case "rename-project":
                 this._openRenameProjectModal(r);
                 break;
             case "rename-folder":
                 this._openRenameFolderModal(r);
-                break;
-            case "move-folder":
-                this._emit("mps-picker-move-folder", { path: r.path });
                 break;
             case "reveal":
                 this._emit("mps-picker-reveal", { path: r.path });
@@ -708,17 +713,6 @@ class MpsPickerShell extends HTMLElement
             </div>
         `;
     }
-}
-
-function escapeHtml(s)
-{
-    return String(s).replace(/[&<>"']/g, (c) => ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#39;",
-    }[c]));
 }
 
 if (!customElements.get("mps-picker-shell"))

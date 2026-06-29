@@ -1,11 +1,9 @@
 /**
  * Mangaplay Visual Editor Component
  *
- * Phase 2c — title block (Page 0), page-level direction stub.  Builds on
- * Phase 2b's editable widget surface (Dialogue + SFX, character combobox,
- * parenthetical chips, SFX placeholder rotation).
- *
- * DnD, animations, keyboard-drag, locale strings — all still out of scope.
+ * Renders the title block (Page 0), page-level direction, and editable
+ * widget surface (Dialogue + SFX, character combobox, parenthetical chips,
+ * SFX placeholder rotation) on top of the parser AST.
  *
  * Sync contract: copies the `_suppressStoreSync` flag pattern from
  * mps-editor.js so the visual editor's own store writes don't loop back
@@ -14,8 +12,12 @@
 
 import { getRuntimeStorage, parseScript } from '@mangaplay-studio/core';
 import { formatScript } from '../services/format-script.js';
-import { t, subscribe as subscribeToLanguage } from './mps-visual-editor-i18n.js';
+import { t, subscribe as subscribeToLanguage } from '../adapters/tauri-i18n.js';
+import { getSpellcheckState } from '../spellcheck-state.js';
 import { PersistentStorage, STORAGE_KEYS } from '../adapters/tauri-storage.js';
+import { sequentialPages, sequentialPanels, unknownPanelTags, characterCueCase } from '../editor-checks.js';
+import { CODE_META } from '../editor-linter.js';
+import { resolveDiagnosticMessage } from '../../../core/validation/diagnostic-i18n.js';
 
 /**
  * Read an SFX placeholder by index from the localised string table.
@@ -316,7 +318,18 @@ class MPSVisualEditor extends HTMLElement
         /** @type {import('@mangaplay-studio/core').ScriptAST | null} */
         this._ast = null;
 
-        /** @type {number} */
+        /**
+         * Visual-Editor-internal page index. Seeded ONCE from the canvas
+         * store at connectedCallback time (and re-seeded on script update)
+         * and read by `_buildPanelCard` + friends to index `ast.pages[]`.
+         *
+         * IMPORTANT: this is NOT a live mirror of `store.currentPageIndex`.
+         * Storyboard chevrons no longer drive the Visual Editor's scroll
+         * position — the canvas page and the Visual Editor are independent
+         * surfaces now. The upcoming continuous-scroll patch will replace
+         * the page-bound call sites with per-card page tracking.
+         * @type {number}
+         */
         this._currentPageIndex = this.store.state.currentPageIndex ?? 0;
 
         /**
@@ -343,9 +356,6 @@ class MPSVisualEditor extends HTMLElement
         /** @type {(() => void) | null} */
         this._unsubscribeScript = null;
 
-        /** @type {(() => void) | null} */
-        this._unsubscribePage = null;
-
         /** @type {number | null} */
         this._editDebounceTimer = null;
 
@@ -361,10 +371,26 @@ class MPSVisualEditor extends HTMLElement
         /**
          * Auto-focus target slot.  After re-render, focus this widget
          * sub-element if non-null, then clear.
-         *  - `{ panelIndex, widgetType, widgetIndex, sub: 'character'|'text' }`
-         * @type {null | { panelIndex: number, widgetType: 'dialogue'|'sfx', widgetIndex: number, sub: string }}
+         *  - `{ pageIndex, panelIndex, widgetType, widgetIndex, sub: 'character'|'text' }`
+         * `pageIndex` scopes the lookup to a specific `.visual-editor-page`
+         * section in continuous-scroll mode — without it the same
+         * `data-panel-index` exists on every page section.
+         * @type {null | { pageIndex?: number, panelIndex: number, widgetType: 'dialogue'|'sfx', widgetIndex: number, sub: string }}
          */
         this._postRenderFocus = null;
+
+        /**
+         * Continuous-scroll observer: watches every `.visual-editor-page`
+         * section and emits `visual-editor-page-in-view` for the topmost
+         * section crossing the 50% threshold.  Rebuilt every `_renderInner`.
+         * @type {IntersectionObserver | null}
+         */
+        this._pageObserver = null;
+
+        /** @type {number | null} */
+        this._renderDebounceTimer = null;
+        /** @type {number} */
+        this._renderDebounceMs = 80;
 
         /**
          * SFX placeholder rotation counter for the current page.  Held
@@ -393,7 +419,7 @@ class MPSVisualEditor extends HTMLElement
         this._pendingSfxPlaceholder = null;
 
         // -----------------------------------------------------------------
-        // Drag-and-drop state (Task R).
+        // Drag-and-drop state.
         //
         // Pointer-event-based DnD with same-type-only validation.  The
         // engine tracks one active drag at a time; multi-touch aborts
@@ -456,7 +482,7 @@ class MPSVisualEditor extends HTMLElement
         this._multiTouchGuard = null;
 
         // -----------------------------------------------------------------
-        // Keyboard-drag state (Task T).  Activated when the user focuses
+        // Keyboard-drag state.  Activated when the user focuses
         // a `.widget-grip-rail` and hits Space.  Each Arrow keystroke
         // mutates the AST and re-renders; Esc restores the pre-grab
         // snapshot; Enter / Tab commit cleanly.
@@ -465,6 +491,27 @@ class MPSVisualEditor extends HTMLElement
         this._kbDragOrigin = null;
         /** @type {string | null} */
         this._kbDragAstSnapshot = null;
+    }
+
+    /**
+     * Push the spellcheck toggle onto every editable field inside the
+     * visual editor. Called by mps-editor.js applySpellcheckToAllViews
+     * when the settings toggle flips, and during each `_render()` so
+     * newly-built blocks pick up the current state.
+     * @param {boolean} enabled
+     */
+    applySpellcheckState(enabled)
+    {
+        const { language } = getSpellcheckState();
+        const editables = this.querySelectorAll('input, textarea');
+        for (const el of editables)
+        {
+            /** @type {any} */ (el).spellcheck = !!enabled;
+            // `lang` hints which dictionary the WebView2 spellchecker
+            // should use. Harmless on inputs even when spellcheck is off.
+            if (enabled && language) el.setAttribute('lang', String(language));
+            else el.removeAttribute('lang');
+        }
     }
 
     connectedCallback()
@@ -486,20 +533,6 @@ class MPSVisualEditor extends HTMLElement
             }
         );
 
-        this._unsubscribePage = this.store.select(
-            (state) => state.currentPageIndex,
-            (idx) =>
-            {
-                const newIdx = idx ?? 0;
-                if (newIdx !== this._currentPageIndex)
-                {
-                    this._sfxRotationIndex = 0;
-                }
-                this._currentPageIndex = newIdx;
-                this._render();
-            }
-        );
-
         // Subscribe to panel selection changes so the visual editor
         // can toggle .is-active on the matching card.
         this._unsubscribeSelection = this.store.select(
@@ -516,7 +549,7 @@ class MPSVisualEditor extends HTMLElement
         // Delegate pointerdown on grip rails to a single handler.
         this.addEventListener('pointerdown', this._onPointerDown);
 
-        // Delegated keydown for keyboard-drag (Task T) on grip rails.
+        // Delegated keydown for keyboard-drag on grip rails.
         this.addEventListener('keydown', this._onGripKeyDown);
 
         // Re-render when source line-height changes (font load, zoom).
@@ -538,11 +571,6 @@ class MPSVisualEditor extends HTMLElement
             this._unsubscribeScript();
             this._unsubscribeScript = null;
         }
-        if (this._unsubscribePage)
-        {
-            this._unsubscribePage();
-            this._unsubscribePage = null;
-        }
         if (this._unsubscribeSelection)
         {
             this._unsubscribeSelection();
@@ -552,6 +580,16 @@ class MPSVisualEditor extends HTMLElement
         {
             clearTimeout(this._editDebounceTimer);
             this._editDebounceTimer = null;
+        }
+        if (this._renderDebounceTimer)
+        {
+            clearTimeout(this._renderDebounceTimer);
+            this._renderDebounceTimer = null;
+        }
+        if (this._pageObserver)
+        {
+            this._pageObserver.disconnect();
+            this._pageObserver = null;
         }
         if (this._documentClickHandler)
         {
@@ -566,6 +604,21 @@ class MPSVisualEditor extends HTMLElement
     }
 
     /**
+     * Dispatch `visual-editor-page-in-view` so the canvas / topbar chevrons
+     * can mirror the page currently scrolled into view. Stub for the
+     * upcoming continuous-scroll patch — IntersectionObserver wiring will
+     * call this from `_render` once per page card. No callers yet.
+     * @param {number} pageIndex
+     */
+    _emitPageInView(pageIndex)
+    {
+        this.dispatchEvent(new CustomEvent('visual-editor-page-in-view', {
+            detail: { pageIndex },
+            bubbles: true
+        }));
+    }
+
+    /**
      * Normalise `state.script` into an AST and re-render.
      * @param {unknown} script
      */
@@ -574,7 +627,7 @@ class MPSVisualEditor extends HTMLElement
         if (script === null || script === undefined || script === '')
         {
             this._ast = null;
-            this._render();
+            this._debouncedRender();
             return;
         }
 
@@ -588,7 +641,21 @@ class MPSVisualEditor extends HTMLElement
             console.warn('[mps-visual-editor] could not coerce script; keeping previous AST');
         }
 
-        this._render();
+        this._debouncedRender();
+    }
+
+    /**
+     * Coalesce keystroke-driven re-renders. Continuous-scroll renders ALL
+     * pages, so per-keystroke rebuilds would lag on long scripts.
+     */
+    _debouncedRender()
+    {
+        if (this._renderDebounceTimer) clearTimeout(this._renderDebounceTimer);
+        this._renderDebounceTimer = setTimeout(() =>
+        {
+            this._renderDebounceTimer = null;
+            this._render();
+        }, this._renderDebounceMs);
     }
 
     /**
@@ -603,8 +670,7 @@ class MPSVisualEditor extends HTMLElement
         {
             // Round-trip safety: strip widget entries that haven't been
             // filled in yet.
-            //  - Empty SFX strings (Task J): format would emit a bare
-            //    `SFX: ` line.
+            //  - Empty SFX strings: format would emit a bare `SFX: ` line.
             //  - Dialogue with empty `.text`: format emits a cue line
             //    with no body, which the next parse rolls into the
             //    panel description (verified) — corrupting the panel.
@@ -688,6 +754,36 @@ class MPSVisualEditor extends HTMLElement
     }
 
     /**
+     * Conditional flush variant: when the dialogue has typed text, do a
+     * full flush + re-render (round-trips through format/parse so the
+     * source stays in sync). When text is empty, just re-render so the
+     * chip's visual state updates without going through the round-trip
+     * — the format+parse cycle strips empty-text dialogues at the strip
+     * filter in _flushAstToStore, which would silently delete the whole
+     * widget the user is still filling in.
+     *
+     * The mutation has already happened on the in-memory AST; on the
+     * next real keystroke (which will have non-empty text) the normal
+     * debounced _scheduleFlush will persist both the typed text and the
+     * pending chip state through to source.
+     *
+     * @param {{ text?: string }} dialogue
+     */
+    _flushOrRerender(dialogue)
+    {
+        const hasText = typeof dialogue?.text === 'string'
+            && dialogue.text.trim() !== '';
+        if (hasText)
+        {
+            this._flushAndRerender();
+        }
+        else
+        {
+            this._render();
+        }
+    }
+
+    /**
      * Clear and rebuild the visual editor DOM.
      *
      * Render lock: while a drag is active, all re-renders are queued
@@ -696,8 +792,36 @@ class MPSVisualEditor extends HTMLElement
      * the ghost orphaned and the state inconsistent. The flush
      * pipeline still mutates the AST; only the DOM rebuild is
      * deferred until the user releases the pointer.
+     *
+     * Every rebuild also mirrors the live spellcheck toggle onto the
+     * freshly-created input / textarea elements (cheap O(n) walk; the
+     * editor already pays a full replaceChildren cost) and nudges the
+     * editor-area top bar's Fix Structural Issues button to refresh
+     * its enabled state to match the current AST.
      */
     _render()
+    {
+        try
+        {
+            this._renderInner();
+        }
+        finally
+        {
+            try { this.applySpellcheckState(getSpellcheckState().enabled); }
+            catch (_) { /* ignore */ }
+            try
+            {
+                if (typeof window !== "undefined"
+                    && typeof window.__mpsRefreshFixIssuesBtn === "function")
+                {
+                    window.__mpsRefreshFixIssuesBtn();
+                }
+            }
+            catch (_) { /* ignore */ }
+        }
+    }
+
+    _renderInner()
     {
         if (this._dragActivated)
         {
@@ -705,26 +829,33 @@ class MPSVisualEditor extends HTMLElement
             return;
         }
 
-        // Save focus context so we can restore after rebuild.
+        // Tear down the previous observer before clearing the DOM — its
+        // targets are about to detach.
+        if (this._pageObserver)
+        {
+            this._pageObserver.disconnect();
+            this._pageObserver = null;
+        }
+
         this.replaceChildren();
 
         const ast = this._ast;
         const pages = ast?.pages ?? [];
         const totalPages = pages.length;
-        const idx = this._currentPageIndex;
 
-        // Title block (synthetic Page 0).
-        if (idx === -1)
+        const body = document.createElement('div');
+        body.className = 'visual-editor-body';
+
+        // Title block always renders at the top of the body in
+        // continuous-scroll mode (no more synthetic Page-0 branch).
+        if (ast)
         {
-            const body = document.createElement('div');
-            body.className = 'visual-editor-body';
             body.appendChild(this._buildTitleBlock(ast));
-            this.appendChild(body);
-            return;
         }
 
         if (totalPages === 0)
         {
+            this.appendChild(body);
             const empty = document.createElement('div');
             empty.className = 'visual-editor-empty';
             empty.textContent = 'No pages';
@@ -732,47 +863,41 @@ class MPSVisualEditor extends HTMLElement
             return;
         }
 
-        const clampedIdx = Math.max(0, Math.min(idx, totalPages - 1));
-        const page = pages[clampedIdx];
-
-        // Read panel ranges from the host source editor for gutter line numbers.
+        // Read panel ranges + source lines once; reused per page below.
         const hostEditor = this.closest('mps-editor');
         const panelRanges = hostEditor?.getPanelRanges?.() ?? [];
-
-        // Find the `# PAGE N` line in source for the page-header card gutter.
-        const pageNum = page.number ?? (clampedIdx + 1);
         const textarea = hostEditor?.querySelector?.('.editor-textarea');
         const sourceLines = textarea ? textarea.value.split('\n') : [];
-        const pageHeaderPattern = new RegExp(`^#\\s+PAGE\\s+${pageNum}\\b`, 'i');
-        let pageHeaderLine = -1;
-        for (let li = 0; li < sourceLines.length; li++)
+
+        for (let pageIdx = 0; pageIdx < totalPages; pageIdx++)
         {
-            if (pageHeaderPattern.test(sourceLines[li]))
+            const page = pages[pageIdx];
+            const pageNum = page.number ?? (pageIdx + 1);
+            const pageHeaderPattern = new RegExp(`^#\\s+PAGE\\s+${pageNum}\\b`, 'i');
+            let pageHeaderLine = -1;
+            for (let li = 0; li < sourceLines.length; li++)
             {
-                pageHeaderLine = li;
-                break;
+                if (pageHeaderPattern.test(sourceLines[li]))
+                {
+                    pageHeaderLine = li;
+                    break;
+                }
             }
-        }
 
-        // "Insert Blank Page" badge — top-center, same style as panel add badges.
-        const insertPageBadge = document.createElement('button');
-        insertPageBadge.type = 'button';
-        insertPageBadge.className = 'visual-editor-insert-page-badge';
-        insertPageBadge.textContent = t('ui.visualEditor.insertBlankPage', 'Insert Blank Page');
-        insertPageBadge.addEventListener('click', () => this._onInsertBlankPage());
-        this.appendChild(insertPageBadge);
+            const section = document.createElement('section');
+            section.className = 'visual-editor-page';
+            section.dataset.pageIndex = String(pageIdx);
 
-        const body = document.createElement('div');
-        body.className = 'visual-editor-body';
+            const headerCard = this._buildPageHeaderCard(page, pageIdx, pageHeaderLine);
+            if (headerCard) section.appendChild(headerCard);
 
-        // Page header card.
-        const headerCard = this._buildPageHeaderCard(page, clampedIdx, pageHeaderLine);
-        if (headerCard) body.appendChild(headerCard);
+            const panels = page.panels ?? [];
+            for (let i = 0; i < panels.length; i++)
+            {
+                section.appendChild(this._buildPanelCard(panels[i], i, page, panelRanges));
+            }
 
-        const panels = page.panels ?? [];
-        for (let i = 0; i < panels.length; i++)
-        {
-            body.appendChild(this._buildPanelCard(panels[i], i, page, panelRanges));
+            body.appendChild(section);
         }
 
         this.appendChild(body);
@@ -789,6 +914,34 @@ class MPSVisualEditor extends HTMLElement
         // Reapply .is-active after rebuild — selection lives in the store
         // but the DOM was just replaced, so the class needs to be reattached.
         this._updateActiveCard(this.store.state.selectedPanelId);
+
+        // Watch each page section; emit `visual-editor-page-in-view` for the
+        // topmost section crossing 50%. Updating `_currentPageIndex` here keeps
+        // the per-page mutator call sites (`_kbDragMove`, `_onAddDialogue`,
+        // `_onRemovePanel`, ...) pointing at the page the user is editing.
+        this._pageObserver = new IntersectionObserver((entries) =>
+        {
+            let topmost = -1;
+            for (const entry of entries)
+            {
+                if (entry.intersectionRatio < 0.5) continue;
+                const idx = Number(
+                    /** @type {HTMLElement} */ (entry.target).dataset.pageIndex
+                );
+                if (!Number.isFinite(idx)) continue;
+                if (topmost === -1 || idx < topmost) topmost = idx;
+            }
+            if (topmost !== -1)
+            {
+                this._currentPageIndex = topmost;
+                this._emitPageInView(topmost);
+            }
+        }, { root: this, threshold: [0, 0.5, 1] });
+
+        for (const section of body.querySelectorAll('.visual-editor-page'))
+        {
+            this._pageObserver.observe(section);
+        }
 
         // Post-render focus + open-combobox restoration.
         if (this._postRenderFocus)
@@ -952,15 +1105,25 @@ class MPSVisualEditor extends HTMLElement
 
     /**
      * Resolve a focus-spec to a DOM element after re-render.
-     * @param {{ panelIndex: number, widgetType: string, widgetIndex: number, sub: string }} spec
+     * @param {{ pageIndex?: number, panelIndex: number, widgetType: string, widgetIndex: number, sub: string }} spec
      */
     _findFocusTarget(spec)
     {
-        const widget = this.querySelector(
-            `.widget[data-panel-index="${spec.panelIndex}"]`
+        const widgetSel
+            = `.widget[data-panel-index="${spec.panelIndex}"]`
             + `[data-widget-type="${spec.widgetType}"]`
-            + `[data-widget-index="${spec.widgetIndex}"]`
-        );
+            + `[data-widget-index="${spec.widgetIndex}"]`;
+        // Continuous-scroll renders all pages: the same data-panel-index
+        // exists on every `.visual-editor-page`. Scope by pageIndex when
+        // provided; fall back to a bare lookup for defence.
+        let widget = null;
+        if (typeof spec.pageIndex === 'number')
+        {
+            widget = this.querySelector(
+                `.visual-editor-page[data-page-index="${spec.pageIndex}"] ${widgetSel}`
+            );
+        }
+        if (!widget) widget = this.querySelector(widgetSel);
         if (!widget) return null;
         if (spec.sub === 'character')
         {
@@ -1244,7 +1407,7 @@ class MPSVisualEditor extends HTMLElement
 
         const pill = document.createElement('span');
         pill.className = 'page-header-pill';
-        pill.textContent = `# PAGE ${page.number ?? pageIndex + 1}`;
+        pill.textContent = `# PAGE ${page.id ?? page.number ?? pageIndex + 1}`;
 
         const label = document.createElement('textarea');
         label.className = 'page-header-label';
@@ -1276,17 +1439,29 @@ class MPSVisualEditor extends HTMLElement
         const badges = document.createElement('div');
         badges.className = 'page-header-card-badges';
 
+        const addPageBtn = document.createElement('button');
+        addPageBtn.type = 'button';
+        addPageBtn.className = 'panel-add-badge';
+        addPageBtn.dataset.action = 'add-page';
+        addPageBtn.textContent = t('ui.visualEditor.addNewPage', 'Add New Page');
+        addPageBtn.addEventListener('click', (e) =>
+        {
+            e.stopPropagation();
+            this._onInsertBlankPage();
+        });
+
         const addPanelBtn = document.createElement('button');
         addPanelBtn.type = 'button';
         addPanelBtn.className = 'panel-add-badge';
         addPanelBtn.dataset.action = 'add-panel';
-        addPanelBtn.textContent = t('ui.visualEditor.addPanel', 'Panel');
+        addPanelBtn.textContent = t('ui.visualEditor.addPanel', 'Add Panel');
         addPanelBtn.addEventListener('click', (e) =>
         {
             e.stopPropagation();
             this._onAddPanel(page, pageIndex);
         });
 
+        badges.appendChild(addPageBtn);
         badges.appendChild(addPanelBtn);
         card.appendChild(badges);
 
@@ -1590,8 +1765,8 @@ class MPSVisualEditor extends HTMLElement
         input.type = 'text';
         input.className = 'sfx-text';
         input.value = sfxValue ?? '';
-        // Per Task J: placeholder may have been seeded by the add handler
-        // via _pendingSfxPlaceholder.  Apply once and clear.
+        // Placeholder may have been seeded by the add handler via
+        // _pendingSfxPlaceholder.  Apply once and clear.
         if (this._pendingSfxPlaceholder
             && this._pendingSfxPlaceholder.panelIndex === panelIndex
             && this._pendingSfxPlaceholder.widgetIndex === widgetIndex)
@@ -1630,8 +1805,8 @@ class MPSVisualEditor extends HTMLElement
     }
 
     /**
-     * Task K: stamp parent-panel context onto the widget DOM.  Used by
-     * future tag-editing UI without an AST round-trip.
+     * Stamp parent-panel context onto the widget DOM.  Used by future
+     * tag-editing UI without an AST round-trip.
      * @param {HTMLElement} el
      * @param {import('@mangaplay-studio/core').Panel} panel
      */
@@ -1822,7 +1997,7 @@ class MPSVisualEditor extends HTMLElement
     }
 
     /**
-     * Task G: build the character combobox sub-widget.
+     * Build the character combobox sub-widget.
      * @param {number} panelIndex
      * @param {number} widgetIndex
      * @param {any} dialogue
@@ -1879,7 +2054,24 @@ class MPSVisualEditor extends HTMLElement
         if (dList[widgetIndex])
         {
             dList[widgetIndex].character = name;
-            this._scheduleFlush();
+            // Only schedule a flush if the dialogue text is non-empty.
+            // Why: an empty-text dialogue gets stripped by the round-trip
+            // safety filter in _flushAstToStore (the formatter emits an
+            // unmatched cue line that the parser absorbs into the panel
+            // description). If the user types a character, Tabs out, then
+            // pauses for >300ms before typing the dialogue body, the
+            // debounce here fires during the pause and silently wipes the
+            // dialogue. The character is held in the in-memory AST and
+            // will be persisted to source on the first dialogue-text
+            // keystroke, which schedules its own flush with both
+            // character + text populated.
+            const txt = typeof dList[widgetIndex].text === 'string'
+                ? dList[widgetIndex].text.trim()
+                : '';
+            if (txt !== '')
+            {
+                this._scheduleFlush();
+            }
         }
     }
 
@@ -1888,10 +2080,11 @@ class MPSVisualEditor extends HTMLElement
     // -----------------------------------------------------------------
 
     /**
-     * Task H: add a Dialogue widget pre-filled with the last speaker.
+     * Add a Dialogue widget pre-filled with the last speaker.
      * @param {number} panelIndex
      * @param {import('@mangaplay-studio/core').Page} page
      */
+
     /**
      * Insert a blank page after the current page.  The new page gets one
      * empty Panel 1.  All subsequent pages are renumbered (shifted +1).
@@ -1950,7 +2143,21 @@ class MPSVisualEditor extends HTMLElement
 
     _onAddDialogue(panelIndex, _page)
     {
-        // Resolve from live AST — the `_page` closure arg may be stale.
+        // Cancel any pending debounced flush so prior typing is persisted
+        // BEFORE we push the empty placeholder. Without this, the flush can
+        // fire AFTER the push and the strip filter in _flushAstToStore
+        // wipes the empty-text dialogue we just added — leaving an
+        // orphaned DOM widget that silently swallows the user's keystrokes.
+        if (this._editDebounceTimer)
+        {
+            clearTimeout(this._editDebounceTimer);
+            this._editDebounceTimer = null;
+            this._dirtyPending = false;
+            this._flushAstToStore();
+        }
+
+        // Resolve from live AST — the `_page` closure arg may be stale,
+        // and the just-fired flush above may have replaced this._ast.
         const livePage = this._ast?.pages?.[this._currentPageIndex];
         const panels = livePage?.panels ?? [];
         const panel = panels[panelIndex];
@@ -1983,6 +2190,7 @@ class MPSVisualEditor extends HTMLElement
 
         const newIndex = panel.dialogue.length - 1;
         this._postRenderFocus = {
+            pageIndex: this._currentPageIndex,
             panelIndex,
             widgetType: 'dialogue',
             widgetIndex: newIndex,
@@ -2032,12 +2240,28 @@ class MPSVisualEditor extends HTMLElement
     }
 
     /**
-     * Task J: add an SFX widget with a rotating placeholder.  Value
-     * stays empty (the placeholder is just the `placeholder` attribute).
+     * Add an SFX widget with a rotating placeholder.  Value stays empty
+     * (the placeholder is just the `placeholder` attribute).
      * @param {number} panelIndex
      */
     _onAddSfx(panelIndex)
     {
+        // Cancel any pending debounced flush so prior typing is persisted
+        // BEFORE we push the empty placeholder. Without this, the flush can
+        // fire AFTER the push and the strip filter in _flushAstToStore
+        // wipes the empty-string SFX entry — leaving an orphaned DOM
+        // widget that silently swallows the user's keystrokes. (The
+        // earlier comment in this function acknowledged the race as
+        // "documented and accepted"; in practice it caused silent data
+        // loss, so we now cancel the pending flush instead.)
+        if (this._editDebounceTimer)
+        {
+            clearTimeout(this._editDebounceTimer);
+            this._editDebounceTimer = null;
+            this._dirtyPending = false;
+            this._flushAstToStore();
+        }
+
         const ast = this._ast;
         if (!ast) return;
         const page = ast.pages?.[this._currentPageIndex];
@@ -2053,7 +2277,7 @@ class MPSVisualEditor extends HTMLElement
 
         if (!Array.isArray(panel.sfx)) panel.sfx = [];
 
-        // Per Task J: we don't push an empty string into the AST because
+        // We don't push an empty string into the AST because
         // the formatter would emit a `SFX: ` line.  Instead we DO push
         // an empty string so the widget renders, BUT the schedule-flush
         // path filters them out before re-parse.  Simpler: push a known
@@ -2068,12 +2292,6 @@ class MPSVisualEditor extends HTMLElement
         // here.  The first `input` event will write the typed value and
         // schedule the flush at that point.  If the user removes the
         // widget without typing, the splice happens in _onRemoveSfx.
-        //
-        // Trade-off: if a *different* edit triggers a flush before the
-        // user has typed into this SFX widget, the empty entry is
-        // stripped at the format boundary (see _flushAstToStore) — the
-        // placeholder widget vanishes on next render.  Documented and
-        // accepted per Task J round-trip safety.
         panel.sfx.push('');
 
         const widgetIndex = panel.sfx.length - 1;
@@ -2087,6 +2305,7 @@ class MPSVisualEditor extends HTMLElement
             text: placeholderText
         };
         this._postRenderFocus = {
+            pageIndex: this._currentPageIndex,
             panelIndex,
             widgetType: 'sfx',
             widgetIndex,
@@ -2159,7 +2378,6 @@ class MPSVisualEditor extends HTMLElement
         arr.splice(widgetIndex, 1);
         // Drop any empty trailing strings so a removed-just-after-add
         // SFX doesn't leak a `SFX: ` line into the formatted source.
-        // (Task J round-trip safety.)
         for (let i = arr.length - 1; i >= 0; i--)
         {
             if (typeof arr[i] === 'string' && arr[i].trim() === '') arr.splice(i, 1);
@@ -2178,10 +2396,12 @@ class MPSVisualEditor extends HTMLElement
      * @param {number} widgetIndex
      * @param {string} chip
      */
-    _onChipToggleBuiltin(panel, _panelIndex, widgetIndex, chip)
+    _onChipToggleBuiltin(_panelClosure, panelIndex, widgetIndex, chip)
     {
-        const arr = panel.dialogue ?? [];
-        const d = arr[widgetIndex];
+        // Resolve from LIVE AST — `_panelClosure` may be stale after a
+        // debounced flush replaced `this._ast` since the last render.
+        const livePanel = this._ast?.pages?.[this._currentPageIndex]?.panels?.[panelIndex];
+        const d = livePanel?.dialogue?.[widgetIndex];
         if (!d) return;
         const current = (d.type ?? 'speech').toString();
         if (current === chip)
@@ -2193,8 +2413,9 @@ class MPSVisualEditor extends HTMLElement
             d.type = chip;
             d.offPanel = false;
             d.parenthetical = '';
+            if (Array.isArray(d.modifier)) d.modifier = [];
         }
-        this._flushAndRerender();
+        this._flushOrRerender(d);
     }
 
     /**
@@ -2206,10 +2427,10 @@ class MPSVisualEditor extends HTMLElement
      * @param {number} widgetIndex
      * @param {string} chip
      */
-    _onChipToggleCustom(panel, _panelIndex, widgetIndex, chip)
+    _onChipToggleCustom(_panelClosure, panelIndex, widgetIndex, chip)
     {
-        const arr = panel.dialogue ?? [];
-        const d = arr[widgetIndex];
+        const livePanel = this._ast?.pages?.[this._currentPageIndex]?.panels?.[panelIndex];
+        const d = livePanel?.dialogue?.[widgetIndex];
         if (!d) return;
         const current = (d.parenthetical ?? '').toString();
         if (current === chip)
@@ -2221,8 +2442,9 @@ class MPSVisualEditor extends HTMLElement
             d.parenthetical = chip;
             d.offPanel = false;
             d.type = 'speech';
+            if (Array.isArray(d.modifier)) d.modifier = [];
         }
-        this._flushAndRerender();
+        this._flushOrRerender(d);
     }
 
     /**
@@ -2232,10 +2454,10 @@ class MPSVisualEditor extends HTMLElement
      * @param {number} _panelIndex
      * @param {number} widgetIndex
      */
-    _onChipToggleOffPanel(panel, _panelIndex, widgetIndex)
+    _onChipToggleOffPanel(_panelClosure, panelIndex, widgetIndex)
     {
-        const arr = panel.dialogue ?? [];
-        const d = arr[widgetIndex];
+        const livePanel = this._ast?.pages?.[this._currentPageIndex]?.panels?.[panelIndex];
+        const d = livePanel?.dialogue?.[widgetIndex];
         if (!d) return;
         if (d.offPanel === true)
         {
@@ -2247,11 +2469,21 @@ class MPSVisualEditor extends HTMLElement
             d.parenthetical = '';
             d.type = 'speech';
         }
-        this._flushAndRerender();
+        // Always strip parser-populated O.P./O.S. modifiers so the formatter
+        // doesn't re-emit them on the next flush (which would force
+        // offPanel back to true via the round-trip).
+        if (Array.isArray(d.modifier))
+        {
+            d.modifier = d.modifier.filter(
+                (m) => m !== 'O.P.' && m !== 'O.S.'
+            );
+            if (d.modifier.length === 0) delete d.modifier;
+        }
+        this._flushOrRerender(d);
     }
 
     // -----------------------------------------------------------------
-    // Keyboard drag (Task T)
+    // Keyboard drag
     //
     // Activation contract:
     //   Tab → focus a .widget-grip-rail (tabindex=0).
@@ -2400,6 +2632,7 @@ class MPSVisualEditor extends HTMLElement
 
         // Restore focus to the moved grip after re-render.
         this._postRenderFocus = {
+            pageIndex: this._currentPageIndex,
             panelIndex: nextPanelIdx,
             widgetType: origin.widgetType,
             widgetIndex: insertAt,
@@ -2472,9 +2705,9 @@ class MPSVisualEditor extends HTMLElement
     }
 
     // -----------------------------------------------------------------
-    // DnD engine (Task R)
+    // DnD engine
     //
-    // 7-step contract per TODO/mps-visual-panel-editor.md:
+    // 7-step contract:
     //   1. Grab — pointerdown on `.widget-grip-rail` builds the ghost.
     //   2. Long-press on touch — 300ms threshold before activation.
     //   3. Multi-touch guard — second pointerdown aborts.
@@ -3385,6 +3618,85 @@ class MPSVisualEditor extends HTMLElement
         }
         if (dirty) this._render();
     }
+
+    /**
+     * Build the diagnostic list for the visual editor banner. Runs the same
+     * parser warnings + editor-side checks as `runParserLinter()` but skips
+     * CM6 range mapping — the visual editor doesn't paint squiggles, only a
+     * summary strip above the page.
+     * @returns {Array<{ code: string, severity: "error"|"warning"|"info", message: string, line: number }>}
+     */
+    _collectDiagnostics()
+    {
+        const ast = this._ast;
+        if (!ast) return [];
+
+        /** @type {any[]} */
+        const allWarnings = [];
+        if (Array.isArray(ast.warnings))
+        {
+            for (const w of ast.warnings) allWarnings.push(w);
+        }
+        let source = "";
+        try { source = formatScript(ast); }
+        catch (_) { source = ""; }
+        try
+        {
+            for (const w of sequentialPages(ast))           allWarnings.push(w);
+            for (const w of sequentialPanels(ast))          allWarnings.push(w);
+            for (const w of unknownPanelTags(ast, source))  allWarnings.push(w);
+            for (const w of characterCueCase(ast))          allWarnings.push(w);
+        }
+        catch (_) { /* defensive — never block render on a check throw */ }
+
+        /** @type {Array<{ code: string, severity: "error"|"warning"|"info", message: string, line: number }>} */
+        const out = [];
+        for (const w of allWarnings)
+        {
+            const meta = CODE_META[w.code];
+            if (!meta) continue;
+            const params = visualArgsToParams(w.args);
+            const message = resolveDiagnosticMessage(
+                {
+                    messageKey: meta.messageKey,
+                    message: w.message || w.code,
+                    messageParams: params
+                },
+                visualTranslate
+            );
+            out.push({
+                code: w.code,
+                severity: meta.severity,
+                message,
+                line: (typeof w.line === "number" ? w.line : 0) + 1
+            });
+        }
+        return out;
+    }
+}
+
+/**
+ * `{0}`/`{1}` placeholder shim — matches the format used in en.json so the
+ * resolver hands them straight through.
+ * @param {Array<string|number> | undefined} args
+ * @returns {Record<string, string|number>}
+ */
+function visualArgsToParams(args)
+{
+    /** @type {Record<string, string|number>} */
+    const params = {};
+    if (!Array.isArray(args)) return params;
+    for (let i = 0; i < args.length; i++)
+    {
+        params[String(i)] = args[i];
+    }
+    return params;
+}
+
+function visualTranslate(key, fallback)
+{
+    try { return t(key, fallback); }
+    catch (_) { return fallback; }
 }
 
 if (!customElements.get('mps-visual-editor'))

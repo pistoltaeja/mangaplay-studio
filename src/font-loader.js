@@ -8,8 +8,6 @@
  * previous locale's shards are removed via releaseFontsFor(prev) after
  * GRACE_MS — a 3s grace prevents thrash when the user toggles
  * ja <-> ko <-> zh quickly.
- *
- * See TODO/MangaplayStudioApp/font-and-i18n-pass.md Sections 4 and 9.
  */
 
 import { ACTIVE_FONT_CSS_VARS, LOCALE_SHARDS } from "./font-matrix.js";

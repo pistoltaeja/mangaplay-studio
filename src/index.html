@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-app-state="booting">
+<html lang="en" data-app-state="app-init" data-ux-mode="standalone" data-active-pane="editor">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -22,90 +22,124 @@
     <!-- Desktop chrome — overrides where it diverges from website. -->
     <link id="active-theme" rel="stylesheet" href="./light-theme.css">
     <link rel="stylesheet" href="./app.css">
+    <link rel="stylesheet" href="./css/app-modals.css">
+    <link rel="stylesheet" href="./css/app-topbar.css">
+    <link rel="stylesheet" href="./css/app-picker.css">
+    <link rel="stylesheet" href="./css/app-tabs-cta.css">
+    <link rel="stylesheet" href="./css/app-subviews.css">
     <!-- Phase-2 spike: visual editor component styles. Safe to load always —
          all rules are namespaced under `mps-visual-editor`. -->
     <link rel="stylesheet" href="./css/visual-editor.css">
+    <!-- Inline pre-paint boot screen. Paints with the HTML parse — no FOUC,
+         no fetch gate. Replaces the dead #loading-screen / #start-screen
+         markup. The picker shell is created at runtime by app.js only when
+         standalone mode is active (mobile / tablet skip it entirely). -->
+    <style>
+        #boot-screen { position: fixed; inset: 0; display: flex; flex-direction: column;
+                       align-items: center; justify-content: center; gap: 16px;
+                       background: #0d0d0d; color: #e0e0e0; z-index: 9999;
+                       font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+        #boot-screen .boot-logo { width: 64px; height: 64px; }
+        :root[data-ux-mode="mobile"] #boot-screen .boot-logo,
+        :root[data-ux-mode="tablet"] #boot-screen .boot-logo { width: 96px; height: 96px; }
+        #boot-progress { width: 220px; height: 2px; background: #2a2a2a; border-radius: 1px; overflow: hidden; }
+        :root[data-ux-mode="mobile"] #boot-progress,
+        :root[data-ux-mode="tablet"] #boot-progress { width: 280px; height: 3px; }
+        #boot-progress-fill { width: 0%; height: 100%; background: #4a9eff; transition: width .2s; }
+        #boot-caption { opacity: .7; min-height: 1em; }
+    </style>
+    <script>
+        // Inline. Runs before any module evaluates. window.__MPS_UX_MODE__ is
+        // set earlier by Tauri's WebviewWindowBuilder::initialization_script
+        // (see src-tauri/src/lib.rs). Reviewed item #10: guard against the
+        // constant being undefined (initialization_script ordering is not
+        // Tauri-guaranteed on all platforms).
+        (function () {
+            var mode = window.__MPS_UX_MODE__;
+            if (typeof mode !== "string") {
+                console.warn("[boot] __MPS_UX_MODE__ undefined — initialization_script may not have run. Defaulting to standalone.");
+                mode = "standalone";
+            }
+            document.documentElement.setAttribute("data-ux-mode", mode);
+
+            // Review item #2: 15s watchdog + window.onerror handler. If
+            // app.js throws during top-level parse, nothing fires done()
+            // and the user sees "Loading…" forever without this. Repurposes
+            // the existing #error-overlay markup at the bottom of <body>.
+            function showRetry(reason) {
+                var overlay = document.getElementById("error-overlay");
+                if (overlay) {
+                    var body = overlay.querySelector(".error-body");
+                    if (body) body.textContent = reason || "";
+                    var retry = overlay.querySelector(".error-retry");
+                    if (retry) retry.onclick = function () { location.reload(); };
+                    overlay.hidden = false;
+                }
+                var boot = document.getElementById("boot-screen");
+                if (boot) boot.style.opacity = "0.3";
+            }
+            window.addEventListener("error", function (e) {
+                try { showRetry((e && e.message) || ""); } catch (_) {}
+            });
+            var watchdogTimer = setTimeout(function () {
+                showRetry("Took longer than expected.");
+            }, 15000);
+
+            window.__mpsBoot = {
+                mode: mode,
+                stages: ["paint", "bundle", "settings", "iapInit", "analyticsInit", "accountInit", "project"],
+                update: function (stage, msg) {
+                    var fill = document.getElementById("boot-progress-fill");
+                    var cap = document.getElementById("boot-caption");
+                    var idx = this.stages.indexOf(stage);
+                    if (fill && idx >= 0) {
+                        var pct = ((idx + 1) / this.stages.length) * 100;
+                        fill.style.width = pct + "%";
+                    }
+                    if (cap && msg) cap.textContent = msg;
+                },
+                done: function () {
+                    clearTimeout(watchdogTimer);
+                    var el = document.getElementById("boot-screen");
+                    if (el) {
+                        el.style.transition = "opacity .25s";
+                        el.style.opacity = "0";
+                        setTimeout(function () { try { el.remove(); } catch (_) {} }, 260);
+                    }
+                }
+            };
+        })();
+    </script>
     <script type="module" src="./app.js"></script>
 </head>
 <body>
-    <!-- Picker shell — the single dark surface that replaces the old
-         #loading-screen + #start-screen pair. Drives bootstrap / picker /
-         opening phases via its data-phase attribute. The legacy
-         #loading-screen + #start-screen elements stay in the DOM (hidden) so
-         any code path that still references them is a no-op rather than a
-         crash; nothing visible reads from them anymore. -->
-    <mps-picker-shell id="picker-shell" data-phase="bootstrap"></mps-picker-shell>
-
-    <div id="loading-screen" data-state="booting" hidden>
-        <div class="brand">
-            <img src="./img/icon-256.png" alt="" width="96" height="96">
-            <h1>Mangaplay Studio</h1>
-        </div>
-        <p class="status-line" data-state-message>Starting up…</p>
-        <div class="spinner" aria-hidden="true"></div>
-    </div>
-
-    <div id="start-screen" hidden>
-        <div class="start-drag-strip" data-tauri-drag-region></div>
-        <button id="btn-start-close" class="start-close" aria-label="Close" data-tooltip="Close" data-i18n-tooltip="mangaplay-studio.chrome.tooltip.closeButton" data-tooltip-side="left" type="button">
-            <span data-icon="x"></span>
-        </button>
-        <div class="start-fixed">
-            <div class="brand">
-                <img src="./img/icon-256.png" alt="" width="64" height="64">
-                <h1>Mangaplay Studio</h1>
-            </div>
-            <div class="start-actions">
-                <button id="btn-new-project" class="primary">New Project</button>
-                <button id="btn-open-folder" class="secondary">Open Folder…</button>
-            </div>
-        </div>
-        <div id="recent-list" class="recent-list" aria-label="Recent projects"></div>
+    <!-- Pre-paint boot screen. Painted before app.js parses; faded by
+         window.__mpsBoot.done() once the FSM hits PROJECT. -->
+    <div id="boot-screen">
+        <img class="boot-logo" src="./img/icon-256.png" alt="">
+        <div id="boot-progress"><div id="boot-progress-fill"></div></div>
+        <div id="boot-caption">Loading…</div>
     </div>
 
     <div id="app-chrome" hidden>
         <div id="top-bar">
             <div class="top-bar-left">
-                <button id="btn-left-pane-toggle"
-                        class="top-bar-icon top-bar-toggle"
-                        aria-label="Collapse left pane"
-                        aria-pressed="false"
-                        data-tooltip="Collapse"
-                        data-i18n-tooltip="mangaplay-studio.chrome.tooltip.sidebarCollapse"
-                        data-tooltip-side="right"
-                        type="button">
-                    <span data-icon="panel-left-close"></span>
-                </button>
-
                 <div id="left-subview-group" class="top-bar-subview-group">
                     <button id="btn-subview-folder"
-                            class="top-bar-icon top-bar-subview"
-                            aria-label="Folder Explorer"
-                            aria-pressed="true"
-                            data-subview="folder"
-                            data-tooltip="File Explorer"
-                            data-i18n-tooltip="mangaplay-studio.chrome.tooltip.tabFileExplorer"
-                            data-tooltip-side="bottom"
+                            class="top-bar-icon top-bar-home"
+                            aria-label="Home"
                             type="button">
-                        <span data-icon="folder"></span>
-                    </button>
-                    <button id="btn-subview-bookmarks"
-                            class="top-bar-icon top-bar-subview"
-                            aria-label="Bookmarks"
-                            aria-pressed="false"
-                            data-subview="bookmarks"
-                            data-tooltip="Bookmarks"
-                            data-i18n-tooltip="mangaplay-studio.chrome.tooltip.tabBookmarks"
-                            data-tooltip-side="bottom"
-                            type="button">
-                        <span data-icon="bookmark"></span>
+                        <img class="top-bar-home-icon"
+                             src="./img/icon-64-transparent.png"
+                             alt=""
+                             width="20" height="20">
                     </button>
                 </div>
             </div>
 
             <div class="top-bar-tabs"></div>
 
-            <div id="topbar-pagination" class="topbar-pagination" hidden>
+            <div id="topbar-storyboard-pagination" class="topbar-storyboard-pagination" hidden>
                 <button id="btn-page-prev" class="top-bar-icon topbar-page-btn" type="button" aria-label="Previous page" data-tooltip="Previous page" data-tooltip-side="bottom">
                     <span data-icon="chevron-left"></span>
                 </button>
@@ -115,6 +149,17 @@
                 </button>
             </div>
             <div class="topbar-divider" aria-hidden="true"></div>
+
+            <button id="btn-left-pane-toggle"
+                    class="top-bar-action top-bar-action-anchored-left"
+                    aria-label="Collapse left pane"
+                    aria-pressed="false"
+                    data-tooltip="Collapse"
+                    data-i18n-tooltip="mangaplay-studio.chrome.tooltip.sidebarCollapse"
+                    data-tooltip-side="right"
+                    type="button">
+                <span data-icon="panel-left-close"></span>
+            </button>
 
             <button id="btn-storyboard-collapse"
                     class="top-bar-action top-bar-action-anchored top-bar-action-c"
@@ -137,12 +182,93 @@
                     data-tooltip-side="bottom">
                 <span data-icon="arrow-left-right"></span>
             </button>
+
+            <!-- Hand-rolled Windows-style window controls. Replaces the
+                 tauri-plugin-frame eval-injected buttons so the CSP can drop
+                 'unsafe-eval'. window-controls.js wires the clicks and toggles
+                 .is-maximized on #win-maximize. The container is hidden by
+                 default; window-controls.js unhides it when hasWindowChrome()
+                 is true (standalone desktop only). -->
+            <div id="window-controls" class="window-controls" hidden>
+                <button id="win-minimize" class="win-ctrl" type="button" aria-label="Minimize">
+                    <span class="win-ctrl-dot win-ctrl-dot-min" aria-hidden="true">
+                        <svg class="win-ctrl-glyph win-ctrl-glyph-min" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 5 H8"/></svg>
+                    </span>
+                </button>
+                <button id="win-maximize" class="win-ctrl" type="button" aria-label="Maximize">
+                    <span class="win-ctrl-dot win-ctrl-dot-max" aria-hidden="true">
+                        <svg class="win-ctrl-glyph win-ctrl-glyph-max" viewBox="0 0 10 10" aria-hidden="true"><rect x="2.5" y="2.5" width="5" height="5"/></svg>
+                    </span>
+                </button>
+                <button id="win-close" class="win-ctrl win-ctrl-close" type="button" aria-label="Close">
+                    <span class="win-ctrl-dot win-ctrl-dot-close" aria-hidden="true">
+                        <svg class="win-ctrl-glyph win-ctrl-glyph-close" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 3 L7 7 M7 3 L3 7"/></svg>
+                    </span>
+                </button>
+            </div>
         </div>
+
+        <!-- App Footer — 200×30 panel bottom-right of #app-chrome. Hidden until
+             a project is open. Populated by app-footer.js (mode button, word /
+             char counts, Google Docs sync gear). Hidden in mobile / tablet UX
+             modes via the data-ux-mode rules in app.css. -->
+        <footer id="app-footer" hidden></footer>
 
         <div class="app-body">
             <aside id="left-sidebar">
-                <button class="rail-icon" aria-label="Files" data-tooltip="Files" data-i18n-tooltip="mangaplay-studio.chrome.tooltip.railFiles" data-tooltip-side="right" type="button">
+                <button id="btn-rail-files"
+                        class="rail-icon top-bar-subview"
+                        aria-label="File Explorer"
+                        aria-pressed="false"
+                        data-subview="folder"
+                        data-tooltip="File Explorer"
+                        data-i18n-tooltip="mangaplay-studio.chrome.tooltip.railFiles"
+                        data-tooltip-side="right"
+                        type="button">
                     <span data-icon="files"></span>
+                </button>
+                <button id="btn-subview-outline"
+                        class="rail-icon top-bar-subview"
+                        aria-label="Outline"
+                        aria-pressed="false"
+                        data-subview="outline"
+                        data-tooltip="Outline"
+                        data-i18n-tooltip="mangaplay-studio.chrome.tooltip.tabOutline"
+                        data-tooltip-side="right"
+                        type="button">
+                    <span data-icon="table-of-contents"></span>
+                </button>
+                <button id="btn-subview-statistics"
+                        class="rail-icon top-bar-subview"
+                        aria-label="Statistics"
+                        aria-pressed="false"
+                        data-subview="statistics"
+                        data-tooltip="Statistics"
+                        data-i18n-tooltip="mangaplay-studio.chrome.tooltip.tabStatistics"
+                        data-tooltip-side="right"
+                        type="button">
+                    <span data-icon="chart-column"></span>
+                </button>
+                <button id="btn-subview-bookmarks"
+                        class="rail-icon top-bar-subview"
+                        aria-label="Bookmarks"
+                        aria-pressed="false"
+                        data-subview="bookmarks"
+                        data-tooltip="Bookmarks"
+                        data-i18n-tooltip="mangaplay-studio.chrome.tooltip.tabBookmarks"
+                        data-tooltip-side="right"
+                        type="button">
+                    <span data-icon="bookmark"></span>
+                </button>
+                <button id="btn-rail-account"
+                        class="rail-icon rail-account"
+                        aria-label="Account"
+                        data-tooltip="Account"
+                        data-i18n-tooltip="mangaplay-studio.chrome.tooltip.railAccount"
+                        data-tooltip-side="right"
+                        type="button"
+                        hidden>
+                    <img class="rail-account-avatar" alt="" />
                 </button>
             </aside>
 
@@ -154,11 +280,25 @@
                     <div id="subview-bookmarks" class="subview">
                         <p class="subview-empty">No bookmarks found</p>
                     </div>
+                    <div id="subview-outline" class="subview">
+                        <div class="outline-list mps-scrollbar" aria-label="Outline"></div>
+                        <div class="outline-disabled" hidden></div>
+                    </div>
+                    <div id="subview-statistics" class="subview">
+                        <div class="statistics-content mps-scrollbar"></div>
+                        <div class="statistics-disabled" hidden></div>
+                    </div>
                 </div>
                 <div class="left-pane-footer">
                     <button id="project-switcher-btn" type="button" class="project-switcher-btn" aria-haspopup="menu" aria-expanded="false">
                         <span class="project-switcher-chevron" data-icon="chevrons-down-up"></span>
                         <span class="project-switcher-label">(project)</span>
+                    </button>
+                    <button id="btn-app-help"
+                            class="footer-icon"
+                            type="button"
+                            aria-label="Help">
+                        <span data-icon="circle-help"></span>
                     </button>
                     <button id="btn-app-settings"
                             class="footer-icon"
@@ -192,6 +332,9 @@
                         <mps-canvas></mps-canvas>
                         <mps-screenplay></mps-screenplay>
                     </div>
+                    <div id="right-pane-no-doc" class="right-pane-empty-overlay" hidden></div>
+                    <div id="right-pane-no-screenplay" class="right-pane-empty-overlay" hidden></div>
+                    <div id="right-pane-screenplay-unsupported" class="right-pane-empty-overlay" hidden></div>
                 </div>
                 <div class="widget-clip">
                     <mps-paint-widget></mps-paint-widget>

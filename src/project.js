@@ -2,44 +2,82 @@
 /**
  * project.js — Project folder I/O + autosave.
  *
- * v2 project folder layout (current):
+ * Project folder layout (current):
  *   <project>/
- *     mangaplay_settings/
- *       .migration-in-progress.json (transient, only during migrations)
- *     project/
- *       Untitled.mangaplay.md, ...     — scripts (recursively walked, depth 16)
- *     storyboard/
- *       page-NNN.json                  — per-page drawings
- *     meta.json                        — viewMode, lastOpened, etc.
- *     project.json                     — id + shared displayName
+ *     _mangaplaystudio/                — reserved app-managed root
+ *       project.json                   — id + shared displayName + artMap
+ *       meta.json                      — viewMode, lastOpened, etc.
+ *       storyboard/
+ *         page-NNN.json                — per-page drawings
+ *         <uuid>.mangaart              — script-associated drawing (root scripts)
+ *         <script-rel-dir>/<uuid>.mangaart — mirrored hierarchy for nested scripts
+ *       settings/
+ *         session.json                 — current page, viewport, tab state
+ *         fold-state.json              — editor fold ranges
+ *     Untitled.mangaplay.md, ...       — user scripts at the root (recursive)
+ *     <user folders>/                  — user-created folders at the root (recursive)
  *
- * Legacy layout (read via migration prompt):
- *   <project>/
- *     <name>.mangaplay.md              — scripts at root
- *     art/page-NNN.json                — drawings under art/
- *     meta.json
+ * The previous four-sibling layout (`project.json`/`meta.json`/`storyboard/`/`mangaplay_settings/`
+ * at the project root) is NOT supported — projects from older builds will not open.
  */
 
 // ── Tauri bridge ──
-/** @returns {boolean} */
-function isTauri() {
-    return !!(window.__TAURI__);
-}
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { basename } from "./util/basename.js";
+import { isTauri } from "./util/is-tauri.js";
+import { debounce } from "./util/debounce.js";
 
-/**
- * Invoke a Tauri command, with browser fallback stubs.
- * @param {string} cmd
- * @param {any} [args]
- * @returns {Promise<any>}
- */
 /**
  * In-memory file system for the browser stubs. Map<absPath, contents>.
  * Folders are tracked by being a prefix of file paths (no explicit folder
  * entries). The Rust contract this models is a strict subset — see the
- * comment in the switch below for the explicit non-modelled list.
+ * comment in the `invoke()` switch below for the explicit non-modelled list.
  * @type {Map<string, string>}
  */
 const _fakeFs = new Map();
+
+/**
+ * In-memory analogue of `project.json`'s artMap.scripts section. Keyed by
+ * `${projectPath}::${scriptFile}` (`::` chosen as delimiter — neither side
+ * contains it on the platforms we care about). Value records the durable
+ * UUID + the on-disk art path so `mangaart_resolve_path` can answer without
+ * recomputing.
+ * @type {Map<string, {uuid: string, artPath: string}>}
+ */
+const _fakeArtMap = new Map();
+
+function _fakeArtMapKey(projectPath, scriptFile)
+{
+    return `${projectPath}::${scriptFile}`;
+}
+
+/**
+ * Mirror the Rust `resolve_art_path` shape: strip the script's basename and
+ * place the art file under
+ * `<projectPath>/_mangaplaystudio/storyboard/<mirrored-dir>/<uuid>.mangaart`.
+ * Root-level scripts collapse to
+ * `<projectPath>/_mangaplaystudio/storyboard/<uuid>.mangaart`.
+ *
+ * Mirrors the Rust nested layout — the storyboard tree lives inside the
+ * `_mangaplaystudio/` reserved root, not at the project root.
+ */
+function _fakeArtMapComputePath(projectPath, scriptFile, uuid)
+{
+    const slash = scriptFile.lastIndexOf("/");
+    const mirroredDir = slash < 0 ? "" : scriptFile.slice(0, slash);
+    return mirroredDir
+        ? `${projectPath}/_mangaplaystudio/storyboard/${mirroredDir}/${uuid}.mangaart`
+        : `${projectPath}/_mangaplaystudio/storyboard/${uuid}.mangaart`;
+}
+
+function _fakeArtMapMintUuid()
+{
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function")
+    {
+        return crypto.randomUUID();
+    }
+    return "00000000-0000-4000-8000-000000000000";
+}
 
 /** Parent dir of an absolute POSIX-or-mixed path. */
 function _fakeFsParent(p)
@@ -48,12 +86,6 @@ function _fakeFsParent(p)
     return i < 0 ? "" : p.slice(0, i);
 }
 
-/** Basename of an absolute path. */
-function _fakeFsBasename(p)
-{
-    const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
-    return i < 0 ? p : p.slice(i + 1);
-}
 
 /**
  * `next_free_name` parity helper. `extChain` is the entire suffix string
@@ -85,6 +117,18 @@ export function _resetFakeFsForTest()
 }
 
 /**
+ * Test helper. Clears the in-memory artMap so each test starts with a
+ * fresh script→uuid map. Separate from `_resetFakeFsForTest` because the
+ * production `clearMangaartCache` only drops the in-memory cache; it does
+ * NOT wipe project.json on disk. Tests that need a true cold start call
+ * this alongside `clearMangaartCache`.
+ */
+export function _resetFakeArtMapForTest()
+{
+    _fakeArtMap.clear();
+}
+
+/**
  * Test helper. Direct passthrough to the private `invoke` dispatcher so
  * tests can exercise FS commands (`app_create_file`, etc.) that don't have
  * dedicated public wrappers. Only used by tests/fakefs.test.js.
@@ -99,7 +143,7 @@ export function _invokeForTest(cmd, args)
 
 async function invoke(cmd, args) {
     if (isTauri()) {
-        return window.__TAURI__.core.invoke(cmd, args);
+        return tauriInvoke(cmd, args);
     }
     // Browser stubs for tests and dev — names must match Tauri command names exactly.
     //
@@ -112,10 +156,6 @@ async function invoke(cmd, args) {
     //   - `trash-unavailable` / `access-denied` error variants — happy path
     //     plus `not-found` / `target-exists` are modelled; other classes are
     //     only reachable against the real .exe via the CDP harness.
-    //   - `app_detect_layout` / `app_migrate_legacy_layout` — `detectLayout`
-    //     always returns v2 here, `migrateLegacyLayout` is a no-op. If a
-    //     test needs to exercise the legacy/crash branches it must run
-    //     against the real .exe via the CDP harness.
     switch (cmd) {
         case "project_open":
             return {
@@ -139,12 +179,12 @@ async function invoke(cmd, args) {
             return [];
         case "list_project_scripts":
         {
-            // Walk in-memory FS for entries under `<dir>/project/` whose
-            // basename ends in `.mangaplay.md` or `.fountain.md`. Returns
-            // forward-slash-joined paths relative to `project/`.
+            // Walk in-memory FS for entries under `<dir>/` whose basename
+            // ends in `.mangaplay.md` or `.fountain.md`. Returns
+            // forward-slash-joined paths relative to `<dir>`.
             const dir = args?.dir;
             if (!dir) return [];
-            const prefix = `${dir}/project/`;
+            const prefix = `${dir}/`;
             const out = [];
             for (const p of _fakeFs.keys())
             {
@@ -180,7 +220,7 @@ async function invoke(cmd, args) {
             const src = args?.path;
             if (!src || !_fakeFs.has(src)) throw new Error("not-found");
             const parent = _fakeFsParent(src);
-            const base = _fakeFsBasename(src);
+            const base = basename(src);
             // Strip the longest known double suffix; fall back to last dot.
             let baseStem = base;
             let extChain = "";
@@ -244,20 +284,43 @@ async function invoke(cmd, args) {
             return null; // browser cannot show OS folder dialog
         case "project_create_new":
             return `/tmp/${args?.name || "new-project"}`;
-        case "app_detect_layout":
-            return { layout: "v2", crash_recovery: false };
-        case "app_migrate_legacy_layout":
-            return null;
         case "mangaart_scaffold":
-            return {
+        {
+            const projectPath = args?.projectPath || "";
+            const scriptFile = args?.scriptFile || "Untitled.mangaplay.md";
+            const key = _fakeArtMapKey(projectPath, scriptFile);
+            // Idempotent: re-use the stored UUID + path on repeat scaffold,
+            // matching the Rust contract.
+            let entry = _fakeArtMap.get(key);
+            if (!entry)
+            {
+                const uuid = _fakeArtMapMintUuid();
+                const artPath = _fakeArtMapComputePath(projectPath, scriptFile, uuid);
+                entry = { uuid, artPath };
+                _fakeArtMap.set(key, entry);
+            }
+            const body = {
                 format: "mangaart:v1",
-                uuid: "00000000-0000-4000-8000-000000000000",
-                name: stripMdSuffix(args?.scriptFile || "Untitled"),
-                scriptFile: args?.scriptFile || "Untitled.mangaplay.md",
+                uuid: entry.uuid,
+                name: stripMdSuffix(scriptFile),
+                scriptFile,
                 createdAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString(),
                 pages: []
             };
+            // Seed the in-memory FS so a subsequent read_project_file at the
+            // resolved path returns the scaffold body (parity with Rust which
+            // atomically writes the scaffold to disk).
+            _fakeFs.set(entry.artPath, JSON.stringify(body, null, 2));
+            return body;
+        }
+        case "mangaart_resolve_path":
+        {
+            const projectPath = args?.projectPath || "";
+            const scriptFile = args?.scriptFile || "";
+            const entry = _fakeArtMap.get(_fakeArtMapKey(projectPath, scriptFile));
+            return entry ? entry.artPath : null;
+        }
         default:
             return null;
     }
@@ -280,55 +343,8 @@ function stripMdSuffix(name)
 // ── Project API ──
 
 /**
- * Thrown by `openProject` when the project on disk uses the legacy layout
- * (scripts at root + `art/`). The caller must prompt the user to migrate
- * (see `src/migration-modal.js`) before the project can be opened.
- */
-export class LayoutLegacyError extends Error
-{
-    /**
-     * @param {string} projectPath
-     * @param {{layout: string, crash_recovery: boolean}} layoutInfo
-     */
-    constructor(projectPath, layoutInfo)
-    {
-        super("layout-legacy");
-        this.name = "LayoutLegacyError";
-        this.projectPath = projectPath;
-        this.layoutInfo = layoutInfo;
-    }
-}
-
-/**
- * Thrown by `openProject` when a previous migration was interrupted
- * (`.migration-in-progress.json` is still on disk). The caller must offer
- * a Resume / Cancel choice before the project can be opened.
- */
-export class MigrationCrashedError extends Error
-{
-    /**
-     * @param {string} projectPath
-     * @param {{layout: string, crash_recovery: boolean}} layoutInfo
-     */
-    constructor(projectPath, layoutInfo)
-    {
-        super("migration-crashed");
-        this.name = "MigrationCrashedError";
-        this.projectPath = projectPath;
-        this.layoutInfo = layoutInfo;
-    }
-}
-
-/**
- * Open a project from a folder path.
- *
- * The Rust side returns a tagged result:
- *   { status: "ok", project: {...} }
- *   { status: "legacy", layout_info: {...} }
- *   { status: "migration-crashed", layout_info: {...} }
- *
- * Non-ok statuses are converted into typed errors so the auto-resume / picker
- * callers can branch cleanly without inspecting raw payloads.
+ * Open a project from a folder path. The Rust side always returns
+ * `{ status: "ok", project: {...} }`; any other shape is treated as a bug.
  *
  * @param {string} projectPath — absolute path to the project folder
  * @returns {Promise<{path: string, name: string, script: string, scriptPath: string | null, scriptBasename: string, drawings: Record<string, object>, meta: object}>}
@@ -336,14 +352,6 @@ export class MigrationCrashedError extends Error
 export async function openProject(projectPath) {
     const result = await invoke("project_open", { path: projectPath });
 
-    if (result && result.status === "legacy")
-    {
-        throw new LayoutLegacyError(projectPath, result.layout_info);
-    }
-    if (result && result.status === "migration-crashed")
-    {
-        throw new MigrationCrashedError(projectPath, result.layout_info);
-    }
     if (!result || result.status !== "ok")
     {
         throw new Error("unknown-open-result");
@@ -354,9 +362,9 @@ export async function openProject(projectPath) {
     // Derive project name from folder name
     const name = projectPath.split("/").pop() || projectPath.split("\\").pop() || "Untitled";
     const scriptFile = project.scriptFile || "";
-    // v2: scripts live under <project>/project/<relative-name>. scriptFile is
-    // already a forward-slash-joined relative path from the Rust walker.
-    const scriptPath = scriptFile ? `${projectPath}/project/${scriptFile}` : null;
+    // Consolidated layout: scripts live at <project>/<relative-name>. scriptFile
+    // is already a forward-slash-joined relative path from the Rust walker.
+    const scriptPath = scriptFile ? `${projectPath}/${scriptFile}` : null;
     const scriptBasename = scriptFile || "Untitled.mangaplay.md";
 
     return {
@@ -368,28 +376,6 @@ export async function openProject(projectPath) {
         drawings: project.drawings || {},
         meta: project.meta || {},
     };
-}
-
-/**
- * Detect the on-disk layout of a project folder.
- * @param {string} projectPath
- * @returns {Promise<{layout: "v2"|"legacy"|"unknown", crash_recovery: boolean}>}
- */
-export async function detectLayout(projectPath)
-{
-    return invoke("app_detect_layout", { projectPath });
-}
-
-/**
- * Migrate a legacy-layout project to v2 in place. Idempotent on success
- * (calling it on an already-v2 project is a no-op from the JS perspective —
- * the Rust side returns Ok and the marker file never appears).
- * @param {string} projectPath
- * @returns {Promise<void>}
- */
-export async function migrateLegacyLayout(projectPath)
-{
-    return invoke("app_migrate_legacy_layout", { projectPath });
 }
 
 /**
@@ -421,27 +407,48 @@ export async function saveScript(scriptPath, text) {
 }
 
 /**
+ * Resolve the on-disk `.mangaart` path for a script via the project.json
+ * artMap. Returns null when no mapping exists (caller should scaffold).
+ * @param {string} projectPath
+ * @param {string} scriptBasename — e.g. "foo/bar/baz.mangaplay.md"
+ * @returns {Promise<string|null>}
+ */
+async function resolveArtPath(projectPath, scriptBasename)
+{
+    const result = await invoke("mangaart_resolve_path", {
+        projectPath,
+        scriptFile: scriptBasename,
+    });
+    return result == null ? null : result;
+}
+
+/**
  * Load (or scaffold) the project's `.mangaart` file into the module cache.
- * Path is derived as `${projectPath}/${stripMdSuffix(scriptBasename)}.mangaart`.
+ * Path is resolved via the project.json artMap (mangaart_resolve_path).
+ * Falls through to mangaart_scaffold when no mapping exists OR when the
+ * mapped file is missing/unreadable (crash-after-map-write recovery).
  * @param {string} projectPath
  * @param {string} scriptBasename — e.g. "Untitled.mangaplay.md"
  * @returns {Promise<object>}
  */
 export async function loadMangaart(projectPath, scriptBasename)
 {
-    const path = `${projectPath}/${stripMdSuffix(scriptBasename)}.mangaart`;
-    try
+    const path = await resolveArtPath(projectPath, scriptBasename);
+    if (path)
     {
-        const contents = await invoke("read_project_file", { path });
-        if (contents)
+        try
         {
-            mangaartCache = JSON.parse(contents);
-            return mangaartCache;
+            const contents = await invoke("read_project_file", { path });
+            if (contents)
+            {
+                mangaartCache = JSON.parse(contents);
+                return mangaartCache;
+            }
         }
-    }
-    catch (err)
-    {
-        // fall through to scaffold
+        catch (err)
+        {
+            // fall through to scaffold (recovery path)
+        }
     }
     mangaartCache = await invoke("mangaart_scaffold", { projectPath, scriptFile: scriptBasename });
     return mangaartCache;
@@ -449,6 +456,10 @@ export async function loadMangaart(projectPath, scriptBasename)
 
 /**
  * Persist the in-memory `.mangaart` cache via atomic write. No-op if no cache.
+ * Resolves the storyboard path via the project.json artMap. If no mapping
+ * exists at save time, this means saveMangaart was called for a script that
+ * was never loaded/scaffolded — a call-site bug. Log + bail; do not silently
+ * scaffold.
  * @param {string} projectPath
  * @param {string} scriptBasename
  * @returns {Promise<void>}
@@ -457,7 +468,16 @@ export async function saveMangaart(projectPath, scriptBasename)
 {
     if (mangaartCache === null) return;
     mangaartCache.updatedAt = new Date().toISOString();
-    const path = `${projectPath}/${stripMdSuffix(scriptBasename)}.mangaart`;
+    const path = await resolveArtPath(projectPath, scriptBasename);
+    if (!path)
+    {
+        console.warn(
+            "saveMangaart: no artMap entry for",
+            scriptBasename,
+            "— skipping save (load before save)",
+        );
+        return;
+    }
     await invoke("atomic_write_project_file", {
         path,
         contents: JSON.stringify(mangaartCache, null, 2),
@@ -505,13 +525,14 @@ export function getMangaartCache()
 }
 
 /**
- * Save meta.json for the project.
+ * Save meta.json for the project. Path mirrors the Rust nested layout:
+ * `<projectPath>/_mangaplaystudio/meta.json`.
  * @param {string} projectPath
  * @param {object} meta
  * @returns {Promise<void>}
  */
 export async function saveMeta(projectPath, meta) {
-    const metaPath = `${projectPath}/meta.json`;
+    const metaPath = `${projectPath}/_mangaplaystudio/meta.json`;
     const payload = {
         ...meta,
         savedAt: new Date().toISOString(),
@@ -525,7 +546,7 @@ export async function saveMeta(projectPath, meta) {
 // ── session.json ─────────────────────────────────────────────────────────
 //
 // Per-project state that should survive a file-swap but not a project close.
-// Lives at `<projectPath>/mangaplay_settings/session.json`. Schema v1:
+// Lives at `<projectPath>/_mangaplaystudio/settings/session.json`. Schema v1:
 //   {
 //       "version": 1,
 //       "lastPageIndex": { "<scriptBasename>": <number>, ... }
@@ -539,7 +560,7 @@ const sessionCache = new Map();
 
 function sessionPath(projectPath)
 {
-    return `${projectPath}/mangaplay_settings/session.json`;
+    return `${projectPath}/_mangaplaystudio/settings/session.json`;
 }
 
 function sessionKey(scriptBasename)
@@ -689,15 +710,6 @@ export async function readFile(filePath) {
 }
 
 /**
- * List art files in the project.
- * @param {string} projectPath
- * @returns {Promise<string[]>}
- */
-export async function listArt(projectPath) {
-    return invoke("list_project_art", { dir: projectPath });
-}
-
-/**
  * List script files (*.mangaplay.md) at the project root.
  * @param {string} projectPath
  * @returns {Promise<string[]>}
@@ -714,34 +726,174 @@ export async function listProjectScripts(projectPath) {
  * @returns {Promise<Array<{name:string,kind:"file"|"folder",path:string,modifiedAt:number,createdAt:number}>>}
  */
 export async function listProjectTree(projectPath) {
-    return invoke("app_list_project_tree", { dir: `${projectPath}/project` });
+    return invoke("app_list_project_tree", { dir: projectPath });
 }
 
 // ── Utilities ──
 
+// ── googleDocsSync (Phase 1 of Google Docs sync) ─────────────────────────
+//
+// Optional map at `project.json.googleDocsSync`, keyed by script-file path
+// RELATIVE to the project root (forward-slash joined). Each entry caches
+// the Drive-side state of a published Doc so the UI never blocks on a
+// Drive round-trip just to render the gear icon.
+//
+//   googleDocsSync: {
+//       "scripts/dorothy/chapter-01.mangaplay.md": {
+//           docId: "1AbC...",
+//           lastKnownRevisionId: "ALm...",
+//           lastKnownLockToken: "uuid-or-null",
+//           lastCheckedAt: "ISO-8601",
+//           format: "mangaplay" | "fountain" | "text"
+//       }
+//   }
+//
+// Cache is read-modify-write — older project.json files without the field
+// load fine (we treat absent === empty map). Rust round-trips project.json
+// as opaque `serde_json::Value` (see lib.rs `read_project_json` /
+// `write_project_json`), so adding the field needs no Rust changes.
+
 /**
- * Create a debounced save function.
- * @param {(arg?: any) => Promise<void>} fn
- * @param {number} delayMs
- * @returns {(arg?: any) => void}
+ * Per-project in-memory cache of project.json. Keyed by absolute project
+ * path so a session with multiple projects open in sequence each get their
+ * own copy.
+ * @type {Map<string, Record<string, any>>}
  */
-export function debouncedSave(fn, delayMs) {
-    /** @type {ReturnType<typeof setTimeout> | null} */
-    let timer = null;
-    return (arg) => {
-        if (timer) clearTimeout(timer);
-        timer = setTimeout(() => fn(arg), delayMs);
-    };
+const projectJsonCache = new Map();
+
+/**
+ * Path to `<projectPath>/_mangaplaystudio/project.json`. Mirrors the Rust
+ * `project_json_path` helper in lib.rs.
+ * @param {string} projectPath
+ */
+function projectJsonPath(projectPath)
+{
+    return `${projectPath}/_mangaplaystudio/project.json`;
 }
 
 /**
- * Get the Tauri app data directory (or browser fallback).
- * @returns {Promise<string>}
+ * Load project.json into the cache. Returns `{}` when the file is missing
+ * or unparseable — callers treat absent/malformed as "fresh project."
+ * @param {string} projectPath
+ * @returns {Promise<Record<string, any>>}
  */
-export async function getAppDataDir() {
-    const platform = await invoke("app_platform");
-    return platform.appDataDir || "";
+async function loadProjectJson(projectPath)
+{
+    if (projectJsonCache.has(projectPath))
+    {
+        return /** @type {Record<string, any>} */ (projectJsonCache.get(projectPath));
+    }
+    /** @type {Record<string, any>} */
+    let parsed = {};
+    try
+    {
+        const raw = await invoke("read_project_file", { path: projectJsonPath(projectPath) });
+        if (raw)
+        {
+            const data = JSON.parse(raw);
+            if (data && typeof data === "object") parsed = data;
+        }
+    }
+    catch
+    {
+        // Missing / unreadable — start from {}.
+    }
+    projectJsonCache.set(projectPath, parsed);
+    return parsed;
 }
+
+/**
+ * Persist the in-memory project.json cache via atomic write. Idempotent.
+ * @param {string} projectPath
+ */
+async function saveProjectJson(projectPath)
+{
+    const data = projectJsonCache.get(projectPath);
+    if (!data) return;
+    try
+    {
+        await invoke("atomic_write_project_file", {
+            path: projectJsonPath(projectPath),
+            contents: JSON.stringify(data, null, 2)
+        });
+    }
+    catch (err)
+    {
+        console.warn("[project.json] save failed:", err);
+    }
+}
+
+/**
+ * @typedef {Object} GoogleDocsSyncEntry
+ * @property {string} docId
+ * @property {string} lastKnownRevisionId
+ * @property {string|null} lastKnownLockToken
+ * @property {string} lastCheckedAt           — ISO-8601
+ * @property {"mangaplay"|"fountain"|"text"} format
+ */
+
+/**
+ * Read a sync entry for a script. Returns `null` when project.json has no
+ * `googleDocsSync` map OR no entry for the given relative path.
+ * @param {string} projectPath
+ * @param {string} scriptRelPath  — forward-slash path relative to project root
+ * @returns {Promise<GoogleDocsSyncEntry | null>}
+ */
+export async function getSyncEntry(projectPath, scriptRelPath)
+{
+    if (!projectPath || !scriptRelPath) return null;
+    const pj = await loadProjectJson(projectPath);
+    const map = pj.googleDocsSync;
+    if (!map || typeof map !== "object") return null;
+    const entry = map[scriptRelPath];
+    return entry && typeof entry === "object" ? /** @type {GoogleDocsSyncEntry} */ (entry) : null;
+}
+
+/**
+ * Upsert a sync entry. Persists project.json.
+ * @param {string} projectPath
+ * @param {string} scriptRelPath
+ * @param {GoogleDocsSyncEntry} entry
+ */
+export async function setSyncEntry(projectPath, scriptRelPath, entry)
+{
+    if (!projectPath || !scriptRelPath || !entry) return;
+    const pj = await loadProjectJson(projectPath);
+    const map = (pj.googleDocsSync && typeof pj.googleDocsSync === "object")
+        ? pj.googleDocsSync
+        : (pj.googleDocsSync = {});
+    map[scriptRelPath] = entry;
+    await saveProjectJson(projectPath);
+}
+
+/**
+ * Remove a sync entry. Persists project.json. No-op when the entry is
+ * already absent.
+ * @param {string} projectPath
+ * @param {string} scriptRelPath
+ */
+export async function removeSyncEntry(projectPath, scriptRelPath)
+{
+    if (!projectPath || !scriptRelPath) return;
+    const pj = await loadProjectJson(projectPath);
+    const map = pj.googleDocsSync;
+    if (!map || typeof map !== "object" || !(scriptRelPath in map)) return;
+    delete map[scriptRelPath];
+    await saveProjectJson(projectPath);
+}
+
+/** Test-only — reset the in-memory project.json cache. */
+export function _resetProjectJsonCacheForTest()
+{
+    projectJsonCache.clear();
+}
+
+/**
+ * Create a debounced save function. Backwards-compat re-export — new code
+ * should import `debounce` directly from `./util/debounce.js`.
+ * @type {typeof debounce}
+ */
+export const debouncedSave = debounce;
 
 /**
  * Load recent projects list.

@@ -19,11 +19,13 @@
  * called out as the only reliable way to strip HTML in WebView2.
  */
 
+import { isTauri } from "./util/is-tauri.js";
+
 /** Dynamically loaded handle to the Tauri clipboard plugin (.exe target). */
 let tauriClipboardPromise = null;
 function getTauriClipboard()
 {
-    if (typeof window === "undefined" || !(/** @type {any} */ (window).__TAURI__)) return null;
+    if (!isTauri()) return null;
     if (!tauriClipboardPromise)
     {
         tauriClipboardPromise = import("@tauri-apps/plugin-clipboard-manager").catch(() => null);
@@ -205,7 +207,7 @@ async function readClipboardHtmlAsPlain()
     // plugin; calling navigator.clipboard.read() would trigger the WebView2
     // permission prompt for no gain (the Tauri plugin only exposes text).
     // Skip straight to text read.
-    if (!(typeof window !== "undefined" && /** @type {any} */ (window).__TAURI__))
+    if (!isTauri())
     {
         try
         {

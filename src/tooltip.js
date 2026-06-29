@@ -177,7 +177,7 @@ function ensureSingleton()
  * Show the tooltip near `target` with `text`. Defaults to a 350ms hover delay;
  * pass { immediate: true } (used for focus) to skip the delay.
  */
-export function showTooltip(target, text, { side = "bottom", immediate = false } = {})
+function showTooltip(target, text, { side = "bottom", immediate = false } = {})
 {
     if (!target || !text) return;
     clearTimeout(hideTimer);
@@ -202,7 +202,7 @@ export function showTooltip(target, text, { side = "bottom", immediate = false }
     }
 }
 
-export function hideTooltip()
+function hideTooltip()
 {
     clearTimeout(showTimer);
     clearTimeout(hideTimer);
