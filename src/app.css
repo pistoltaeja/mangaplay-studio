@@ -1,21 +1,36 @@
-/* Theme tokens load via <link id="active-theme"> in index.html (see theme.js). */
+/* Skin-independent tokens (fonts, splash chrome dimensions, layout
+ * constants) live in default-skins/root.css — loaded as a static <link>
+ * in index.html BEFORE the active-skin link. Palette tokens load via
+ * <link id="active-skin"> from the individual skin CSS files (see
+ * boot/skins.js). */
 
-/* Font CSS variables. font-loader.js overrides --mps-font-app and
- * --mps-font-code at runtime per locale. The Latin-baseline defaults below
- * render correctly before any shard loads, because the system fallbacks
- * (-apple-system / Segoe UI / etc.) are guaranteed to resolve. Inter +
- * Source Code Pro @font-face declarations live in css/fonts-base.css
- * (loaded by font-loader.js on boot); Courier Prime lives in
- * css/fonts-screenplay.css (static <link> in index.html).
- * --mps-font-app-stable is the locale-immune Latin baseline; font-loader.js never rewrites it.
- * --mps-font-mono is a static alias of --mps-font-code — never written by JS,
- * so anything still reading the old name resolves through the alias. */
-:root {
-    --mps-font-app:  "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    --mps-font-app-stable: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    --mps-font-code: "Source Code Pro", ui-monospace, "Cascadia Mono", Consolas, monospace;
-    --mps-font-mono: var(--mps-font-code);
-    --mps-font-screenplay-body: "Courier Prime", "Courier New", Courier, monospace;
+/* === Motion preferences ===
+ * Reverse-phased: both toggles default ON in Settings → Text Editor →
+ * Advanced, so the DEFAULT state has NO class on <html> and the app
+ * animates + smooth-scrolls normally. Disabling adds the class, which
+ * these rules use to zero durations. See adapters/motion-prefs.js.
+ *
+ * `!important` is load-bearing here — individual component rules and
+ * inline @keyframes declarations set their own animation/transition
+ * durations that would otherwise win the cascade. The universal-selector
+ * scope is deliberate: a component-by-component opt-in would drift the
+ * moment a new animation ships. */
+html.no-smooth-motion,
+html.no-smooth-motion *,
+html.no-smooth-motion *::before,
+html.no-smooth-motion *::after
+{
+    animation-duration: 0s !important;
+    animation-delay: 0s !important;
+    transition-duration: 0s !important;
+    transition-delay: 0s !important;
+    scroll-behavior: auto !important;
+}
+html.no-smooth-scrolling,
+html.no-smooth-scrolling body,
+html.no-smooth-scrolling *
+{
+    scroll-behavior: auto !important;
 }
 
 /* === Reset === */
@@ -31,8 +46,18 @@ html, body {
     overflow: hidden;
     font-family: var(--mps-font-app);
     line-height: 1.2;
-    background: var(--grey-light);
+    background:#1a1a1a;
     color: #1a1a1a;
+}
+
+/* Workspace bg is gated behind [data-chrome-visible="true"] — set by
+ * app.js only AFTER #app-chrome finishes fading in. Otherwise the light
+ * workspace bg (#f5f5f5) leaks through the 300ms chrome opacity fade.
+ * During boot / loading / opening / mounting, html/body stays #1a1a1a
+ * via the inline <style> rule in index.html. */
+html[data-chrome-visible="true"],
+html[data-chrome-visible="true"] body {
+    background: var(--grey-light);
 }
 
 /* === Loading screen === */
@@ -370,20 +395,7 @@ html[data-app-state="ready"] #start-screen {
     to { transform: rotate(360deg); }
 }
 
-/* === Shell CSS-var defaults ===
- * These are read by selectors below before applyMetaBeforeFirstPaint sets them
- * from persisted meta. Match the constants in shell-restore.js so first paint
- * + saved-state restore agree.
- */
-:root {
-    --left-pane-width: 240px;
-    --storyboard-width: 600px;
-    /* Width of the in-flow #window-controls block. macOS-style traffic-light
-     * pips: 16px L padding + 22px + 8px gap + 22px + 8px gap + 22px + 16px R
-     * padding = 114px. Used by rules that need to dock content just-left of
-     * the window controls — see .top-bar-action-c on storyboard-collapse. */
-    --tauri-frame-controls-width: 114px;
-}
+/* Shell CSS-var defaults — moved to default-skins/root.css. */
 
 /* === Workspace ===
  * Override base.css from the imported website chain — it pushes
@@ -771,7 +783,11 @@ mps-canvas, mps-screenplay {
 mps-canvas { overflow: hidden; }
 mps-screenplay { display: block; }
 
-/* === Error overlay === */
+/* === Error overlay ===
+ * Sits above the boot screen (z:9999) as defence-in-depth. showRetry() in
+ * index.html hides #boot-screen when this appears, but if any other surface
+ * (picker shell, settings modal, mobile tabbar) ever mounts at a high z
+ * during boot, the retry modal must still win. */
 #error-overlay {
     position: fixed;
     inset: 0;
@@ -779,7 +795,7 @@ mps-screenplay { display: block; }
     align-items: center;
     justify-content: center;
     background: rgba(0, 0, 0, 0.7);
-    z-index: 2000;
+    z-index: 10000;
 }
 
 .error-card {
@@ -1001,17 +1017,17 @@ mps-screenplay { display: block; }
     transform: none;
 }
 
-html[data-theme="dark"] .window-controls[data-platform="windows"] .win-ctrl-glyph
+html[data-skin="night"] .window-controls[data-platform="windows"] .win-ctrl-glyph
 {
     stroke: #cccccc;
 }
 
-html[data-theme="dark"] .window-controls[data-platform="windows"] .win-ctrl:hover .win-ctrl-dot
+html[data-skin="night"] .window-controls[data-platform="windows"] .win-ctrl:hover .win-ctrl-dot
 {
     background: rgba(255, 255, 255, 0.08);
 }
 
-html[data-theme="dark"] .window-controls[data-platform="windows"] .win-ctrl-close:hover .win-ctrl-glyph
+html[data-skin="night"] .window-controls[data-platform="windows"] .win-ctrl-close:hover .win-ctrl-glyph
 {
     stroke: #fff;
 }
@@ -1186,6 +1202,8 @@ mps-canvas {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    user-select: none;
+    -webkit-user-select: none;
 }
 
 /* Project-switcher popup — matches the file-row .ctx-menu chrome (same
@@ -1325,17 +1343,11 @@ mps-canvas {
    set an inline display style (so the animation can override). Every
    subview that isn't the active one starts hidden so the first switch
    doesn't paint two panels stacked together. */
-#left-pane[data-subview="folder"]     > .left-pane-content > #subview-bookmarks:not([style*="display"]),
 #left-pane[data-subview="folder"]     > .left-pane-content > #subview-outline:not([style*="display"]),
 #left-pane[data-subview="folder"]     > .left-pane-content > #subview-statistics:not([style*="display"]),
-#left-pane[data-subview="bookmarks"]  > .left-pane-content > #subview-folder:not([style*="display"]),
-#left-pane[data-subview="bookmarks"]  > .left-pane-content > #subview-outline:not([style*="display"]),
-#left-pane[data-subview="bookmarks"]  > .left-pane-content > #subview-statistics:not([style*="display"]),
 #left-pane[data-subview="outline"]    > .left-pane-content > #subview-folder:not([style*="display"]),
-#left-pane[data-subview="outline"]    > .left-pane-content > #subview-bookmarks:not([style*="display"]),
 #left-pane[data-subview="outline"]    > .left-pane-content > #subview-statistics:not([style*="display"]),
 #left-pane[data-subview="statistics"] > .left-pane-content > #subview-folder:not([style*="display"]),
-#left-pane[data-subview="statistics"] > .left-pane-content > #subview-bookmarks:not([style*="display"]),
 #left-pane[data-subview="statistics"] > .left-pane-content > #subview-outline:not([style*="display"])
 {
     display: none;
@@ -2062,6 +2074,12 @@ mps-canvas .panel-pin[data-panel="storyboard"] { display: none !important; }
     top: 8px;
 }
 
+/* Paint widget ships its own .pw-tooltip; suppress it so the desktop's global [data-tooltip] system isn't duplicated. */
+mps-paint-widget .pw-tooltip { display: none !important; }
+
+/* Quick-toggle sidebar ships its own detached .quick-toggle-tooltip; suppress so the desktop's global [data-tooltip] system takes over (see quick-toggle-tooltip-mirror.js). */
+.quick-toggle-tooltip { display: none !important; }
+
 /* ──────────────────────────────────────────────────────────────────────
    <mps-lang-select> — language picker with flag icons.
    Consumed by the picker shell (large) and the Settings General row
@@ -2128,29 +2146,27 @@ mps-lang-select .mls-chev
     font-size: 10px;
 }
 
-mps-lang-select .mls-popover
+/* The popover is portalled to <body> at open time (see mps-lang-select.js
+   for why — .pkr-shell-page's transform makes it the containing block for
+   position: fixed, so the popover must live outside that subtree). All
+   .mls-popover / .mls-item / .mls-check styles below are un-scoped for
+   that reason. Context colours use .mls-popover--picker / --settings
+   modifier classes set by JS at open time. */
+.mls-popover
 {
-    position: absolute;
-    bottom: calc(100% + 4px);   /* anchors above the button by default */
-    left: 0;
-    width: 100%;
     max-height: 320px;
     overflow-y: auto;
-    z-index: 200;
+    z-index: 1000;
     background: var(--panel-bg, #1d1d22);
     border: 1px solid var(--rule, #2a2a30);
     border-radius: 8px;
     padding: 4px;
     box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+    font-family: var(--mps-font-app);
+    font-size: 13px;
 }
 
-mps-lang-select[data-popover-side="below"] .mls-popover
-{
-    bottom: auto;
-    top: calc(100% + 4px);
-}
-
-mps-lang-select .mls-item
+.mls-item
 {
     display: flex;
     align-items: center;
@@ -2161,17 +2177,36 @@ mps-lang-select .mls-item
     user-select: none;
 }
 
-mps-lang-select .mls-item.is-focused
+.mls-popover .mls-flag
+{
+    width: 18px;
+    height: 12px;
+    flex: 0 0 auto;
+    border-radius: 2px;
+    object-fit: cover;
+    user-select: none;
+}
+
+.mls-popover .mls-label
+{
+    flex: 1;
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.mls-item.is-focused
 {
     background: var(--btn-hover-bg, #2a2a32);
 }
 
-mps-lang-select .mls-item[aria-selected="true"]
+.mls-item[aria-selected="true"]
 {
     color: var(--mps-toggle-active-border, #6ea8ff);
 }
 
-mps-lang-select .mls-check
+.mls-check
 {
     margin-left: auto;
     font-size: 12px;
@@ -2206,36 +2241,31 @@ mps-picker-shell mps-lang-select .mls-chev
     color: #e8e8ea;
 }
 
-mps-picker-shell mps-lang-select .mls-popover
+.mls-popover--picker
 {
     background: #1f1f26;
     border-color: #313139;
     box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
 }
 
-mps-picker-shell mps-lang-select .mls-item
+.mls-popover--picker .mls-item
 {
     color: #e8e8ea;
 }
 
-mps-picker-shell mps-lang-select .mls-item.is-focused
+.mls-popover--picker .mls-item.is-focused
 {
     background: #2a2a33;
 }
 
-mps-picker-shell mps-lang-select .mls-item[aria-selected="true"]
+.mls-popover--picker .mls-item[aria-selected="true"]
 {
     color: #a08bff;
 }
 
-/* Settings-dialog-only: open the popover BELOW the button (not above),
-   matching the recent-projects-screen style. The dialog already centres
-   in the window with empty space underneath, so the popover never clips. */
-.settings-dialog mps-lang-select .mls-popover
+.mls-popover--settings
 {
     max-height: 220px;
-    bottom: auto;
-    top: calc(100% + 4px);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
 }
 
@@ -2414,7 +2444,7 @@ mps-screenplay::-webkit-scrollbar-button
     background-image: url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='3'%3E%3Cpath d='m0 2.5 l2 -1.5 l1 0 l2 1.5 l1 0' stroke='%238BC34A' fill='none' stroke-width='.9'/%3E%3C/svg%3E");
 }
 
-html[data-theme="dark"] .cm-editor .cm-lintRange-info
+html[data-skin="night"] .cm-editor .cm-lintRange-info
 {
     background-image: url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='3'%3E%3Cpath d='m0 2.5 l2 -1.5 l1 0 l2 1.5 l1 0' stroke='%23AED581' fill='none' stroke-width='.9'/%3E%3C/svg%3E");
 }
@@ -2438,16 +2468,16 @@ mps-picker-shell .pkr-left::-webkit-scrollbar-thumb:hover
 
 /* Picker shell popover (dark) — light thumb so it shows against the dark
    popover background. Recent-projects screen language drop-down. */
-mps-picker-shell mps-lang-select .mls-popover
+.mls-popover--picker
 {
     scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
 }
-mps-picker-shell mps-lang-select .mls-popover::-webkit-scrollbar-thumb
+.mls-popover--picker::-webkit-scrollbar-thumb
 {
     background: rgba(255, 255, 255, 0.22);
     background-clip: padding-box;
 }
-mps-picker-shell mps-lang-select .mls-popover::-webkit-scrollbar-thumb:hover
+.mls-popover--picker::-webkit-scrollbar-thumb:hover
 {
     background: rgba(255, 255, 255, 0.38);
     background-clip: padding-box;
@@ -2459,7 +2489,7 @@ mps-picker-shell mps-lang-select .mls-popover::-webkit-scrollbar-thumb:hover
    (light surface, dark thumb).
    ────────────────────────────────────────────────────────────────────── */
 
-mps-lang-select .mls-popover::-webkit-scrollbar
+.mls-popover::-webkit-scrollbar
 {
     width: 5px;   /* ~2 px slimmer than the .cm-scroller etc. base 7 px */
     height: 5px;
@@ -2467,16 +2497,16 @@ mps-lang-select .mls-popover::-webkit-scrollbar
 
 /* The Settings popover gets an even lighter thumb to match the light
    dialog surface and stay visually distinct from the picker shell. */
-.settings-dialog mps-lang-select .mls-popover
+.mls-popover--settings
 {
     scrollbar-color: rgba(0, 0, 0, 0.12) transparent;
 }
-.settings-dialog mps-lang-select .mls-popover::-webkit-scrollbar-thumb
+.mls-popover--settings::-webkit-scrollbar-thumb
 {
     background: rgba(0, 0, 0, 0.12);
     background-clip: padding-box;
 }
-.settings-dialog mps-lang-select .mls-popover::-webkit-scrollbar-thumb:hover
+.mls-popover--settings::-webkit-scrollbar-thumb:hover
 {
     background: rgba(0, 0, 0, 0.22);
     background-clip: padding-box;
@@ -2490,15 +2520,25 @@ mps-lang-select .mls-popover::-webkit-scrollbar
    shell, so we render our own minimise/close inside the picker surface.
    ────────────────────────────────────────────────────────────────────── */
 
+/* Picker titlebar — full-width band across the top. Doubles as the drag
+   handle (app-region: drag) so the user can grab and move the window from
+   anywhere along the top edge. Buttons opt out via .pkr-tb-btn's no-drag
+   below. Sits above .pkr-left / .pkr-shell-pages so the drag region isn't
+   clobbered by their no-drag rules. */
 mps-picker-shell .pkr-titlebar
 {
     position: absolute;
-    top: 8px;
-    right: 8px;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 32px;
     z-index: 20;
     display: flex;
+    justify-content: flex-end;
+    align-items: center;
     gap: 4px;
-    -webkit-app-region: no-drag;
+    padding: 5px 8px 0 0;
+    -webkit-app-region: drag;
 }
 
 mps-picker-shell .pkr-tb-btn
@@ -2515,6 +2555,7 @@ mps-picker-shell .pkr-tb-btn
     cursor: pointer;
     padding: 0;
     transition: background 120ms ease, color 120ms ease;
+    -webkit-app-region: no-drag;
 }
 
 mps-picker-shell .pkr-tb-btn:hover
@@ -2543,27 +2584,27 @@ mps-picker-shell .pkr-tb-btn.pkr-tb-close:hover
 
 /* Icons in the top-bar, rail, and topbar actions — bright grey
  * so they actually read against the #363636 chrome. */
-html[data-theme="dark"] .top-bar-icon,
-html[data-theme="dark"] .top-bar-action,
-html[data-theme="dark"] .rail-icon,
-html[data-theme="dark"] .topbar-page-label
+html[data-skin="night"] .top-bar-icon,
+html[data-skin="night"] .top-bar-action,
+html[data-skin="night"] .rail-icon,
+html[data-skin="night"] .topbar-page-label
 {
     color: #cfcfcf;
 }
 
-html[data-theme="dark"] .topbar-page-label[data-disabled]
+html[data-skin="night"] .topbar-page-label[data-disabled]
 {
     color: #666;
 }
 
-html[data-theme="dark"] :where(.top-bar-icon, .rail-icon, .top-bar-action):hover,
-html[data-theme="dark"] .rail-icon[aria-pressed="true"]
+html[data-skin="night"] :where(.top-bar-icon, .rail-icon, .top-bar-action):hover,
+html[data-skin="night"] .rail-icon[aria-pressed="true"]
 {
     color: #ffffff;
 }
 
 /* CodeMirror text colour — the editor body hardcodes #1a1a1a. */
-html[data-theme="dark"] .cm-editor .cm-content
+html[data-skin="night"] .cm-editor .cm-content
 {
     color: #e8e8e8;
 }
@@ -2576,23 +2617,23 @@ html[data-theme="dark"] .cm-editor .cm-content
 /* Editor tab strip. Unselected tabs sit on top of the top-bar
  * (#363636) — transparent background already inherits that.
  * Active tab matches the editor surface (#1e1e1e). Tab text colour
- * is driven by --tab-text (set in dark-theme.css). */
-html[data-theme="dark"] .editor-tab[data-active]
+ * is driven by --tab-text (set in default-skins/night/night.css). */
+html[data-skin="night"] .editor-tab[data-active]
 {
     background: #1e1e1e;
 }
 
-html[data-theme="dark"] .editor-tab-new
+html[data-skin="night"] .editor-tab-new
 {
     color: var(--tab-text);
 }
 
-html[data-theme="dark"] .editor-tab-new:hover
+html[data-skin="night"] .editor-tab-new:hover
 {
     background: #2a2a2a;
 }
 
-html[data-theme="dark"] .editor-tab-close:hover
+html[data-skin="night"] .editor-tab-close:hover
 {
     background: rgba(255, 255, 255, 0.12);
 }
@@ -2600,12 +2641,12 @@ html[data-theme="dark"] .editor-tab-close:hover
 /* Empty-tab CTA overlay hardcodes white background — match
  * the editor surface so the placeholder reads as part of the
  * surrounding source area. */
-html[data-theme="dark"] .empty-tab-cta
+html[data-skin="night"] .empty-tab-cta
 {
     background: #1e1e1e;
 }
 
-html[data-theme="dark"] .right-pane-empty-overlay
+html[data-skin="night"] .right-pane-empty-overlay
 {
     background: #1e1e1e;
     color: #7a7a7a;
@@ -2614,7 +2655,7 @@ html[data-theme="dark"] .right-pane-empty-overlay
 /* Storyboard desk (background AROUND the white canvas page) — slightly
  * lighter than the panel-bg (#1e1e1e) so the canvas page reads as a card
  * floating on a desk rather than sitting flush with the surrounding chrome.
- * User-requested #262626 (matches --grey-dark in dark-theme.css). The
+ * User-requested #262626 (matches --grey-dark in default-skins/night/night.css). The
  * canvas page (`mps-canvas .canvas-page`) stays white — that's the artist's
  * drawing surface, untouched.
  *
@@ -2627,15 +2668,15 @@ html[data-theme="dark"] .right-pane-empty-overlay
  * the darker #1e1e1e workspace through. Without this tint, the band
  * between the paint widget cluster and the storyboard canvas page paints
  * #1e1e1e via the workspace fall-through. */
-html[data-theme="dark"] mps-canvas,
-html[data-theme="dark"] .right-pane-stack
+html[data-skin="night"] mps-canvas,
+html[data-skin="night"] .right-pane-stack
 {
     background: var(--grey-dark);
 }
 
 /* topbar-divider is hardcoded rgba(0,0,0,0.25) — invisible on
  * #363636. Switch to a light translucent rule. */
-html[data-theme="dark"] .topbar-divider
+html[data-skin="night"] .topbar-divider
 {
     background: rgba(255, 255, 255, 0.18);
 }
@@ -2645,13 +2686,13 @@ html[data-theme="dark"] .topbar-divider
  * #ffffff fallback — the var isn't defined for dark mode so the white
  * fallback wins. Match the editor surface and lighten the icon, then
  * use the same hover treatment as the top-bar/rail icons. */
-html[data-theme="dark"] .mps-editor-mode-toggle-btn
+html[data-skin="night"] .mps-editor-mode-toggle-btn
 {
     color: #cfcfcf;
 }
 
-html[data-theme="dark"] .mps-editor-mode-toggle-btn:hover,
-html[data-theme="dark"] .mps-editor-mode-toggle-btn:focus-visible
+html[data-skin="night"] .mps-editor-mode-toggle-btn:hover,
+html[data-skin="night"] .mps-editor-mode-toggle-btn:focus-visible
 {
     color: #ffffff;
 }
@@ -2661,8 +2702,8 @@ html[data-theme="dark"] .mps-editor-mode-toggle-btn:focus-visible
  * #1e1e1e so the lines disappear against the editor surface. Repaint
  * with a visible light grey just for the resting state — hover still
  * upgrades to --mps-primary via the existing rules. */
-html[data-theme="dark"] .left-pane-resize-handle::after,
-html[data-theme="dark"] .workspace-seam
+html[data-skin="night"] .left-pane-resize-handle::after,
+html[data-skin="night"] .workspace-seam
 {
     background: #3a3a3a;
 }
@@ -2778,13 +2819,16 @@ mps-mobile-tabbar {
     width: calc(100vw - 48px);
 }
 
-/* === App Footer (200×30 bottom-right of #app-chrome) ===================
- * Anchored bottom-right of #app-chrome, over .app-body. Three children:
- *   .footer-mode-btn   — opens a 3-row mode sub-menu (Source/Text/Visual)
- *   .footer-counts     — "{N} words · {N} chars" for the active editor
- *   .footer-gear       — Google Docs sync gear (state-coloured)
+/* === App Footer (200×30 bottom-right of the editor pane) ==============
+ * Anchored bottom-right of <mps-editor-host> (position:relative ancestor),
+ * so it tracks the editor's width through workspace-seam resizing. Children:
+ *   .footer-mode-btn       — opens a 3-row mode sub-menu (Source/Text/Visual)
+ *   .footer-counts         — "{N} words" for the active editor
+ *   .footer-pill-publish-doc — per-document Google Docs state pill; also
+ *                              hosts the popover-anchor + sync click target
+ *                              (the old sync-gear is gone)
+ *   .footer-pill-account   — global Google sign-in + connectivity pill
  * Hidden in mobile / tablet UX modes (those modes own their own tabbar).
- * The sync-gear colour states ported from the old .editor-footer block.
  */
 #app-footer
 {
@@ -2814,7 +2858,7 @@ mps-mobile-tabbar {
 :root[data-ux-mode="tablet"] #app-footer { display: none; }
 
 #app-footer .footer-mode-btn,
-#app-footer .footer-gear
+#app-footer .footer-pill
 {
     width: 32px;
     height: 22px;
@@ -2834,18 +2878,20 @@ mps-mobile-tabbar {
 }
 
 #app-footer .footer-mode-btn:hover,
-#app-footer .footer-gear:hover
+#app-footer .footer-pill:hover
 {
     opacity: 1;
     background: var(--btn-hover-bg, #e8eaee);
 }
 
 #app-footer .footer-mode-btn:disabled,
-#app-footer .footer-gear:disabled
+#app-footer .footer-pill:disabled
 {
     cursor: default;
     opacity: 0.35;
 }
+
+#app-footer .footer-pill[hidden] { display: none; }
 
 #app-footer .footer-counts
 {
@@ -2859,13 +2905,15 @@ mps-mobile-tabbar {
     text-overflow: ellipsis;
 }
 
-/* Sync gear state colour (moved from .editor-footer block in app-modals.css). */
-#app-footer .footer-gear[data-state="unsynced"]     { color: var(--row-badge, #9a9a9a); }
-#app-footer .footer-gear[data-state="idle"]         { color: var(--mps-primary, #007aff); }
-#app-footer .footer-gear[data-state="checking"]     { color: var(--mps-primary, #007aff); opacity: 0.6; }
-#app-footer .footer-gear[data-state="local-ahead"]  { color: #34c759; }
-#app-footer .footer-gear[data-state="remote-ahead"] { color: var(--danger-fg, #c62828); }
-#app-footer .footer-gear[data-state="error"]        { color: var(--row-badge, #9a9a9a); }
+/* Google Docs status pills (account + publish-doc). Colour varies by state. */
+#app-footer .footer-pill-account[data-state="no-account"]      { color: var(--accent-red, #d24949); }
+#app-footer .footer-pill-account[data-state="offline"]         { color: var(--accent-blue, #4a90d2); }
+#app-footer .footer-pill-account[data-state="online"]          { color: var(--accent-green, #3fa84a); }
+
+#app-footer .footer-pill-publish-doc[data-state="no-account"]  { color: var(--row-badge, #9a9a9a); opacity: 0.6; }
+#app-footer .footer-pill-publish-doc[data-state="not-sync"]    { color: var(--row-badge, #9a9a9a); }
+#app-footer .footer-pill-publish-doc[data-state="sync"]        { color: var(--accent-green, #3fa84a); }
+#app-footer .footer-pill-publish-doc[data-state="sync-dirty"]  { color: var(--accent-blue, #4a90d2); }
 
 /* ── Mode Menu (3-row sub-menu above the Mode Button) ─────────────── */
 .footer-mode-menu

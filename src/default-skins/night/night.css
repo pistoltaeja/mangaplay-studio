@@ -1,0 +1,104 @@
+/**
+ * night.css — sleek dark palette mirroring the Default skin.
+ *
+ * Mirrors every CSS custom property declared in default.css. Loaded by
+ * swapping the <link id="active-skin"> href in index.html (see
+ * boot/skins.js). Scoped under :root[data-skin="night"] so it can
+ * coexist with other loaded skin CSS without cascade collision.
+ */
+
+:root[data-skin="night"]
+{
+    --grey-light: #363636;
+    --grey-dark:  #262626;
+
+    --rule:              #1e1e1e;
+    --rail-width:        40px;
+    --top-bar-height:    40px;
+    --left-pane-width:   240px;
+    --left-pane-min:     200px;
+
+    --panel-bg:          #1e1e1e;
+    --row-highlight:     #2a2a2a;
+
+    --storyboard-width:        520px;
+    --storyboard-min:          200px;
+    --editor-min:              200px;
+
+    --btn-hover-bg:   #2a2a2a;
+    --btn-active-bg:  #1e1e1e;
+    --focus-ring:     #0a84ff;
+
+    /* File explorer row pill */
+    --row-bg:    #2a2a2a;
+    --row-text:  #c8c8c8;
+    --row-badge: #7a7a7a;
+
+    /* Editor tab strip text — light grey in the Night skin for legibility
+     * against the #363636 topbar / #1e1e1e active surface. Default skin
+     * falls back to #1a1a1a via the var() default in app.css. */
+    --tab-text: #f6f6f6;
+
+    /* Destructive action text colour (context-menu items, danger buttons) */
+    --danger-fg:       #ff7a7a;
+    --danger-fg-hover: #ff9a9a;
+    --shadow-1:       0 1px 2px rgba(0, 0, 0, 0.40);
+    --shadow-2:       0 2px 4px rgba(0, 0, 0, 0.50);
+    --shadow-3:       0 4px 16px rgba(0, 0, 0, 0.60);
+    --shadow-inset:   inset 0 1px 2px rgba(0, 0, 0, 0.35);
+
+    /* MPS brand primary — slightly brighter than Default for better
+     * contrast against dark surfaces. */
+    --mps-primary:       #0a84ff;
+    --mps-primary-hover: #409cff;
+
+    /* --window-controls-inset removed.
+       Consumers now read --tauri-frame-controls-width (defined on :root in root.css,
+       114px = three 46px buttons matching the in-flow #window-controls block). */
+
+    /* === Website-shared tokens — override for the Night skin ===============
+     * The website's theme.css declares these for white-background contexts;
+     * the desktop Night skin needs them remapped so the surfaces match the
+     * editor / panel palette.
+     *   --mps-editor-bg       drives .editor-area-top-bar background
+     *                         (and the visual-editor surface). Must match
+     *                         the CM6 editor body (#1e1e1e) so the top bar
+     *                         reads as part of the editor, not a white strip.
+     *   --mps-screenplay-paper drives mps-screenplay .screenplay-content
+     *                         background. User-requested #262626.
+     *   --mps-screenplay-ink   drives screenplay body text colour. Must be
+     *                         white on the dark paper.
+     *   --mps-screenplay-ink-muted drives subdued screenplay text (scene
+     *                         numbers, parentheticals) — lighten enough to
+     *                         stay readable on the dark paper.
+     *
+     * --mps-page-bg is deliberately NOT overridden — the storyboard canvas
+     * page (the artist's drawing surface) stays white in the Night skin.
+     * The desk AROUND the page (the mps-canvas host background) is darkened
+     * via the app.css override below, not via this token. */
+    --mps-editor-bg:           #1e1e1e;
+    --mps-screenplay-paper:    var(--grey-dark);
+    --mps-screenplay-ink:      #ffffff;
+    --mps-screenplay-ink-muted: #c0c0c0;
+
+    /* Splash background for the Night skin. See default.css for the
+     * ownership contract. */
+    --mps-splash-bg: #1a1a1a;
+}
+
+html[data-skin="night"]
+{
+    color: #e8e8e8;
+}
+
+html[data-skin="night"] body
+{
+    color: #e8e8e8;
+}
+
+/* Night workspace bg gated behind chrome-visible — same reason as
+ * app.css: keep #1a1a1a during boot, only swap after chrome faded in. */
+html[data-skin="night"][data-chrome-visible="true"] body
+{
+    background: var(--grey-light);
+}

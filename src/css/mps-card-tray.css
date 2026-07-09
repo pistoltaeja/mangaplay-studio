@@ -1,0 +1,229 @@
+/* ────────────────────────────────────────────────────────────────────────
+   <mps-card-tray> — light-DOM 2x2 card grid for onboarding.
+
+   Positions under the mascot via CSS custom properties
+   `--ob-mascot-x/y/size` published on :root by <mps-mascot>. Cards fade
+   + slide up individually via .visible; the container itself is always
+   present once .mounted.
+   ──────────────────────────────────────────────────────────────────────── */
+
+mps-card-tray
+{
+    position: fixed;
+    display: block;
+    width: fit-content;
+    left: var(--ob-mascot-x, 50vw);
+    top: calc(var(--ob-mascot-y, 50vh) + var(--ob-mascot-size, 98px) + 24px);
+    transform: translateX(calc(var(--ob-mascot-size, 98px) / 2 - 50%));
+    z-index: 10021;
+    pointer-events: none;
+    user-select: none;
+    /* Container needs a defined width so the absolutely-positioned
+       button (bottom-right of tray) has a meaningful `right: 0` anchor.
+       Grid width is set below per-layout; the tray inherits via the
+       fit-content of the grid child. */
+    /* Match dialogue lockstep so if the mascot repositions, the tray
+       follows without a jump. */
+    transition:
+        left 0.4s ease-in-out,
+        top 0.4s ease-in-out;
+}
+
+/* Standalone (desktop) has more vertical room than mobile/tablet — push
+   the tray down further so it clears the badge under the mascot. */
+:root[data-ux-mode="standalone"] mps-card-tray
+{
+    top: calc(var(--ob-mascot-y, 50vh) + var(--ob-mascot-size, 98px) + 54px);
+}
+
+mps-card-tray.mounted
+{
+    pointer-events: auto;
+}
+
+mps-card-tray .mps-card-tray-grid
+{
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    width: min(584px, calc(100vw - 32px));
+    position: relative;
+}
+
+/* Row layout for the category chooser — cards in a single row. Column
+   count is data-driven via `--card-count` (set by JS on the grid) so
+   step-2 branched card sets (1, 2, or 3 cards) render at the correct
+   width. Defaults to 3 when the JS-side prop isn't set. */
+mps-card-tray[data-layout="row"] .mps-card-tray-grid
+{
+    grid-template-columns: repeat(var(--card-count, 3), minmax(0, 1fr));
+    width: min(780px, calc(100vw - 32px));
+}
+
+/* Single-card row: centre the card and cap its width so it doesn't
+   stretch across the full container. */
+mps-card-tray[data-layout="row"] .mps-card-tray-grid[style*="--card-count: 1"]
+{
+    width: min(280px, calc(100vw - 32px));
+    justify-content: center;
+}
+
+/* Two-card row: narrower container than the 3-card default so cards
+   don't feel oversized. */
+mps-card-tray[data-layout="row"] .mps-card-tray-grid[style*="--card-count: 2"]
+{
+    width: min(560px, calc(100vw - 32px));
+}
+
+/* Row-layout cards: fix the height and pull the title toward the top
+   so all three titles align on the same baseline regardless of whether
+   the card has a description. Padding-top is intentionally smaller than
+   the 2x2 grid to keep the title near the top edge. */
+mps-card-tray[data-layout="row"] .mps-card
+{
+    height: 92px;
+    padding: 24px 18px 18px 18px;
+}
+
+mps-card-tray .mps-card
+{
+    all: unset;
+    box-sizing: border-box;
+    display: block;
+    width: 100%;
+    min-width: 0;
+    max-width: 280px;
+    padding: 16px 18px;
+    background: #1d1d23;
+    border: 1px solid #2a2a32;
+    border-radius: 10px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+    color: #e9e9ef;
+    font-family: var(--mps-font-app, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
+    cursor: pointer;
+    opacity: 0;
+    transform: translateY(8px);
+    transition:
+        opacity 220ms ease-out,
+        transform 220ms ease-out,
+        background 120ms ease,
+        border-color 120ms ease;
+}
+
+mps-card-tray .mps-card:hover,
+mps-card-tray .mps-card:focus-visible
+{
+    background: #23232b;
+    border-color: #3a3a44;
+}
+
+mps-card-tray .mps-card:focus-visible
+{
+    outline: 2px solid #7a5cff;
+    outline-offset: 2px;
+}
+
+mps-card-tray .mps-card.visible
+{
+    opacity: 1;
+    transform: translateY(0);
+}
+
+/* Selected state — 4px accent border. Padding is inset by 3px each edge
+   to compensate for the +3px border delta (1px → 4px), so the interior
+   text position doesn't jump when the card becomes selected. */
+mps-card-tray .mps-card.selected
+{
+    border: 4px solid var(--mps-accent, #5b8dff);
+    padding: 13px 15px;
+}
+
+/* Row-layout selected: inset from the row's 24px/18px base by 3px each
+   edge so title/desc positions don't jump when the border thickens. */
+mps-card-tray[data-layout="row"] .mps-card.selected
+{
+    padding: 21px 15px 15px 15px;
+}
+
+/* Dismissal — fade + translateX(+40px). Overrides the .visible rule via
+   later cascade. */
+mps-card-tray .mps-card.dismissing
+{
+    opacity: 0;
+    transform: translateX(40px);
+}
+
+/* Bottom-right button anchored to the tray. Sits BELOW the card grid
+   so it doesn't overlap card content. */
+mps-card-tray .mps-card-tray-button
+{
+    position: absolute;
+    right: 0;
+    bottom: -56px;
+    background: var(--mps-accent, #5b8dff);
+    color: #fff;
+    border: none;
+    border-radius: 999px;
+    padding: 10px 22px;
+    font-family: var(--mps-font-app, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    opacity: 0;
+    transform: translateY(12px);
+    transition:
+        opacity 220ms ease-out,
+        transform 220ms ease-out;
+    pointer-events: auto;
+}
+
+mps-card-tray .mps-card-tray-button.visible
+{
+    opacity: 1;
+    transform: translateY(0);
+}
+
+mps-card-tray .mps-card-tray-button.leaving
+{
+    opacity: 0;
+    transform: translateX(-40px);
+}
+
+mps-card-tray .mps-card-title
+{
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.3;
+    margin-bottom: 6px;
+    color: #f5f5f8;
+}
+
+mps-card-tray .mps-card-desc
+{
+    font-size: 11px;
+    line-height: 1.4;
+    color: #a8a8b4;
+}
+
+/* Hide desc + drop the title's bottom margin when the description is
+   empty (e.g. Screenplay / Comic-Manga category cards). Otherwise an
+   empty <div> keeps the 6px title margin and leaves a hollow gap under
+   the title. */
+mps-card-tray .mps-card-desc:empty
+{
+    display: none;
+}
+
+mps-card-tray .mps-card:has(.mps-card-desc:empty) .mps-card-title
+{
+    margin-bottom: 0;
+}
+
+@media (prefers-reduced-motion: reduce)
+{
+    mps-card-tray .mps-card
+    {
+        transition: opacity 0.001ms !important;
+        transform: none !important;
+    }
+}

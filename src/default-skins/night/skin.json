@@ -1,0 +1,14 @@
+{
+    "id": "night",
+    "displayName": "Night",
+    "author": "Mangaplay Studio",
+    "version": "1.0.0",
+    "baseVariant": "dark",
+    "cssFile": "night.css",
+    "mascotHeadFile": "mascot-head-night.png",
+    "mascotBodyFile": "mascot-body-night.png",
+    "splashFile": "splash-night.png",
+    "splashFile2x": "splash-night@2x.png",
+    "minAppVersion": "0.0.0",
+    "license": "Proprietary — bundled first-party skin"
+}

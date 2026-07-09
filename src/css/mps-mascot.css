@@ -1,0 +1,298 @@
+/* ────────────────────────────────────────────────────────────────────────
+   <mps-mascot> — Two-part animatable mascot component.
+   ──────────────────────────────────────────────────────────────────────── */
+
+mps-mascot
+{
+    display: block;
+    position: relative;
+    /* Default sized 240×240 — callers override via inline width/height or
+       CSS. The container's intrinsic aspect is 1:1 (1024×1024). */
+    width: 240px;
+    height: 240px;
+    user-select: none;
+    pointer-events: none;
+    will-change: transform, opacity;
+}
+
+/* App-level singleton mounted on <body> by mps-mascot-app.js. Uses
+   position: fixed so the mascot's off-screen base state
+   (translateX(120vw) on .mps-mascot-container) doesn't extend any
+   ancestor's scrollable overflow — no horizontal scrollbar during the
+   fly-in. Centred via top/left calc — transform is deliberately left
+   free for compose/moveTo (Phase 2 needs the transform channel for
+   face/bobble/moveTo composition). Container's translateX is applied
+   in its own transform channel, so entrance/exit keyframes compose
+   without stomping host layout. */
+mps-mascot#app-mascot
+{
+    position: fixed;
+    /* Centre via top/left calc — transform is free for compose/moveTo. */
+    top: calc(50vh - 49px);
+    left: calc(50vw - 49px);
+    /* Match dialogue's transition timing (mps-dialogue.css, Phase 2) so
+       satellite UI can `transition: left, top` at the same duration and
+       track the mascot without JS pumping. */
+    transition: left 0.4s ease-in-out, top 0.4s ease-in-out;
+    /* Must sit ABOVE mps-picker-shell (z: 950 in app-picker.css) — the
+       picker-shell is a full-viewport dark surface and would otherwise
+       paint over the mascot. 1000 is well above the picker but still
+       below modal / context-menu z-indexes (typically 9000+), so an
+       error overlay or right-click menu still cover the mascot. */
+    z-index: 1000;
+    width: 98px;
+    height: 98px;
+}
+
+mps-mascot .mps-mascot-container
+{
+    position: absolute;
+    inset: 0;
+    display: block;
+    pointer-events: none;
+    /* Base off-screen state — the mascot pre-positions off-screen right so
+       there's no visible flash between DOM mount and the entrance keyframe
+       kicking in. The entrance keyframe animates FROM this off-screen
+       position TO centre. After entrance the JS flips
+       `data-mascot-motion` to "docked" — the CSS rule below pins the
+       container at centre permanently (animation-fill-mode: both only
+       persists while the animation is applied, so we need an explicit
+       docked rule for the resting state).*/
+    transform: translateX(120vw);
+    opacity: 0;
+    /* Smooth face() rotation. During keyframe animations (entrance/exit)
+       the animation wins over transition — that's fine, face() is only
+       called from the docked state. 3D perspective on the mascot so
+       rotateY() looks natural (not a flat squish). */
+    transition: transform 350ms cubic-bezier(0.32, 0.72, 0, 1);
+    transform-style: preserve-3d;
+}
+
+mps-mascot
+{
+    perspective: 800px;
+}
+
+/* Resting state after entrance — pinned at centre, visible. */
+mps-mascot[data-mascot-motion="docked"] .mps-mascot-container
+{
+    transform: translateX(0);
+    opacity: 1;
+}
+
+/* Head + body stack vertically to form a 1024×1024 composite from two
+   1024×512 PNGs. Head sits in the top half, body in the bottom half. Each
+   image's intrinsic aspect (2:1) matches its half-container exactly, so no
+   distortion — object-fit intentionally not set (no need for a fit hint).
+   Keeping them as separate layers so future animations can move each
+   independently (head-bob, body-lean). */
+mps-mascot .mps-mascot-head
+{
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 50%;
+    user-select: none;
+    -webkit-user-drag: none;
+    pointer-events: none;
+}
+
+mps-mascot .mps-mascot-body
+{
+    position: absolute;
+    left: 0;
+    top: 50%;
+    width: 100%;
+    height: 50%;
+    user-select: none;
+    -webkit-user-drag: none;
+    pointer-events: none;
+}
+
+/* Inner img inside each layer div fills the wrapper. Div-wrapping the
+   PNGs (Phase 2 requirement) lets the body layer host the .mascot-name-pin
+   as a child — <img> is a void element and can't contain other elements. */
+mps-mascot .mps-mascot-img
+{
+    display: block;
+    width: 100%;
+    height: 100%;
+    user-select: none;
+    -webkit-user-drag: none;
+    pointer-events: none;
+}
+
+/* ── Entrance animations ─────────────────────────────────────────────── */
+
+mps-mascot[data-mascot-motion="entering"][data-mascot-direction="right"]
+    .mps-mascot-container
+{
+    animation: mps-mascot-enter-right 800ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+mps-mascot[data-mascot-motion="entering"][data-mascot-direction="left"]
+    .mps-mascot-container
+{
+    animation: mps-mascot-enter-left 800ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+/* ── Exit animations ─────────────────────────────────────────────────── */
+
+mps-mascot[data-mascot-motion="exiting"][data-mascot-direction="right"]
+    .mps-mascot-container
+{
+    animation: mps-mascot-exit-right 500ms cubic-bezier(0.4, 0, 1, 1) both;
+}
+
+mps-mascot[data-mascot-motion="exiting"][data-mascot-direction="left"]
+    .mps-mascot-container
+{
+    animation: mps-mascot-exit-left 500ms cubic-bezier(0.4, 0, 1, 1) both;
+}
+
+@keyframes mps-mascot-enter-right
+{
+    0%   { transform: translateX(120vw); opacity: 0; }
+    60%  { opacity: 1; }
+    100% { transform: translateX(0);      opacity: 1; }
+}
+
+@keyframes mps-mascot-enter-left
+{
+    0%   { transform: translateX(-120vw); opacity: 0; }
+    60%  { opacity: 1; }
+    100% { transform: translateX(0);       opacity: 1; }
+}
+
+@keyframes mps-mascot-exit-right
+{
+    0%   { transform: translateX(0);      opacity: 1; }
+    100% { transform: translateX(120vw);  opacity: 0; }
+}
+
+@keyframes mps-mascot-exit-left
+{
+    0%   { transform: translateX(0);       opacity: 1; }
+    100% { transform: translateX(-120vw);  opacity: 0; }
+}
+
+/* ── Phase 2 — talking head, facing, bobble, name pin ──────────────── */
+
+/* Talking rotation on the head layer. Origin bottom-left mirrors the
+   website's `mps-talk` keyframe — the "chin" pivots up and down. */
+mps-mascot .mps-mascot-head
+{
+    transform-origin: bottom left;
+}
+
+mps-mascot .mps-mascot-head.talking
+{
+    animation: mps-mascot-head-talk 300ms cubic-bezier(0.32, 0.72, 0, 1) infinite;
+}
+
+mps-mascot .mps-mascot-head.mouth-open
+{
+    animation: mps-mascot-head-mouth-open 150ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+mps-mascot .mps-mascot-head.mouth-close
+{
+    animation: mps-mascot-head-mouth-close 150ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+/* Facing rotation via the container transform layer. Gated on the docked
+   motion state so the entrance/exit keyframes retain full authority over
+   the container's transform during those animations. */
+mps-mascot[data-mascot-motion="docked"].facing-left .mps-mascot-container
+{
+    transform: translateX(0) rotateY(30deg);
+}
+
+mps-mascot[data-mascot-motion="docked"].facing-center .mps-mascot-container
+{
+    transform: translateX(0) rotateY(0deg);
+}
+
+mps-mascot[data-mascot-motion="docked"].facing-right .mps-mascot-container
+{
+    transform: translateX(0) rotateY(-30deg);
+}
+
+/* Bobble applied to HOST — badge bounces with it. Host has no base
+   transform (centring is top/left), so translateY composes cleanly. */
+mps-mascot.bobbling
+{
+    animation: mps-mascot-bobble 400ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* Name pin — orange pill beneath the mascot. */
+mps-mascot .mascot-name-pin
+{
+    position: absolute;
+    bottom: -20px;
+    left: 50%;
+    transform: translateX(-50%);
+    white-space: nowrap;
+    font-size: 10px;
+    font-weight: 700;
+    color: #000;
+    background: #ff8c00;
+    padding: 2px 10px;
+    border-radius: 6px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    letter-spacing: 0.5px;
+    line-height: 1.4;
+    user-select: none;
+    pointer-events: none;
+    opacity: 1;
+    transition: opacity 200ms ease-out;
+}
+
+@keyframes mps-mascot-head-talk
+{
+    0%   { transform: rotate(0deg); }
+    50%  { transform: rotate(-12deg); }
+    100% { transform: rotate(0deg); }
+}
+
+@keyframes mps-mascot-head-mouth-open
+{
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(-12deg); }
+}
+
+@keyframes mps-mascot-head-mouth-close
+{
+    from { transform: rotate(-12deg); }
+    to   { transform: rotate(0deg); }
+}
+
+@keyframes mps-mascot-bobble
+{
+    0%   { transform: translateY(0); }
+    50%  { transform: translateY(-8px); }
+    100% { transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce)
+{
+    mps-mascot .mps-mascot-container
+    {
+        animation-duration: 0.001ms !important;
+        animation-timing-function: linear !important;
+        transition-duration: 0.001ms !important;
+    }
+
+    mps-mascot .mps-mascot-head.talking,
+    mps-mascot .mps-mascot-head.mouth-open,
+    mps-mascot .mps-mascot-head.mouth-close
+    {
+        animation-duration: 0.001ms !important;
+    }
+
+    mps-mascot.bobbling
+    {
+        animation-duration: 0.001ms !important;
+    }
+}

@@ -50,3 +50,43 @@
     src: url("../fonts/courier-prime/CourierPrime-BoldItalic.ttf") format("truetype");
     unicode-range: U+0000-024F, U+1E00-1EFF, U+2000-206F, U+20A0-20CF;
 }
+
+/* Courier Prime Sans — sans-serif companion to Courier Prime. Selectable
+ * as an editor-font option via font-prefs.js EDITOR_STACKS. Same coverage
+ * as Courier Prime. */
+
+@font-face {
+    font-family: "Courier Prime Sans";
+    font-weight: 400;
+    font-style: normal;
+    font-display: block;
+    src: url("../fonts/courier-prime-sans/CourierPrimeSans-Regular.ttf") format("truetype");
+    unicode-range: U+0000-024F, U+1E00-1EFF, U+2000-206F, U+20A0-20CF;
+}
+
+@font-face {
+    font-family: "Courier Prime Sans";
+    font-weight: 400;
+    font-style: italic;
+    font-display: block;
+    src: url("../fonts/courier-prime-sans/CourierPrimeSans-Italic.ttf") format("truetype");
+    unicode-range: U+0000-024F, U+1E00-1EFF, U+2000-206F, U+20A0-20CF;
+}
+
+@font-face {
+    font-family: "Courier Prime Sans";
+    font-weight: 700;
+    font-style: normal;
+    font-display: block;
+    src: url("../fonts/courier-prime-sans/CourierPrimeSans-Bold.ttf") format("truetype");
+    unicode-range: U+0000-024F, U+1E00-1EFF, U+2000-206F, U+20A0-20CF;
+}
+
+@font-face {
+    font-family: "Courier Prime Sans";
+    font-weight: 700;
+    font-style: italic;
+    font-display: block;
+    src: url("../fonts/courier-prime-sans/CourierPrimeSans-BoldItalic.ttf") format("truetype");
+    unicode-range: U+0000-024F, U+1E00-1EFF, U+2000-206F, U+20A0-20CF;
+}

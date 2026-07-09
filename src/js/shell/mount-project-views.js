@@ -1,0 +1,1086 @@
+import { state, SCREENPLAY_DEBOUNCE_MS } from "./state.js";
+import { basename } from "../util/index.js";
+import { t } from "../adapters/tauri-i18n.js";
+import { icon } from "../panes/icons.js";
+import { showBanner } from "../boot/toast.js";
+import { getBroker } from "../project/active-script-broker.js";
+import {
+    saveScript,
+    saveMangaart,
+    saveMangaartByUuid,
+    debouncedSave,
+    updateMangaartPage,
+    getMangaartCache,
+    getTabSnapshot,
+    readFile,
+    migrateLegacyTabEntries,
+} from "../project/project.js";
+import { EditorSlotManager } from "../editor/editor-slot-manager.js";
+import { mountEditorTabs } from "../editor/editor-tabs.js";
+import { formatForFilename } from "../editor/lang-registry.js";
+import { setEditorViewMode, setEditorMode } from "../editor/mps-editor.js";
+import { mountEmptyTabCta } from "../panes/empty-tab-cta.js";
+import { mountRightPaneEmpty } from "../panes/right-pane-empty.js";
+import { mountAppFooter } from "../panes/app-footer.js";
+import { mountGoogleAccountPill } from "../pills/google-account-pill.js";
+import { mountPublishDocPill } from "../pills/publish-doc-pill.js";
+import { formatScript as visualFormatScript } from "../services/format-script.js";
+import { initCanvas } from "../editor/mps-canvas.js";
+import { getRuntimeStorage } from "@mangaplay-studio/core/state";
+import { scriptRelPathOf } from "../util/paths.js";
+import { getAccessToken, getCurrentProfile } from "../auth/google-oauth.js";
+import { getUserSetting, saveUserSettings } from "../project/user-settings.js";
+import { hasFixableIssues, fixIssues } from "../editor/structural-fixer.js";
+import {
+    mountGoogleDocsFooter,
+    setPublishDocPillController
+} from "../google-docs-sync/footer-bootstrap.js";
+import { markSelfChange, onCreate, replaceActiveTab, openEditorMoreOptionsMenu, parentForCreation } from "./explorer.js";
+import { subscribePaginationState, paginationNavigate, getPaginationState, getActivePaginationFormat } from "./topbar-pagination.js";
+import { setViewMode } from "./layout.js";
+import { refreshProjectSwitcher, switchProject } from "./project-switcher.js";
+import {
+    setSaveState,
+    publishParsedScript,
+    updateEmptyState,
+    onMpsChangeFromSlot,
+    onSlotActivated,
+    applyAllowedModesForFormat,
+    debouncedWriteSession,
+    syncStructuralFixerConvention,
+    restoreShellMeta,
+    wireQuickToggleRelocation,
+    getOrCreateClientId,
+    _setCurrentDoc,
+    currentDoc,
+} from "../app.js";
+
+// ── View mounting ──
+/**
+ * Per-project mount: builds the slot manager, canvas, screenplay, mode toggle,
+ * empty-tab CTA, and restores the tab snapshot. MUST be called once per
+ * project mount (boot + every project switch). The static-shell DOM is wired
+ * separately by `wireShellOnce()` exactly once per app lifetime.
+ */
+export async function mountProjectViews() {
+    const editorEl = document.querySelector("mps-editor-host");
+    const canvasEl = document.querySelector("mps-canvas");
+
+    // Autosave: routed through the ActiveScriptBroker so destructive ops
+    // (rename / delete / migrate) can drain pending writes before mutating.
+    // The broker owns the 1500 ms debounce — we just pass the saveFn that
+    // hits the right path at fire-time.
+    const broker = getBroker();
+    state.debouncedScriptSave = (text) =>
+    {
+        if (!state.currentProject || !state.currentProject.scriptPath) return;
+        broker.scheduleScriptSave(text, async (latest) =>
+        {
+            setSaveState("saving");
+            try
+            {
+                // Mark the path as a self-change so the FS watcher swallows
+                // any events the atomic write emits — a single atomic write
+                // can fan out into "deleted" then "modified" depending on
+                // notify-rs behaviour, so consumeSelfChange is now a TTL
+                // window peek (not single-take). Short TTL keeps the window
+                // tight so genuine external edits aren't suppressed for
+                // longer than the watcher debounce.
+                markSelfChange(state.currentProject.scriptPath, 1500);
+                await saveScript(state.currentProject.scriptPath, latest);
+                setSaveState("saved");
+                if (state.saveFailureBannerShown) state.saveFailureBannerShown = false;
+            }
+            catch (e)
+            {
+                console.error("Autosave failed:", e);
+                setSaveState("dirty");
+                if (!state.saveFailureBannerShown)
+                {
+                    const reason = (e && /** @type {any} */ (e).message) ? /** @type {any} */ (e).message : String(e);
+                    showBanner(t("mangaplay-studio.banner.saveFailed", { reason }));
+                    state.saveFailureBannerShown = true;
+                }
+            }
+        });
+    };
+
+    // Debounced screenplay re-render — keeps fast typing cheap on long docs.
+    // Also publish the parsed AST to RuntimeStorage so mps-canvas can paginate
+    // and the right-pane screenplay re-renders from the same source of truth.
+    state.debouncedScreenplayUpdate = debouncedSave((text) => {
+        publishParsedScript(text);
+    }, SCREENPLAY_DEBOUNCE_MS);
+
+    if (editorEl)
+    {
+        const tabBarEl = document.querySelector(".top-bar-tabs");
+        if (!tabBarEl)
+        {
+            console.warn("[mountViews] .top-bar-tabs not found; tab strip will not render");
+        }
+
+        // Mount the tab strip first; it back-references the slot manager via
+        // setManager() once the manager exists.
+        state.editorTabs = mountEditorTabs(
+            /** @type {HTMLElement} */ (tabBarEl),
+            null,
+            {
+                onNewTab: () =>
+                {
+                    // The "+" button opens a fresh empty scratch tab.
+                    state.slotManager?.openNew(
+                        null,
+                        "",
+                        /** @type {any} */ ("general-text")
+                    );
+                }
+            }
+        );
+
+        state.slotManager = new EditorSlotManager(
+            /** @type {HTMLElement} */ (editorEl),
+            /** @type {HTMLElement} */ (tabBarEl),
+            {
+                onChange: (slot, text) =>
+                {
+                    _setCurrentDoc(text);
+                    // Mirror onto currentProject when the change came from the
+                    // currently-active slot. Prefer fileUuid identity — path
+                    // equality is fragile once Rust canonicalises separators
+                    // or UNC-prefixes strings behind our back.
+                    const activeSlot = state.slotManager?.getActive();
+                    const isActiveSlot = activeSlot && slot.tabId === activeSlot.tabId;
+                    if (state.currentProject && slot.path && isActiveSlot)
+                    {
+                        state.currentProject.script = text;
+                    }
+                    onMpsChangeFromSlot(slot, text);
+                },
+                onActivate: (slot) =>
+                {
+                    onSlotActivated(slot);
+                },
+                onCloseRequest: async (slot) =>
+                {
+                    // Flush any pending writes for THIS path before destroying
+                    // the view. withLock drains pending broker writes.
+                    if (slot.path)
+                    {
+                        try { await getBroker().withLock(async () => {}); }
+                        catch (e) { console.warn("[slot-close] flush failed:", e); }
+                    }
+                },
+                onTabsChanged: () =>
+                {
+                    state.editorTabs?.render();
+                    debouncedWriteSession();
+                }
+            }
+        );
+        state.editorTabs.setManager(state.slotManager);
+
+        // ── Phase-2: three-state editor mode (Source / Text / Visual) ───────
+        // `applyEditorMode(mode)` is the single switchboard. It —
+        //   1. Flushes any pending broker writes so Visual reads the
+        //      latest buffer (not a stale snapshot mid-debounce).
+        //   2. For Text / Source: reconfigures EVERY slot's CM language
+        //      compartment AND remembers the mode module-side so new
+        //      slots built later honour it. Cursor / scroll / undo
+        //      survive because it's reconfigure, not re-instantiate.
+        //   3. For Visual: hides all CM slot containers and mounts a
+        //      single cached `<mps-visual-editor>` element as a sibling
+        //      so it never coexists with a live CM subscriber.
+        //   4. Persists `editorMode` to user-settings.json AFTER the
+        //      switch succeeds (never before — a thrown switch must
+        //      not leave the persisted mode out of sync with reality).
+        //   5. Syncs the mode-toggle button's `mode` property.
+        /** @type {"source"|"text"|"visual"} */
+        let editorMode = /** @type {any} */ (getUserSetting("editorMode", "text"));
+        if (editorMode !== "source" && editorMode !== "text" && editorMode !== "visual")
+        {
+            editorMode = "text";
+        }
+        state.modeToggleEl = /** @type {any} */ (
+            document.createElement("mps-editor-mode-toggle")
+        );
+        state.modeToggleEl.setAttribute("mode", editorMode);
+
+        /**
+         * Apply `mode` to the editor pane. See block comment above for the
+         * full contract. Idempotent — calling with the current mode is a
+         * cheap no-op aside from re-persisting.
+         * @param {"source"|"text"|"visual"} mode
+         * @param {{ persist?: boolean }} [opts] persist defaults to true.
+         *   Set false for one-shot switches (e.g. the empty-tab CTA's
+         *   auto-mode-switch when creating a new file) so the user's
+         *   global editorMode setting isn't overwritten.
+         */
+        async function applyEditorMode(mode, opts)
+        {
+            if (mode !== "source" && mode !== "text" && mode !== "visual")
+            {
+                return;
+            }
+            const persist = opts?.persist !== false;
+
+            const previousMode = editorMode;
+
+            // Drain pending CM autosaves before swapping surfaces — Visual
+            // reads `state.script` from RuntimeStorage, which is populated
+            // by the existing debounced subscriber. Source / Text never
+            // strictly need this, but the cost is one no-op await so we
+            // run it unconditionally for a single code path.
+            try { await getBroker().withLock(async () => {}); }
+            catch (e) { console.warn("[mode-switch] flush failed:", e); }
+
+            // Leaving Visual → tear down (or hide) the visual element so
+            // it stops subscribing to RuntimeStorage before CM remounts.
+            if (mode !== "visual" && state.visualEditorEl)
+            {
+                state.visualEditorEl.style.display = "none";
+            }
+
+            if (mode === "visual")
+            {
+                if (editorEl)
+                {
+                    // Hide every CM slot container so they don't paint
+                    // behind the visual editor.
+                    for (const child of Array.from(editorEl.children))
+                    {
+                        const el = /** @type {HTMLElement} */ (child);
+                        if (el.classList.contains("editor-slot"))
+                        {
+                            el.dataset.cmHiddenForVisual = "1";
+                            el.style.display = "none";
+                        }
+                    }
+                    if (!state.visualEditorEl)
+                    {
+                        state.visualEditorEl = /** @type {HTMLElement} */ (
+                            document.createElement("mps-visual-editor")
+                        );
+                        state.visualEditorEl.id = "mps-visual-editor-host";
+                        editorEl.appendChild(state.visualEditorEl);
+                    }
+                    else
+                    {
+                        state.visualEditorEl.style.display = "";
+                    }
+                }
+            }
+            else
+            {
+                // If we were previously in Visual mode, the user may have
+                // mutated the script via the visual editor (Insert Blank
+                // Page, panel reorder, etc). Those edits live in the
+                // RuntimeStorage `script` field; CodeMirror has no
+                // store→buffer subscriber, so we explicitly serialise the
+                // current AST and push it into the active CM view here.
+                if (previousMode === "visual" && state.slotManager)
+                {
+                    try
+                    {
+                        const storeState = getRuntimeStorage().state;
+                        const script = storeState?.script;
+                        let source = null;
+                        if (typeof script === "string")
+                        {
+                            source = script;
+                        }
+                        else if (script && typeof script === "object")
+                        {
+                            source = visualFormatScript(/** @type {any} */ (script));
+                        }
+                        if (typeof source === "string")
+                        {
+                            const active = state.slotManager.getActive();
+                            const view = active?.view;
+                            if (view && view.state.doc.toString() !== source)
+                            {
+                                view.dispatch({
+                                    changes: {
+                                        from: 0,
+                                        to: view.state.doc.length,
+                                        insert: source
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    catch (e)
+                    {
+                        console.warn("[mode-switch] visual→CM sync failed:", e);
+                    }
+                }
+                if (editorEl)
+                {
+                    for (const child of Array.from(editorEl.children))
+                    {
+                        const el = /** @type {HTMLElement} */ (child);
+                        if (el.classList.contains("editor-slot")
+                            && el.dataset.cmHiddenForVisual === "1")
+                        {
+                            delete el.dataset.cmHiddenForVisual;
+                            // Slot manager owns `display:""` for the active
+                            // slot — only the active slot will become
+                            // visible; inactive slots stay hidden via the
+                            // manager's own bookkeeping.
+                            el.style.display = "";
+                        }
+                    }
+                    // Re-run activate() so the active slot ends up the only
+                    // visible one (mirrors the post-construction invariant).
+                    const active = state.slotManager?.getActive();
+                    if (active && state.slotManager)
+                    {
+                        state.slotManager.activate(active.tabId);
+                    }
+                }
+                // Reconfigure every existing slot's CM compartment so the
+                // user sees the new extension set immediately.
+                if (state.slotManager)
+                {
+                    for (const slot of state.slotManager.list())
+                    {
+                        try { setEditorViewMode(slot.view, mode); }
+                        catch (e)
+                        {
+                            console.warn("[mode-switch] setEditorViewMode failed for slot",
+                                slot.tabId, e);
+                        }
+                    }
+                }
+            }
+
+            // Show the line-number gutter only in Source mode — Text and
+            // Visual hide it. CSS gate is `mps-editor-host[data-show-line-numbers]`.
+            if (editorEl)
+            {
+                if (mode === "source")
+                {
+                    editorEl.setAttribute("data-show-line-numbers", "");
+                }
+                else
+                {
+                    editorEl.removeAttribute("data-show-line-numbers");
+                }
+            }
+
+            // Mirror the mode onto the editor-area top bar so other
+            // attribute-driven UI (e.g. format pill visibility) can react.
+            // Pagination is NO LONGER gated on mode — it follows the active
+            // file format instead (mangaplay → enabled, anything else →
+            // visible-but-disabled), so the user can paginate the Storyboard
+            // canvas from text / source / visual alike. tooltip.js keys off
+            // attr presence, so we drop `data-tooltip` while disabled to
+            // suppress the hover.
+            if (state.editorAreaTopBarEl)
+            {
+                state.editorAreaTopBarEl.setAttribute("data-mode", mode);
+            }
+            if (state.editorBarPagePrevBtn && state.editorBarPageNextBtn)
+            {
+                const format = getActivePaginationFormat();
+                if (format === "mangaplay")
+                {
+                    const prevLabel = t("ui.paint.prevPage") || "Previous page";
+                    const nextLabel = t("ui.paint.nextPage") || "Next page";
+                    state.editorBarPagePrevBtn.setAttribute("data-tooltip", prevLabel);
+                    state.editorBarPagePrevBtn.setAttribute("data-tooltip-side", "bottom");
+                    state.editorBarPageNextBtn.setAttribute("data-tooltip", nextLabel);
+                    state.editorBarPageNextBtn.setAttribute("data-tooltip-side", "bottom");
+                    const { pageIndex: _pi, totalPages: _tp } = getPaginationState();
+                    state.editorBarPagePrevBtn.disabled = _pi <= 0;
+                    state.editorBarPageNextBtn.disabled = _pi >= _tp - 1;
+                }
+                else
+                {
+                    state.editorBarPagePrevBtn.disabled = true;
+                    state.editorBarPageNextBtn.disabled = true;
+                    state.editorBarPagePrevBtn.removeAttribute("data-tooltip");
+                    state.editorBarPageNextBtn.removeAttribute("data-tooltip");
+                }
+            }
+            if (state.editorBarFixIssuesBtn)
+            {
+                const slot = state.slotManager?.getActive();
+                const supportedFormat = slot?.format === "mangaplay"
+                    || slot?.format === "fountain";
+                if (supportedFormat)
+                {
+                    const fixLabel = t("ui.visualEditor.fixStructuralIssues",
+                        "Fix Structural Issues");
+                    state.editorBarFixIssuesBtn.setAttribute("data-tooltip", fixLabel);
+                    state.editorBarFixIssuesBtn.setAttribute("data-tooltip-side", "bottom");
+                    state.editorBarFixIssuesBtn.setAttribute("aria-label", fixLabel);
+                    if (typeof window.__mpsRefreshFixIssuesBtn === "function")
+                    {
+                        try { window.__mpsRefreshFixIssuesBtn(); } catch (_) {}
+                    }
+                    else
+                    {
+                        state.editorBarFixIssuesBtn.disabled = true;
+                    }
+                }
+                else
+                {
+                    state.editorBarFixIssuesBtn.disabled = true;
+                    state.editorBarFixIssuesBtn.removeAttribute("data-tooltip");
+                }
+            }
+
+            // Remember module-side so future buildEditor() calls match.
+            setEditorMode(mode);
+            editorMode = mode;
+            state.modeToggleEl.mode = mode;
+            // Mode sync contract — single switchboard fans out to every
+            // surface that displays current mode. App Footer's Mode Button
+            // reflects the new icon; never tracks its own state.
+            try { state.appFooter?.setMode(mode); }
+            catch (e) { console.debug("[mode-switch] appFooter.setMode threw:", e); }
+
+            // Restore keyboard focus to the editor after a mode switch.
+            // Without this, the toggle button (a plain <button>) keeps focus
+            // and silently swallows keystrokes — the user reports "cannot type
+            // after switching modes". Visual mode owns its own focus model so
+            // we skip it there.
+            if ((mode === "text" || mode === "source") && state.slotManager)
+            {
+                try
+                {
+                    const active = state.slotManager.getActive();
+                    active?.view?.focus();
+                }
+                catch (e) { console.debug("[mode-switch] focus restore failed:", e); }
+            }
+
+            // Persist AFTER the switch succeeded — unless the caller asked
+            // for a one-shot switch (e.g. empty-tab CTA file-create flow).
+            if (persist)
+            {
+                try { await saveUserSettings({ editorMode: mode }); }
+                catch (e) { console.debug("[mode-switch] persist failed:", e); }
+            }
+        }
+
+        // 44px top bar across the editor host. Carries the pagination
+        // chevrons on the left and the mode toggle on the right. The bar
+        // overlays all three editor surfaces (Text / Source / Visual) so
+        // a single chrome serves every mode. CSS in app.css owns the
+        // positioning; we only build the shell + wire its children.
+        if (editorEl)
+        {
+            state.editorAreaTopBarEl = document.createElement("div");
+            state.editorAreaTopBarEl.className = "editor-area-top-bar";
+
+            state.editorBarPagePrevBtn = /** @type {HTMLButtonElement} */ (
+                document.createElement("button")
+            );
+            state.editorBarPagePrevBtn.type = "button";
+            state.editorBarPagePrevBtn.className = "editor-bar-page-prev";
+            state.editorBarPagePrevBtn.innerHTML = icon("arrow-left", { size: 16 });
+            state.editorBarPagePrevBtn.addEventListener("click", () =>
+            {
+                if (state.editorBarPagePrevBtn?.disabled) return;
+                paginationNavigate(-1);
+            });
+
+            state.editorBarPageNextBtn = /** @type {HTMLButtonElement} */ (
+                document.createElement("button")
+            );
+            state.editorBarPageNextBtn.type = "button";
+            state.editorBarPageNextBtn.className = "editor-bar-page-next";
+            state.editorBarPageNextBtn.innerHTML = icon("arrow-right", { size: 16 });
+            state.editorBarPageNextBtn.addEventListener("click", () =>
+            {
+                if (state.editorBarPageNextBtn?.disabled) return;
+                paginationNavigate(1);
+            });
+
+            state.editorAreaTopBarEl.appendChild(state.editorBarPagePrevBtn);
+            state.editorAreaTopBarEl.appendChild(state.editorBarPageNextBtn);
+
+            // Fix Structural Issues — lucide wrench icon, sits right after
+            // the page next chevron. Active only for mangaplay / fountain
+            // formats (see mode-bridge above). Click rewrites the active
+            // CM6 buffer via the pure source-text fixers in
+            // ./structural-fixer.js. Disabled state refreshed via the
+            // `window.__mpsRefreshFixIssuesBtn` window hook below.
+            state.editorBarFixIssuesBtn = /** @type {HTMLButtonElement} */ (
+                document.createElement("button")
+            );
+            state.editorBarFixIssuesBtn.type = "button";
+            state.editorBarFixIssuesBtn.className = "editor-bar-fix-issues";
+            state.editorBarFixIssuesBtn.innerHTML = icon("wrench", { size: 16 });
+            state.editorBarFixIssuesBtn.addEventListener("click", () =>
+            {
+                if (state.editorBarFixIssuesBtn?.disabled) return;
+                const slot = state.slotManager?.getActive();
+                const view = slot?.view;
+                if (!view) return;
+                syncStructuralFixerConvention();
+                const before = view.state.doc.toString();
+                const after = fixIssues(slot.format, before);
+                if (after === before) return;
+                view.dispatch({
+                    changes: { from: 0, to: view.state.doc.length, insert: after }
+                });
+            });
+            state.editorAreaTopBarEl.appendChild(state.editorBarFixIssuesBtn);
+
+            // Sync hook — mps-visual-editor calls this from its _render
+            // wrapper after every AST round-trip so the disabled state of
+            // the icon always reflects the current set of fixable issues.
+            // Returns silently when no visual editor is mounted (text /
+            // source mode), when the button hasn't been built yet, or
+            // when the top bar is not in visual mode.
+            window.__mpsRefreshFixIssuesBtn = () =>
+            {
+                if (!state.editorBarFixIssuesBtn) return;
+                const slot = state.slotManager?.getActive();
+                const view = slot?.view;
+                const supported = slot
+                    && (slot.format === "mangaplay" || slot.format === "fountain");
+                if (!view || !supported)
+                {
+                    state.editorBarFixIssuesBtn.disabled = true;
+                    state.editorBarFixIssuesBtn.removeAttribute("data-tooltip");
+                    state.editorBarFixIssuesBtn.removeAttribute("aria-label");
+                    return;
+                }
+                // Tooltip is also set in the applyEditorMode bridge, but
+                // we re-stamp here so it survives a slot activation that
+                // doesn't trigger a mode switch (e.g. opening a Fountain
+                // file directly into its default mode).
+                const fixLabel = t("ui.visualEditor.fixStructuralIssues",
+                    "Fix Structural Issues");
+                state.editorBarFixIssuesBtn.setAttribute("data-tooltip", fixLabel);
+                state.editorBarFixIssuesBtn.setAttribute("data-tooltip-side", "bottom");
+                state.editorBarFixIssuesBtn.setAttribute("aria-label", fixLabel);
+                syncStructuralFixerConvention();
+                const text = view.state.doc.toString();
+                state.editorBarFixIssuesBtn.disabled = !hasFixableIssues(slot.format, text);
+            };
+
+            // SuperScript alpha warning pill. Visibility driven by the
+            // `data-format` attribute on the top bar (set by syncFormatToTopBar
+            // when the active slot changes). The element stays mounted so we
+            // don't churn the DOM on every format flip.
+            const superscriptWarningEl = document.createElement("span");
+            superscriptWarningEl.className = "editor-bar-superscript-warning";
+            superscriptWarningEl.textContent = t("mangaplay-studio.banner.superscriptAlpha")
+                || "SuperScript is in alpha — expect bugs";
+            state.editorAreaTopBarEl.appendChild(superscriptWarningEl);
+
+            state.editorAreaTopBarEl.appendChild(state.modeToggleEl);
+
+            // More Options button — opens a context menu (Rename, Show in
+            // Explorer, Reveal Navigator, Delete File). Styled to match the
+            // mode toggle button (same .mps-editor-mode-toggle-btn class) so
+            // the two sit visually together.
+            const moreOptionsBtn = /** @type {HTMLButtonElement} */ (
+                document.createElement("button")
+            );
+            moreOptionsBtn.type = "button";
+            moreOptionsBtn.id = "btn-editor-more-options";
+            moreOptionsBtn.className = "mps-editor-mode-toggle-btn editor-bar-more-options";
+            moreOptionsBtn.innerHTML = icon("ellipsis-vertical", { size: 18 });
+            const moreOptionsLabel = t("mangaplay-studio.menu.editor.moreOptionsTooltip")
+                || "More Options";
+            moreOptionsBtn.setAttribute("aria-label", moreOptionsLabel);
+            moreOptionsBtn.setAttribute("data-tooltip", moreOptionsLabel);
+            moreOptionsBtn.setAttribute("data-tooltip-side", "left");
+            moreOptionsBtn.addEventListener("click", () =>
+            {
+                openEditorMoreOptionsMenu(moreOptionsBtn);
+                if (moreOptionsBtn) moreOptionsBtn.blur();
+            });
+            state.editorAreaTopBarEl.appendChild(moreOptionsBtn);
+
+            editorEl.appendChild(state.editorAreaTopBarEl);
+
+            // Reflect pagination state on the chevron buttons. Only honoured
+            // when the active slot's format is `mangaplay` — other formats
+            // keep the chevrons visible but disabled (gate enforced in the
+            // applyEditorMode bridge above). Read `data-format` off the
+            // editor-area top bar (stamped by syncFormatToTopBar) so we don't
+            // need to re-resolve via slotManager on every page-state event.
+            subscribePaginationState(({ pageIndex, totalPages }) =>
+            {
+                if (!state.editorBarPagePrevBtn || !state.editorBarPageNextBtn) return;
+                if (state.editorAreaTopBarEl?.getAttribute("data-format") !== "mangaplay") return;
+                state.editorBarPagePrevBtn.disabled = pageIndex <= 0;
+                state.editorBarPageNextBtn.disabled = pageIndex >= totalPages - 1;
+            });
+
+            state.modeToggleEl.addEventListener("mps:mode-change", (ev) =>
+            {
+                const next = /** @type {any} */ (ev).detail?.mode;
+                if (next) { void applyEditorMode(next); }
+            });
+            // Expose the closure to module-level helpers so format-driven
+            // downgrades (applyAllowedModesForFormat) can re-route through
+            // the same single switchboard.
+            state.applyEditorModeRef = applyEditorMode;
+            // Seed the initial mode (also reconfigures Compartments for
+            // pre-existing slots, mounts Visual if needed).
+            void applyEditorMode(editorMode);
+            // Apply allowed-mode constraints + warning pill for the active
+            // slot's format. onSlotActivated re-applies this whenever the
+            // user switches tabs.
+            try
+            {
+                const initialFormat = state.slotManager?.getActive()?.format
+                    || /** @type {any} */ (formatForFilename(state.currentProject?.scriptBasename || ""));
+                applyAllowedModesForFormat(initialFormat);
+            }
+            catch (e) { console.debug("[mode-init] allowed-modes seed failed:", e); }
+        }
+        // ────────────────────────────────────────────────────────────────────
+
+        // Empty-tab CTA — overlay shown over the active slot when its path
+        // is null (the "Create New file" placeholder). Handlers:
+        //   onCreateStoryboard: create a new .mangaplay.md at the project
+        //                       root, adopt it into the active empty tab,
+        //                       switch the editor to Visual mode (one-shot,
+        //                       does NOT persist the mode preference).
+        //   onCreateScreenplay: same as above but creates a .fountain file
+        //                       and switches to Text mode.
+        //   onClose:            close the active empty tab; the slot
+        //                       manager auto-spawns a fresh one.
+        /**
+         * Create + adopt + mode-switch helper.
+         *
+         * 1. onCreate delegates to registryCreateFile; JS picks the next
+         *    free `Untitled` basename by inspecting the sibling entries.
+         * 2. replaceActiveTab — the canonical "swap the active tab to file X"
+         *    helper. Handles broker re-anchor, mangaart cache swap, page-index
+         *    restore, slot-switched dispatch, and explorer refresh in one go.
+         *    Without this, the editor pane shows the new file but the
+         *    right-pane storyboard stays anchored to the previous file's
+         *    mangaart, and the explorer doesn't repaint its is-active marker.
+         * 3. One-shot mode switch — persist:false so the user's global
+         *    editorMode preference isn't overwritten.
+         *
+         * @param {"mangaplay"|"fountain"} kind
+         * @param {"visual"|"text"} mode
+         */
+        async function ctaCreateAndAdopt(kind, mode)
+        {
+            if (!state.currentProject?.path || !state.slotManager) return;
+            // parentForCreation honours the explorer's last-focused folder
+            // (so the new file lands where the user is browsing), falling
+            // back to <projectRoot>/project — which is where the v2 layout
+            // expects scripts to live and where the explorer reads from.
+            // Passing currentProject.path directly drops the file at the
+            // PROJECT ROOT, outside the project/ subtree the explorer
+            // walks; the file is created on disk but invisible in the UI.
+            const parent = parentForCreation();
+            if (!parent) return;
+            // onCreate already handles the broker lock, self-change marking,
+            // banner surfacing on error, and explorer refresh.
+            const createdPath = await onCreate(parent, kind);
+            if (!createdPath) return;
+
+            await replaceActiveTab(createdPath);
+            await applyEditorMode(mode, { persist: false });
+        }
+
+        state.emptyTabCta = mountEmptyTabCta(
+            /** @type {HTMLElement} */ (editorEl),
+            {
+                onCreateStoryboard: () => ctaCreateAndAdopt("mangaplay", "visual"),
+                onCreateScreenplay: () => ctaCreateAndAdopt("fountain", "text"),
+                onClose: async () =>
+                {
+                    const active = state.slotManager?.getActive();
+                    if (active) await state.slotManager.close(active.tabId);
+                }
+            }
+        );
+
+        state.rightPaneEmpty = mountRightPaneEmpty();
+
+        // Boot — restore prior tab snapshot if any. Each restored entry
+        // either references a file path (read from disk; skipped on read
+        // failure) or carries a null path (fresh "New tab" placeholder).
+        // We honour the persisted tab id on each slot so activeTabId still
+        // matches after restore. The slot manager uses an array (no Map
+        // index), so directly patching `tabId` after openNew is safe — get()
+        // walks the array.
+        let bootRestored = false;
+        let restoredInitialDoc = "";
+        try
+        {
+            if (state.currentProject?.path)
+            {
+                // Part 5 migration: legacy {id, path, fileUuid:null} tabs get
+                // their fileUuid resolved via the registry before restore.
+                // Best-effort — never blocks boot.
+                try { await migrateLegacyTabEntries(state.currentProject.path); }
+                catch (e) { console.warn("[session] migrateLegacyTabEntries failed:", e); }
+                const snap = await getTabSnapshot(state.currentProject.path);
+                for (const entry of snap.openTabs)
+                {
+                    if (entry.path)
+                    {
+                        try
+                        {
+                            const text = (await readFile(entry.path)) ?? "";
+                            const base = basename(entry.path);
+                            state.slotManager.openNew(
+                                entry.path,
+                                text,
+                                /** @type {any} */ (formatForFilename(base)),
+                                /** @type {any} */ (entry).fileUuid ?? null
+                            );
+                            const newest = state.slotManager.list().at(-1);
+                            if (newest) newest.tabId = entry.id;
+                        }
+                        catch (e)
+                        {
+                            console.warn(`[session] tab ${entry.path} failed to restore:`,
+                                /** @type {any} */ (e)?.message || e);
+                        }
+                    }
+                    else
+                    {
+                        state.slotManager.openNew(null, "", /** @type {any} */ ("general-text"));
+                        const newest = state.slotManager.list().at(-1);
+                        if (newest) newest.tabId = entry.id;
+                    }
+                }
+                if (state.slotManager.list().length > 0)
+                {
+                    bootRestored = true;
+                    const target = snap.activeTabId && state.slotManager.get(snap.activeTabId)
+                        ? snap.activeTabId
+                        : state.slotManager.list()[0].tabId;
+                    state.slotManager.activate(target);
+                    const active = state.slotManager.getActive();
+                    if (active)
+                    {
+                        try { restoredInitialDoc = active.view.state.doc.toString(); }
+                        catch (_e) { restoredInitialDoc = ""; }
+                    }
+                }
+            }
+        }
+        catch (e)
+        {
+            console.warn("[session] restore failed:", /** @type {any} */ (e)?.message || e);
+        }
+
+        // Fallback when nothing restored — open the project's main script,
+        // or a scratch tab when no project script is set (locked decision
+        // #10 — the strip is never empty).
+        const initialDoc = bootRestored ? restoredInitialDoc : (state.currentProject?.script || "");
+        if (!bootRestored)
+        {
+            const initialPath = state.currentProject?.scriptPath || null;
+            if (initialPath)
+            {
+                state.slotManager.openNew(
+                    initialPath,
+                    initialDoc,
+                    /** @type {any} */ (formatForFilename(state.currentProject?.scriptBasename || ""))
+                );
+            }
+            else
+            {
+                state.slotManager.openNew(
+                    null,
+                    "",
+                    /** @type {any} */ ("general-text")
+                );
+            }
+        }
+        _setCurrentDoc(initialDoc);
+        // Seed RuntimeStorage so the canvas mounts with parsed pages instead
+        // of waiting for the first keystroke.
+        publishParsedScript(initialDoc);
+    }
+
+    if (canvasEl) {
+        const debouncedMangaartSave = (pageId) =>
+        {
+            if (!state.currentProject) return;
+            const key = String(pageId ?? "_all");
+            // Payload is the mangaart cache itself — we don't snapshot here
+            // because saveMangaart re-reads the live cache. Pass the cache
+            // reference so the broker can drain without re-querying.
+            broker.scheduleMangaartSave(key, getMangaartCache(), async () =>
+            {
+                try
+                {
+                    setSaveState("saving");
+                    const fileUuid = state.slotManager?.getActive()?.fileUuid || null;
+                    if (fileUuid)
+                    {
+                        await saveMangaartByUuid(state.currentProject.path, fileUuid);
+                    }
+                    else
+                    {
+                        // Boot window fallback: no active slot UUID yet.
+                        const rel = scriptRelPathOf(state.currentProject.path, state.currentProject.scriptPath)
+                            || state.currentProject.scriptBasename;
+                        await saveMangaart(state.currentProject.path, rel);
+                    }
+                    setSaveState("saved");
+                    if (state.saveFailureBannerShown) state.saveFailureBannerShown = false;
+                }
+                catch (e)
+                {
+                    console.error("Failed to save mangaart:", e);
+                    setSaveState("dirty");
+                    if (!state.saveFailureBannerShown)
+                    {
+                        const reason = (e && /** @type {any} */ (e).message) ? /** @type {any} */ (e).message : String(e);
+                        showBanner(t("mangaplay-studio.banner.saveFailed", { reason }));
+                        state.saveFailureBannerShown = true;
+                    }
+                }
+            });
+        };
+
+        /** @type {any} */
+        (globalThis).__MPS_DESKTOP__ =
+        {
+            // Per-file slot id so RuntimeDrawingCache, PersistentStorage
+            // pending-sync buffer, and IDB drawing-store all key drawings
+            // by the SCRIPT they belong to. Prefer the file's registry UUID
+            // — path-based slot IDs go stale mid-rename/move and cause the
+            // canvas's stale-hydrate guard to drop the newly-loaded strokes.
+            // Fall back to project-relative path for the boot window before
+            // the active slot has resolved its fileUuid.
+            getActiveSlotId: () => {
+                if (!state.currentProject?.path) return null;
+                const fileUuid = state.slotManager?.getActive()?.fileUuid || null;
+                if (fileUuid) return `${state.currentProject.path}::uuid:${fileUuid}`;
+                const rel = scriptRelPathOf(state.currentProject.path, state.currentProject.scriptPath)
+                    || state.currentProject.scriptBasename
+                    || "";
+                return rel ? `${state.currentProject.path}::${rel}` : state.currentProject.path;
+            },
+            getMangaart: () => getMangaartCache(),
+            updatePage: (pageIndex, drawing) => updateMangaartPage(pageIndex, drawing),
+            queueSave: (pageId) => debouncedMangaartSave(pageId),
+            // Test hook — lets driver smoke tests exercise the same
+            // switchProject code path the project-switcher dropdown uses,
+            // without needing to drive the popup menu UI from CDP.
+            switchProject: (path) => switchProject(path),
+            currentProjectPath: () => state.currentProject?.path || null,
+        };
+
+        state.canvasApi = await initCanvas(canvasEl, {
+            onSave: (pageIndex, drawing) =>
+            {
+                if (!state.currentProject) return;
+                updateMangaartPage(pageIndex, drawing);
+                setSaveState("dirty");
+                debouncedMangaartSave(pageIndex);
+            },
+        });
+        // Seed the canvas with the current doc so its pageCount matches
+        // the initial state without waiting for the first keystroke.
+        if (state.canvasApi && typeof state.canvasApi.setScript === "function") {
+            state.canvasApi.setScript(currentDoc);
+        }
+
+        // Defer two frames so the slider has finished its initial layout, then
+        // force the website canvas to re-fit. Without this, the engine attaches
+        // pointer listeners to a 0×0 .drawing-canvas before the slider's initial
+        // translateX transition has resolved, and draw input never registers.
+        requestAnimationFrame(() =>
+        {
+            requestAnimationFrame(() =>
+            {
+                const c = document.querySelector("mps-canvas");
+                if (c && typeof c.fitToContainer === "function")
+                {
+                    try { c.fitToContainer(true); } catch {}
+                }
+                if (c && typeof c.resizeDrawingCanvas === "function")
+                {
+                    try { c.resizeDrawingCanvas(); } catch {}
+                }
+                // Nudge the active tool so applyDrawingTool re-binds the pencil.
+                document.dispatchEvent(new CustomEvent("paint-tool-change", { detail: { tool: "pencil" } }));
+            });
+        });
+    }
+
+    // Apply initial view mode from app settings (shell layout is app-wide).
+    const __shellSettings = globalThis.__MPS_APP_SETTINGS__ || {};
+    if (__shellSettings.viewMode) {
+        setViewMode(__shellSettings.viewMode);
+        if (__shellSettings.lastSoloMode) {
+            state.lastSoloMode = __shellSettings.lastSoloMode;
+        }
+    }
+    if (state.currentProject?.meta?.printPreview) {
+        const sp = document.querySelector("mps-screenplay");
+        if (sp) sp.setAttribute("data-screenplay-mode", "paginated");
+    }
+
+    // Per-project sidebar relocation — `mps-canvas` re-creates its child
+    // <mps-quick-toggle-sidebar> on each project mount.
+    wireQuickToggleRelocation();
+
+    // Per-project meta restore (shell DOM has already been wired once by
+    // `wireShellOnce()` at boot).
+    restoreShellMeta();
+    refreshProjectSwitcher();
+    updateEmptyState();
+
+    // ── App Footer + Google Docs sync gear (Phase 3+) ───────────────────
+    // The App Footer is the 200×30 bottom-right panel owning the mode
+    // button, word / char counts, and the Google Docs sync gear. It's
+    // built once per app lifetime; project switches just call
+    // setMode / recountNow / setSyncState on the same controller.
+    //
+    // mountGoogleDocsFooter no longer creates its own DOM — it accepts the
+    // gear-controller adapter below so the SyncStateMachine drives the
+    // shared App Footer instead of a separate full-width bar.
+    try
+    {
+        const footerHost = /** @type {HTMLElement|null} */ (
+            document.getElementById("app-footer"));
+        if (footerHost && !state.appFooter)
+        {
+            state.appFooter = mountAppFooter({
+                host: footerHost,
+                getActiveSlot: () => state.slotManager?.getActive() || null,
+                applyEditorMode: (mode) =>
+                {
+                    // Re-route through whatever applyEditorMode closure the
+                    // current project mount installed (matches the top-bar
+                    // toggle's path). Bridge ref because the closure is
+                    // captured per-mount.
+                    if (state.applyEditorModeRef) return state.applyEditorModeRef(mode);
+                },
+                getEditorMode: () =>
+                {
+                    // Read the live attribute on modeToggleEl — the single
+                    // source of truth post-applyEditorMode. Falls back to
+                    // "text" on cold boot before applyEditorMode runs.
+                    return /** @type {any} */ (
+                        state.modeToggleEl?.getAttribute("mode") || "text");
+                },
+                getDocumentText: () =>
+                {
+                    // Visual mode reads the AST in RuntimeStorage; serialise
+                    // before counting. Text / Source read the active CM
+                    // slot via the manager's getActiveSlot bridge.
+                    try
+                    {
+                        const mode = state.modeToggleEl?.getAttribute("mode");
+                        if (mode === "visual")
+                        {
+                            const script = getRuntimeStorage().state?.script;
+                            if (typeof script === "string") return script;
+                            if (script && typeof script === "object")
+                            {
+                                return visualFormatScript(/** @type {any} */ (script));
+                            }
+                            return "";
+                        }
+                    }
+                    catch (e) { console.debug("[app-footer] visual read threw:", e); }
+                    const slot = state.slotManager?.getActive();
+                    return slot?.view?.state?.doc?.toString?.() || "";
+                }
+            });
+            // The footer's previous sync gear is gone — publish-doc pill
+            // (registered below) absorbs its click-target + anchor roles.
+            state.appFooter.show();
+        }
+
+        if (state.appFooter)
+        {
+            // Mount the Google Docs sync state-machine bootstrap. The
+            // gear is gone — its three responsibilities (state colour,
+            // click target, popover anchor) now live on the publish-doc
+            // pill, which gets registered via setPublishDocPillController
+            // immediately below. The adapter we pass here keeps the footer
+            // visible across script switches and forwards setLockState +
+            // anchor lookup through the pill controller.
+            mountGoogleDocsFooter({
+                setSyncState: (_state) => { /* publish-doc pill consumes via setPublishDocPillController */ },
+                setLockState: (lockState) => { try { state.publishDocPillCtrl?.setLockState(lockState); } catch {} },
+                show: () => state.appFooter?.show(),
+                hide: () => { /* keep footer visible even when no GDoc */ },
+                getAnchorEl: () => /** @type {HTMLElement} */ (state.publishDocPillCtrl?.getHostEl?.() || state.appFooter?.publishDocPillEl),
+                setFilename: (_name) => { /* shown in the sync popover header */ }
+            }, {
+                getAuthToken: async () =>
+                {
+                    console.warn("[mps:auth:TRACE] app.js footer.getAuthToken() wrapper called → forwarding to getAccessToken({allowRefresh:true})");
+                    try
+                    {
+                        const t = await getAccessToken({ allowRefresh: true });
+                        console.warn("[mps:auth:TRACE] app.js footer.getAuthToken() ← token=", t ? ("len=" + t.length) : "null");
+                        return t;
+                    }
+                    catch (e)
+                    {
+                        console.warn("[mps:auth:TRACE] app.js footer.getAuthToken() ← THREW", e);
+                        return null;
+                    }
+                },
+                getUserProfile: () =>
+                {
+                    const p = getCurrentProfile();
+                    return { name: p?.name || p?.email || null };
+                },
+                getClientId: () => getOrCreateClientId(),
+                getScriptContext: () =>
+                {
+                    const slot = state.slotManager?.getActive();
+                    return {
+                        format: slot?.format || "text",
+                        sourceText: slot?.view?.state?.doc?.toString?.() || ""
+                    };
+                }
+            });
+
+            // Wire the App Footer's Publish Doc pill. With the gear gone,
+            // this pill is the single click-target + popover-anchor for the
+            // Google Docs sync surface. The bootstrap drives setSyncState
+            // + setLockState + show/hide via setPublishDocPillController().
+            try
+            {
+                const pillHost = state.appFooter.publishDocPillEl;
+                if (pillHost)
+                {
+                    state.publishDocPillCtrl = mountPublishDocPill({ host: pillHost });
+                    setPublishDocPillController(state.publishDocPillCtrl);
+                }
+            }
+            catch (e) { console.warn("[wireShellOnce] mountPublishDocPill failed:", e?.message); }
+
+            // Wire the App Footer's Google Account pill. Stateless projection
+            // of auth + navigator.onLine; clicks open Settings → Account.
+            try
+            {
+                const accountHost = state.appFooter.accountPillEl;
+                if (accountHost) mountGoogleAccountPill({ host: accountHost });
+            }
+            catch (e) { console.warn("[wireShellOnce] mountGoogleAccountPill failed:", e?.message); }
+
+            // Seed the mode icon + counts now that the footer is mounted.
+            try
+            {
+                const initialMode = /** @type {any} */ (
+                    state.modeToggleEl?.getAttribute("mode") || "text");
+                state.appFooter.setMode(initialMode);
+            }
+            catch (e) { console.debug("[app-footer] initial setMode threw:", e); }
+            try { state.appFooter.recountNow(); }
+            catch (e) { console.debug("[app-footer] initial recount threw:", e); }
+        }
+    }
+    catch (err) { console.warn("[app-footer] mount failed:", err); }
+}

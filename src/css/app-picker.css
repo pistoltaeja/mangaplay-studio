@@ -1,0 +1,667 @@
+/* ──────────────────────────────────────────────────────────────────────
+   <mps-picker-shell> — the dark fluid surface for bootstrap/picker/opening
+   ────────────────────────────────────────────────────────────────────── */
+
+mps-picker-shell
+{
+    position: fixed;
+    inset: 0;
+    z-index: 950;
+    background: #1a1a1a;
+    color: #e8e8ea;
+    font-family: var(--mps-font-app);
+    opacity: 1;
+    transition: opacity 280ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+mps-picker-shell.fade-out
+{
+    opacity: 0;
+    pointer-events: none;
+}
+
+mps-picker-shell[data-phase="bootstrap"]
+{
+    background: #1a1a1a;
+}
+
+mps-picker-shell .pkr-shell
+{
+    position: absolute;
+    inset: 0;
+    display: flex;
+    overflow: hidden;
+    -webkit-app-region: drag;
+}
+
+mps-picker-shell .pkr-shell[data-phase="picker"]
+{
+    display: grid;
+    /* Row 1 = titlebar (auto height), row 2 = content. Explicit rows
+       needed since _ensureScaffold mounts the persistent titlebar as the
+       first child of .pkr-shell — auto-flow would otherwise put the
+       titlebar into the file-explorer cell. */
+    grid-template-rows: auto 1fr;
+    grid-template-columns: minmax(280px, 35%) 1fr;
+}
+
+mps-picker-shell .pkr-shell[data-phase="picker"] > mps-pkr-file-explorer
+{
+    grid-column: 1;
+    grid-row: 2;
+}
+
+mps-picker-shell .pkr-shell[data-phase="picker"] > .pkr-right
+{
+    grid-column: 2;
+    grid-row: 2;
+}
+
+mps-picker-shell .pkr-shell[data-phase="opening"]
+{
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* .pkr-left / .pkr-left-header / .pkr-empty / .pkr-recent-list / .pkr-item*
+   / .pkr-handle* rules moved to mps-pkr-file-explorer.css — the aside is
+   now a <mps-pkr-file-explorer> custom element and owns its own styling. */
+
+/* Reusable point-anchored context menu (mps-context-menu.js).
+ * Singleton .ctx-menu mounted to document.body. Themed via vars so it
+ * follows light/dark automatically. */
+.ctx-menu
+{
+    position: fixed;
+    min-width: 200px;
+    background: var(--panel-bg, #1d1d22);
+    border: 1px solid var(--rule, #2a2a30);
+    border-radius: 8px;
+    padding: 4px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+    z-index: 9000;
+    font-size: 12px;
+    user-select: none;
+}
+
+.ctx-menu-item
+{
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    padding: 7px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--row-text, #e8e8ea);
+    border: 1px solid transparent;
+    font-family: inherit;
+    font-size: inherit;
+}
+
+.ctx-menu-item:not(:disabled):hover,
+.ctx-menu-item:not(:disabled).is-focused
+{
+    background: var(--btn-hover-bg);
+    border-color: var(--rule);
+}
+
+.ctx-menu-item:disabled,
+.ctx-menu-item[aria-disabled="true"]
+{
+    opacity: 0.4;
+    cursor: default;
+}
+
+.ctx-menu-item.is-danger
+{
+    color: var(--danger-fg);
+}
+
+.ctx-menu-item.is-danger:not(:disabled):hover,
+.ctx-menu-item.is-danger:not(:disabled).is-focused
+{
+    color: var(--danger-fg-hover);
+}
+
+.ctx-menu-icon
+{
+    width: 14px;
+    height: 14px;
+    flex: 0 0 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.ctx-menu-divider
+{
+    height: 1px;
+    background: var(--rule);
+    margin: 4px 6px;
+}
+
+/* Right pane — brand + actions card */
+
+mps-picker-shell .pkr-mascot
+{
+    width: 140px;
+    height: 140px;
+    object-fit: contain;
+    margin-bottom: 8px;
+}
+
+/* Non-interactive text — kill left-click-drag text selection. The create-
+   form input (.pkr-create-name) is not listed, so it stays editable.
+   .pkr-left-header / .pkr-empty / .pkr-item-name / .pkr-item-path /
+   .pkr-item-missing now live inside mps-pkr-file-explorer and get their
+   own user-select rules there. */
+mps-picker-shell .pkr-mascot,
+mps-picker-shell .pkr-brand,
+mps-picker-shell .pkr-version,
+mps-picker-shell .pkr-row-title,
+mps-picker-shell .pkr-row-help,
+mps-picker-shell .pkr-recents-note
+{
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+mps-picker-shell .pkr-brand
+{
+    font-size: 28px;
+    font-weight: 500;
+    color: #fff;
+    margin-bottom: 2px;
+}
+
+mps-picker-shell .pkr-version
+{
+    color: #777;
+    font-size: 13px;
+    margin-bottom: 28px;
+}
+
+mps-picker-shell .pkr-card
+{
+    width: 100%;
+    max-width: 420px;
+    background: #1d1d23;
+    border: 1px solid #2a2a32;
+    border-radius: 10px;
+    padding: 8px 0;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+}
+
+mps-picker-shell .pkr-row
+{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    gap: 16px;
+}
+
+mps-picker-shell .pkr-row-label
+{
+    flex: 1;
+    min-width: 0;
+}
+
+mps-picker-shell .pkr-row-title
+{
+    color: #fff;
+    font-size: 14px;
+    font-weight: 500;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+mps-picker-shell .pkr-row-help
+{
+    color: #888;
+    font-size: 12px;
+    margin-top: 2px;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+mps-picker-shell .pkr-divider
+{
+    height: 1px;
+    background: #2a2a32;
+    margin: 0 16px;
+}
+
+mps-picker-shell .pkr-btn
+{
+    padding: 8px 18px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: background 120ms ease, border-color 120ms ease;
+}
+
+mps-picker-shell .pkr-btn-primary
+{
+    background: #7a5cff;
+    color: #fff;
+}
+
+mps-picker-shell .pkr-btn-primary:hover
+{
+    background: #8e74ff;
+}
+
+mps-picker-shell .pkr-btn-secondary
+{
+    background: transparent;
+    color: #e8e8ea;
+    border-color: #3a3a46;
+}
+
+mps-picker-shell .pkr-btn-secondary:hover
+{
+    border-color: #525261;
+    background: #23232b;
+}
+
+mps-picker-shell .pkr-btn:disabled
+{
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+mps-picker-shell .pkr-btn-primary:disabled:hover
+{
+    background: #7a5cff;
+}
+
+/* Dual-page slide wrapper (rows + create-form) */
+
+mps-picker-shell .pkr-shell-pages
+{
+    position: relative;
+    width: 100%;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
+mps-picker-shell .pkr-shell-page
+{
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    padding: 0 60px 40px;
+    transition: transform 300ms cubic-bezier(0.4, 0, 0.2, 1),
+                opacity 300ms cubic-bezier(0.4, 0, 0.2, 1);
+    overflow-y: auto;
+    -webkit-app-region: no-drag;
+}
+
+mps-picker-shell .pkr-shell-pages[data-page="rows"] .pkr-shell-page-rows
+{
+    transform: translateX(0);
+    opacity: 1;
+    pointer-events: auto;
+}
+
+mps-picker-shell .pkr-shell-pages[data-page="rows"] .pkr-shell-page-create
+{
+    transform: translateX(100%);
+    opacity: 0;
+    pointer-events: none;
+}
+
+mps-picker-shell .pkr-shell-pages[data-page="create"] .pkr-shell-page-rows
+{
+    transform: translateX(-100%);
+    opacity: 0;
+    pointer-events: none;
+}
+
+mps-picker-shell .pkr-shell-pages[data-page="create"] .pkr-shell-page-create
+{
+    transform: translateX(0);
+    opacity: 1;
+    pointer-events: auto;
+}
+
+/* .pkr-right now stacks a fixed header (mascot + brand + version) above the
+   sliding .pkr-shell-pages. The header doesn't move when pages slide. */
+mps-picker-shell .pkr-right
+{
+    padding: 60px 0 0;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    overflow-y: auto;
+    -webkit-app-region: no-drag;
+}
+
+/* Full-width slot inside .pkr-right so downstream .pkr-shell-pages (width:
+   100%) resolves to the actual column width. Without this the bare <div>
+   inherits `align-items: center` shrink-wrap from .pkr-right and collapses
+   to its intrinsic width — the onboarding mascot then renders relative to
+   a 0-width parent and appears off-screen. */
+mps-picker-shell .pkr-right-content
+{
+    width: 100%;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+mps-picker-shell .pkr-right-header
+{
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    flex-shrink: 0;
+    padding-bottom: 8px;
+}
+
+/* Create-form layout — reuses .pkr-card / .pkr-row / .pkr-divider chrome */
+
+mps-picker-shell .pkr-create-form
+{
+    width: 100%;
+    max-width: 420px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+mps-picker-shell .pkr-create-back
+{
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: transparent;
+    border: 0;
+    color: #b5b5bd;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    padding: 4px 6px;
+    border-radius: 4px;
+    transition: background 120ms ease, color 120ms ease;
+    -webkit-app-region: no-drag;
+}
+
+mps-picker-shell .pkr-create-back:hover
+{
+    background: #23232b;
+    color: #fff;
+}
+
+mps-picker-shell .pkr-create-back-arrow
+{
+    font-size: 13px;
+    line-height: 1;
+}
+
+mps-picker-shell .pkr-row-stack
+{
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+}
+
+mps-picker-shell .pkr-create-input
+{
+    background: #1a1a1a;
+    border: 1px solid #2a2a32;
+    color: #fff;
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 13px;
+    font-family: inherit;
+    outline: none;
+    transition: border-color 120ms ease;
+}
+
+mps-picker-shell .pkr-create-input:focus
+{
+    border-color: #7a5cff;
+}
+
+mps-picker-shell .pkr-create-error
+{
+    color: #c46a6a;
+    font-size: 12px;
+    min-height: 14px;
+}
+
+mps-picker-shell .pkr-create-location-row
+{
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+mps-picker-shell .pkr-create-parent-readout
+{
+    color: #b5b5bd;
+    font-size: 12px;
+    word-break: break-all;
+    flex: 1;
+    min-width: 0;
+}
+
+mps-picker-shell .pkr-create-readout-row
+{
+    color: #b5b5bd;
+    font-size: 12px;
+    word-break: break-all;
+    visibility: hidden;
+    opacity: 0;
+    transition: opacity 120ms ease;
+    min-height: 1em;
+}
+
+mps-picker-shell .pkr-create-readout-row.is-visible
+{
+    visibility: visible;
+    opacity: 1;
+}
+
+mps-picker-shell .pkr-create-readout-prefix
+{
+    color: #888;
+    margin-right: 6px;
+}
+
+mps-picker-shell .pkr-create-readout-path
+{
+    color: #fff;
+    font-weight: 500;
+}
+
+mps-picker-shell .pkr-create-actions
+{
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 6px;
+}
+
+/* Opening card removed — owned by <mps-splash> now (see mps-splash.css). */
+
+/* Modal */
+
+mps-picker-shell .pkr-modal-back
+{
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    -webkit-app-region: no-drag;
+}
+
+mps-picker-shell .pkr-modal
+{
+    background: #1d1d23;
+    border: 1px solid #313139;
+    border-radius: 10px;
+    width: min(460px, 90%);
+    padding: 22px 22px 18px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+}
+
+mps-picker-shell .pkr-modal-title
+{
+    color: #fff;
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 12px;
+}
+
+mps-picker-shell .pkr-modal-label
+{
+    display: block;
+    font-size: 12px;
+    color: #aaa;
+    margin-bottom: 4px;
+}
+
+mps-picker-shell .pkr-modal-input
+{
+    width: 100%;
+    padding: 8px 10px;
+    background: #1a1a1a;
+    color: #fff;
+    border: 1px solid #313139;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 14px;
+    margin-bottom: 14px;
+}
+
+mps-picker-shell .pkr-modal-input:focus
+{
+    outline: 0;
+    border-color: #7a5cff;
+}
+
+mps-picker-shell .pkr-modal-radios
+{
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 16px;
+}
+
+mps-picker-shell .pkr-modal-radio
+{
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    color: #e8e8ea;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+mps-picker-shell .pkr-modal-radio small
+{
+    color: #888;
+    font-size: 11px;
+}
+
+mps-picker-shell .pkr-modal-note
+{
+    color: #c4a76a;
+    font-size: 12px;
+    margin: 6px 0 14px;
+    padding: 8px 10px;
+    border-left: 2px solid #c4a76a;
+    background: rgba(196, 167, 106, 0.06);
+}
+
+mps-picker-shell .pkr-modal-actions
+{
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+/* ── Onboarding phase ───────────────────────────────────────────────── */
+
+mps-picker-shell .pkr-shell[data-phase="onboarding"]
+{
+    display: grid;
+    /* Row 1 = titlebar (auto height), row 2 = content (fills remaining).
+       Without an explicit row for the titlebar, grid auto-flow puts the
+       titlebar into the file-explorer cell and the right pane wraps onto
+       row 2 col 1 (0px wide) — the mascot then renders 200px off-screen
+       to the left. Explicit rows fix that. */
+    grid-template-rows: auto 1fr;
+    /* Init state: file explorer collapsed to zero. */
+    grid-template-columns: 0 1fr;
+}
+
+/* Titlebar spans both columns so it sits above the file-explorer + right
+   pane and doesn't consume a content column. Applies to both picker and
+   onboarding phases — the picker phase's grid also has a titlebar row now
+   that _ensureScaffold mounts one persistent titlebar per scaffold. */
+mps-picker-shell .pkr-shell[data-phase="onboarding"] > .pkr-titlebar,
+mps-picker-shell .pkr-shell[data-phase="picker"] > .pkr-titlebar
+{
+    grid-column: 1 / -1;
+    grid-row: 1;
+}
+
+mps-picker-shell .pkr-shell[data-phase="onboarding"] > mps-pkr-file-explorer
+{
+    grid-column: 1;
+    grid-row: 2;
+}
+
+mps-picker-shell .pkr-shell[data-phase="onboarding"] > .pkr-right
+{
+    grid-column: 2;
+    grid-row: 2;
+}
+
+mps-picker-shell .pkr-shell[data-phase="onboarding"][data-onboarding-state="init"]
+    mps-pkr-file-explorer
+{
+    display: none;
+}
+
+/* Onboarding page fills its right-side pkr-shell-pages track and centres
+   the mascot. Right pane content is hidden in init — only the mascot
+   is rendered here, sized larger than the picker's brand-mascot. */
+mps-picker-shell .pkr-shell-page-onboarding
+{
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    width: 100%;
+    position: relative;
+}
+
+/* The onboarding mascot lives on <body> as an app-level singleton
+   (mps-mascot-app.js) — sized via #app-mascot in mps-mascot.css. Picker
+   no longer scopes the mascot; kept this section as a comment marker
+   so a future reader searching for "pkr-onboarding-mascot" finds the
+   answer. */

@@ -1,0 +1,54 @@
+@top Script { line* }
+
+@skip { }
+
+@external tokens lineTokens from "./mangaplay-tokens.js" {
+  PageHeadingTok,
+  PanelHeadingTok,
+  CharacterCueTok,
+  ActionTok,
+  SFXTok,
+  TitleCardTok,
+  SceneHeadingTok,
+  TransitionTok,
+  NoteTok,
+  BoneyardTok,
+  CenteredTok,
+  LyricTok,
+  PageBreakTok,
+  TitlePageEntryTok,
+  CommentTok,
+  DialogueTok,
+  ParentheticalTok,
+  ForcedActionTok,
+  blank
+}
+
+line {
+  PageHeading | PanelHeading | CharacterCue | Action |
+  SFX | TitleCard | SceneHeading | Transition |
+  Note | Boneyard | Centered | Lyric | PageBreak |
+  TitlePageEntry | Comment | Dialogue | Parenthetical |
+  BlankLine
+}
+
+PageHeading { PageHeadingTok }
+PanelHeading { PanelHeadingTok }
+CharacterCue { CharacterCueTok }
+Action { ActionTok | ForcedActionTok }
+SFX { SFXTok }
+TitleCard { TitleCardTok }
+SceneHeading { SceneHeadingTok }
+Transition { TransitionTok }
+Note { NoteTok }
+Boneyard { BoneyardTok }
+Centered { CenteredTok }
+Lyric { LyricTok }
+PageBreak { PageBreakTok }
+TitlePageEntry { TitlePageEntryTok }
+Comment { CommentTok }
+Dialogue { DialogueTok }
+Parenthetical { ParentheticalTok }
+BlankLine { blank }
+
+@detectDelim

@@ -1,0 +1,67 @@
+/*
+ * mps-splash.css — styles for <mps-splash>.
+ *
+ * The component adopts the inline `#boot-screen` DOM on customElements.define,
+ * so these rules cover BOTH the inline shell (pre-upgrade) and the upgraded
+ * component. All rules are scoped to `mps-splash` OR `#boot-screen` so the
+ * inline pre-JS paint keeps its rules until the tag adopts them.
+ *
+ * Design tokens live in src/app.css (:root and mode overrides).
+ *
+ * NOTE: the inline `<style>` block in src/index.html paints the pre-JS boot
+ * screen. This file styles the upgraded <mps-splash> tag. They intentionally
+ * mirror each other so the hand-off is pixel-identical.
+ */
+
+mps-splash
+{
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    background: var(--mps-splash-bg);
+    color: #e0e0e0;
+    z-index: 9999;
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    transition: opacity 250ms ease-out;
+}
+
+mps-splash[hidden]
+{
+    display: none;
+}
+
+mps-splash .mps-splash-mascot
+{
+    width: var(--mps-splash-mascot-size);
+    height: auto;
+    user-select: none;
+    -webkit-user-drag: none;
+}
+
+mps-splash .mps-splash-progress
+{
+    width: var(--mps-splash-progress-width);
+    height: var(--mps-splash-progress-height);
+    background: #2a2a2a;
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+mps-splash .mps-splash-progress-fill
+{
+    width: 0%;
+    height: 100%;
+    background: var(--mps-splash-progress-color);
+    transition: width .28s ease-out;
+}
+
+mps-splash .mps-splash-caption
+{
+    min-height: 1em;
+    letter-spacing: .02em;
+    color: #a0a0a0;
+}

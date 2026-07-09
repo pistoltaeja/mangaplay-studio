@@ -1,0 +1,239 @@
+/* === Outline subview ===
+ *
+ * Outline rows mirror .folder-list-row visually but the text is bold and there
+ * is no badge. Clicking a row dispatches to jumpToScene() which scrolls the
+ * active editor (Text/Source) or pages the canvas (Visual).
+ */
+#subview-outline
+{
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+}
+#subview-outline .outline-list
+{
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding-top: 8px;
+}
+#subview-outline .outline-disabled
+{
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    text-align: center;
+}
+/* Outline rows mirror .folder-list-row dimensions and font (12px) but the
+ * label is BOLD per the Outline spec. Margin, padding, height, hover, and
+ * aria-current selection all match the explorer so the two surfaces feel
+ * like one component family. */
+#subview-outline .outline-row
+{
+    position: relative;
+    margin: 2px 8px;
+    height: 28px;
+    padding: 0 8px 0 10px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--row-text);
+    background: var(--row-bg);
+    border-radius: 6px;
+    cursor: pointer;
+    user-select: none;
+    overflow: hidden;
+}
+#subview-outline .outline-row:hover                       { background: var(--btn-hover-bg); }
+#subview-outline .outline-row[aria-current="true"]        { background: var(--btn-hover-bg); }
+#subview-outline .outline-row-name
+{
+    flex: 1 1 0;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--row-text);
+}
+#subview-outline .outline-placeholder
+{
+    margin: 0;
+    color: var(--mps-text-secondary, #666);
+    font-size: 13px;
+    opacity: 0.8;
+}
+
+/* === Statistics subview ===
+ *
+ * Rows mirror .folder-list-row dimensions/font (28px tall, 12px font,
+ * 8px horizontal margin, 6px corner radius). Character names sit on the
+ * left, lines+words counts on the right. The runtime block above the
+ * divider is the only section that uses a larger display font.
+ */
+#subview-statistics
+{
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+}
+#subview-statistics .statistics-content
+{
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 14px 0 18px 0;
+}
+#subview-statistics .statistics-disabled
+{
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    text-align: center;
+}
+#subview-statistics .statistics-section
+{
+    margin: 0 8px 8px 8px;
+}
+#subview-statistics .statistics-label
+{
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--mps-text-secondary, #666);
+    margin: 4px 6px 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+#subview-statistics .statistics-runtime
+{
+    font-size: 24px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--row-text);
+    margin: 0 6px 6px;
+}
+#subview-statistics .statistics-divider
+{
+    border: 0;
+    border-top: 1px solid var(--rule, rgba(0, 0, 0, 0.08));
+    margin: 8px 8px 12px;
+}
+#subview-statistics .statistics-character-list
+{
+    display: flex;
+    flex-direction: column;
+}
+#subview-statistics .statistics-character-row
+{
+    position: relative;
+    margin: 2px 0;
+    height: 28px;
+    padding: 0 8px 0 10px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--row-text);
+    background: var(--row-bg);
+    border-radius: 6px;
+    overflow: hidden;
+}
+#subview-statistics .statistics-character-row:hover
+{
+    background: var(--btn-hover-bg);
+}
+#subview-statistics .statistics-character-name
+{
+    font-weight: 400;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--row-text);
+    flex: 1 1 0;
+    min-width: 0;
+}
+#subview-statistics .statistics-character-counts
+{
+    font-size: 11px;
+    color: var(--row-badge);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    flex: 0 0 auto;
+}
+#subview-statistics .statistics-placeholder
+{
+    margin: 0;
+    color: var(--mps-text-secondary, #666);
+    font-size: 13px;
+    opacity: 0.8;
+}
+#subview-statistics .statistics-text-file
+{
+    display: flex;
+    flex-direction: column;
+}
+#subview-statistics .statistics-text-row
+{
+    position: relative;
+    margin: 2px 0;
+    height: 28px;
+    padding: 0 8px 0 10px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--row-text);
+    background: var(--row-bg);
+    border-radius: 6px;
+    overflow: hidden;
+}
+#subview-statistics .statistics-text-row:hover
+{
+    background: var(--btn-hover-bg);
+}
+#subview-statistics .statistics-text-label
+{
+    font-weight: 400;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--row-text);
+    flex: 1 1 0;
+    min-width: 0;
+}
+#subview-statistics .statistics-text-value
+{
+    font-size: 11px;
+    color: var(--row-badge);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    flex: 0 0 auto;
+}
+html[data-skin="night"] #subview-statistics .statistics-text-row:nth-child(odd)
+{
+    background: rgba(255, 255, 255, 0.04);
+}
+
+html[data-skin="night"] #subview-outline .outline-row
+{
+    color: var(--mps-text-primary, #f0f0f0);
+}
+html[data-skin="night"] #subview-statistics .statistics-character-row:nth-child(odd)
+{
+    background: rgba(255, 255, 255, 0.04);
+}

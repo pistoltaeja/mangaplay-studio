@@ -1,0 +1,149 @@
+/* ────────────────────────────────────────────────────────────────────────
+   <mps-pkr-file-explorer> — extracted from app-picker.css.
+   Component root replaces the old <aside class="pkr-left">. All selectors
+   scoped off the tag so the component can move between picker phases
+   without losing its styling.
+   ──────────────────────────────────────────────────────────────────────── */
+
+mps-pkr-file-explorer
+{
+    display: block;
+    background: #1a1a20;
+    border-right: 1px solid #2a2a32;
+    padding: 32px 20px 20px;
+    overflow-y: auto;
+    -webkit-app-region: no-drag;
+}
+
+mps-pkr-file-explorer .pkr-left-header
+{
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #888;
+    margin-bottom: 14px;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+mps-pkr-file-explorer .pkr-empty
+{
+    color: #777;
+    font-size: 13px;
+    padding: 8px;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+mps-pkr-file-explorer .pkr-recent-list
+{
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+mps-pkr-file-explorer .pkr-item
+{
+    position: relative;
+    border-radius: 6px;
+    transition: background 120ms ease;
+    -webkit-app-region: no-drag;
+}
+
+mps-pkr-file-explorer .pkr-item:hover
+{
+    background: #23232b;
+}
+
+mps-pkr-file-explorer .pkr-item-main
+{
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: 0;
+    padding: 10px 36px 10px 12px;
+    color: inherit;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 14px;
+}
+
+mps-pkr-file-explorer .pkr-item-main:active
+{
+    background: transparent;
+}
+
+mps-pkr-file-explorer .pkr-item:hover .pkr-item-main:active
+{
+    background: #23232b;
+}
+
+mps-pkr-file-explorer .pkr-item-name
+{
+    font-weight: 500;
+    color: #fff;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+mps-pkr-file-explorer .pkr-item-path
+{
+    margin-top: 2px;
+    color: #888;
+    font-size: 11px;
+    word-break: break-all;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+mps-pkr-file-explorer .pkr-item.is-missing .pkr-item-name,
+mps-pkr-file-explorer .pkr-item.is-missing .pkr-item-path
+{
+    opacity: 0.5;
+}
+
+mps-pkr-file-explorer .pkr-item-missing
+{
+    margin-top: 4px;
+    font-size: 11px;
+    color: #c46a6a;
+    font-weight: 600;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+mps-pkr-file-explorer .pkr-handle
+{
+    position: absolute;
+    top: 6px;
+    right: 4px;
+    width: 24px;
+    height: 24px;
+    border: 0;
+    background: transparent;
+    color: #aaa;
+    cursor: pointer;
+    border-radius: 4px;
+    opacity: 0;
+    transition: opacity 100ms ease, background 100ms ease;
+    font-size: 16px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+mps-pkr-file-explorer .pkr-item:hover .pkr-handle
+{
+    opacity: 1;
+}
+
+mps-pkr-file-explorer .pkr-handle:hover
+{
+    background: #2c2c36;
+}
+
+mps-pkr-file-explorer .pkr-handle:active
+{
+    background: #2c2c36;
+}

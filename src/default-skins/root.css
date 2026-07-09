@@ -1,0 +1,60 @@
+/* root.css — skin-independent :root tokens.
+ *
+ * Loaded as a static <link> in index.html BEFORE the active-skin link so
+ * pre-boot paint has fonts + layout tokens even if the skin file is slow
+ * to fetch. Palette tokens (--grey-light, --panel-bg, --mps-primary etc.)
+ * do NOT live here — they belong to individual skins under
+ * default-skins/<id>/<id>.css and gate off :root[data-skin="<id>"].
+ *
+ * font-loader.js overrides --mps-font-app and --mps-font-code at runtime
+ * per locale. The Latin-baseline defaults below render correctly before
+ * any shard loads, because the system fallbacks (-apple-system / Segoe
+ * UI / etc.) are guaranteed to resolve. Inter + Source Code Pro
+ * @font-face declarations live in css/fonts-base.css (loaded by
+ * font-loader.js on boot); Courier Prime lives in css/fonts-screenplay.css
+ * (static <link> in index.html).
+ * --mps-font-app-stable is the locale-immune Latin baseline; font-loader.js never rewrites it.
+ * --mps-font-mono is a static alias of --mps-font-code — never written by JS,
+ * so anything still reading the old name resolves through the alias. */
+:root {
+    --mps-font-app:  "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --mps-font-app-stable: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --mps-font-code: "Source Code Pro", ui-monospace, "Cascadia Mono", Consolas, monospace;
+    --mps-font-mono: var(--mps-font-code);
+    --mps-font-screenplay-body: "Courier Prime", "Courier New", Courier, monospace;
+
+    /* <mps-splash> design tokens. Single source of truth for the loading
+     * surface — native splash, inline boot shell, and the upgraded web
+     * component all target these values so the mascot bounding box +
+     * progress bar stay stable across the boot -> account-restore ->
+     * project-open hand-off. Mode overrides below.
+     * NOTE: --mps-splash-bg is intentionally NOT declared here — it moved
+     * into each skin's CSS so Night users get a matching splash background.
+     * The build-time MPS_SPLASH_BG marker still resolves to the Default
+     * skin's value via copy-assets.js (see decide-splash-bg-ownership). */
+    --mps-splash-mascot-size: 320px;
+    --mps-splash-progress-color: #d1a24a;
+    --mps-splash-progress-width: 260px;
+    --mps-splash-progress-height: 3px;
+}
+
+:root[data-ux-mode="mobile"],
+:root[data-ux-mode="tablet"] {
+    --mps-splash-mascot-size: 400px;
+    --mps-splash-progress-width: 320px;
+    --mps-splash-progress-height: 4px;
+}
+
+/* Shell CSS-var defaults.
+ * Read by selectors in app.css before applyMetaBeforeFirstPaint sets them
+ * from persisted meta. Match the constants in shell-restore.js so first
+ * paint + saved-state restore agree. */
+:root {
+    --left-pane-width: 240px;
+    --storyboard-width: 600px;
+    /* Width of the in-flow #window-controls block. macOS-style traffic-light
+     * pips: 16px L padding + 22px + 8px gap + 22px + 8px gap + 22px + 16px R
+     * padding = 114px. Used by rules that need to dock content just-left of
+     * the window controls — see .top-bar-action-c on storyboard-collapse. */
+    --tauri-frame-controls-width: 114px;
+}

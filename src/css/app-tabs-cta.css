@@ -1,0 +1,307 @@
+/* === Empty state overlay === */
+#empty-state
+{
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--panel-bg);
+    z-index: 10;
+    cursor: pointer;
+    user-select: none;
+}
+
+#empty-state[hidden]
+{
+    display: none;
+}
+
+.empty-state-content
+{
+    text-align: center;
+    padding: 24px;
+}
+
+.empty-state-title
+{
+    font-size: 18px;
+    color: var(--focus-ring);
+    margin: 0 0 8px 0;
+}
+
+.empty-state-hint
+{
+    font-size: 13px;
+    color: #666;
+    margin: 0;
+}
+
+/* === Empty-tab CTA panel === */
+
+/* Shown by empty-tab-cta.js when the active slot is path-null (the
+ * "Create New file" placeholder tab). Sits on top of the empty CodeMirror
+ * in the slot container. Pointer-events are enabled only while visible so
+ * clicks pass through to the editor when a real file is active. */
+.empty-tab-cta
+{
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #ffffff;
+    pointer-events: auto;
+}
+
+.empty-tab-cta[hidden]
+{
+    display: none;
+}
+
+.empty-tab-cta-list
+{
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 18px;
+}
+
+.empty-tab-cta-link
+{
+    background: transparent;
+    border: 0;
+    padding: 4px 10px;
+    font-family: var(--mps-font-app);
+    font-size: 15px;
+    font-weight: 400;
+    color: var(--mps-primary, #5b3edd);
+    cursor: pointer;
+    line-height: 1.2;
+    border-radius: 4px;
+    transition: background-color 90ms ease;
+}
+
+.empty-tab-cta-link:hover
+{
+    background: var(--btn-hover-bg, #e8eaee);
+}
+
+/* === Right-pane empty-state overlays =================================
+ * Two overlays inside .right-pane-slider, both [hidden] by default:
+ *   #right-pane-no-doc          — no document open (CTA tab active)
+ *   #right-pane-no-screenplay   — document open but no parseable content
+ * App.js toggles them in sync with onSlotActivated / onMpsChangeFromSlot.
+ * Both cover the storyboard + screenplay views edge-to-edge so the
+ * underlying canvas / screenplay panes are hidden behind the message.
+ * Font matches the .empty-tab-cta-link size (15px) by user request. */
+.right-pane-empty-overlay
+{
+    position: absolute;
+    inset: 0;
+    /* z:6 sits above .quick-toggle-strip (z:5) so the strip is covered
+     * when no document is open. The overlay is mounted as a sibling of
+     * .right-pane-slider inside .right-pane-stack so its height does not
+     * depend on whether storyboard or screenplay is active — the centred
+     * message stays put when the user switches views. */
+    z-index: 6;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    text-align: center;
+    background: #ffffff;
+    color: #8a8a8a;
+    font-family: var(--mps-font-app);
+    font-size: 15px;
+    font-weight: 400;
+    line-height: 1.4;
+    pointer-events: auto;
+}
+
+.right-pane-empty-overlay[hidden]
+{
+    display: none;
+}
+
+/* When no document is open, dim + inert the floating paint widget's
+ * tool buttons so the user can see the empty-state message without the
+ * drawing tools tempting them. The widget itself stays mounted so
+ * showing/hiding doesn't relayout the canvas. */
+#app-chrome[data-no-doc] mps-paint-widget .pw-tool,
+#app-chrome[data-no-doc] mps-paint-widget .pw-action,
+#app-chrome[data-no-doc] mps-paint-widget .pw-color-palette-btn,
+#app-chrome[data-no-doc] mps-paint-widget .pw-shape-trigger,
+#app-chrome[data-no-doc] mps-paint-widget .pw-brush-size-action,
+#app-chrome[data-no-doc] mps-paint-widget .pw-download-btn
+{
+    opacity: 0.35;
+    pointer-events: none;
+    cursor: default;
+}
+
+/* === CodeMirror lint tooltip — match the visual editor diagnostic surface ===
+ * The CM6 lint extension paints a floating popup when the user hovers a
+ * squiggled range. Default styles are heavy (white box, system font,
+ * coloured 5px left stripe). Re-skin to match the visual-diagnostics
+ * banner: app font, 12px, light grey text, soft rounded card, [Change]
+ * action button on the LEFT (easier to reach), source tag wraps to a
+ * second row at the bottom (Mangaplay / Fountain / Superscript).
+ *
+ * DOM (from @codemirror/lint, baseTheme):
+ *   <ul class="cm-tooltip-lint">
+ *     <li class="cm-diagnostic cm-diagnostic-{severity}">
+ *       <span class="cm-diagnosticText">Message text…</span>
+ *       <button class="cm-diagnosticAction">Change</button>     [optional]
+ *       <div class="cm-diagnosticSource">mangaplay</div>          [optional]
+ *     </li>
+ *   </ul>
+ */
+.cm-tooltip.cm-tooltip-lint
+{
+    padding: 4px;
+}
+
+/* Suppress the built-in @codemirror/lint hover tooltip — we render our own
+ * via combined-linter.js's offsetLintHover so we can pass a TooltipView
+ * `offset.y` to lift the popup clear of the squiggled line. Our UL carries
+ * the extra `cm-tooltip-lint-offset` marker class. */
+.cm-tooltip-lint:not(.cm-tooltip-lint-offset)
+{
+    display: none;
+}
+
+/* The tooltip animates upward from under the cursor; without this, the
+ * cursor briefly hits the moving box and flickers to the I-beam / arrow.
+ * Re-enable pointer events on the [Change] button so it stays clickable. */
+.cm-tooltip-lint.cm-tooltip-lint-offset
+{
+    pointer-events: none;
+}
+.cm-tooltip-lint.cm-tooltip-lint-offset .cm-diagnosticAction
+{
+    pointer-events: auto;
+}
+
+.cm-tooltip-lint .cm-diagnostic
+{
+    /* Flex row so order: can swap action ↔ text. flex-wrap lets the
+     * source tag drop to a second row when present.
+     *
+     * Left padding is 0 so the [Change] button sits flush against the
+     * row's left edge — when the lint panel highlights a selected row
+     * via [aria-selected], the highlight starts AT the button's left
+     * edge rather than bleeding into a row-padding gap, so the button's
+     * apparent x-position is identical in selected vs unselected rows.
+     * The first visible child still gets visual breathing room from the
+     * row's left edge via the per-child rules below (so rows with no
+     * action button don't have text glued to the edge). */
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 8px 5px 0;
+    border-radius: 6px;
+    border-left: 3px solid transparent;
+    font-family: var(--mps-font-app);
+    font-size: 12px;
+    line-height: 1.35;
+    color: var(--mps-text-secondary, #6c6c70);
+    white-space: pre-wrap;
+}
+
+/* Override CM6's lint-panel selection highlight. The default uses the
+ * system `Highlight` colour with `HighlightText` (blue/green + white on
+ * Windows), which clashes with the rest of the popup chrome. Replace
+ * with the same neutral grey that the rest of the app uses for hover /
+ * selection states. Now combined with the row's `padding-left: 0` above,
+ * the [Change] button stays at the same x in selected and unselected
+ * rows — no visual indent shift. */
+.cm-panel-lint ul:focus [aria-selected],
+.cm-tooltip-lint [aria-selected]
+{
+    background-color: var(--btn-hover-bg, #e8eaee) !important;
+    color: inherit !important;
+}
+html[data-skin="night"] .cm-panel-lint ul:focus [aria-selected],
+html[data-skin="night"] .cm-tooltip-lint [aria-selected]
+{
+    background-color: #3a3a3a !important;
+}
+
+/* Severity stripe — slimmer than CM6 default (5px → 3px). Colour swatches
+ * mirror the visual surface (red / orange / muted grey). */
+.cm-tooltip-lint .cm-diagnostic-error   { border-left-color: var(--accent-red, #d33); }
+.cm-tooltip-lint .cm-diagnostic-warning { border-left-color: orange; }
+.cm-tooltip-lint .cm-diagnostic-info,
+.cm-tooltip-lint .cm-diagnostic-hint    { border-left-color: #8BC34A; }
+
+.cm-tooltip-lint .cm-diagnosticText
+{
+    order: 2;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* [Change] (and any other quick-fix) button — moved to the LEFT of the
+ * message so it sits flush with the diagnostic's stripe and is easier to
+ * click. Override the CM6 default `margin-left: 8px` with a slim 2px
+ * inset so the button doesn't sit right against the row's 3px severity
+ * stripe — small visual breathing room without re-introducing the
+ * highlight-bleed reported in the previous round. */
+.cm-tooltip-lint .cm-diagnosticAction
+{
+    order: 1;
+    margin-left: 4px;
+    padding: 2px 8px;
+    font: inherit;
+    font-size: 11px;
+    line-height: 1.2;
+    border: 0;
+    border-radius: 4px;
+    background: #8BC34A;
+    color: #ffffff;
+    cursor: pointer;
+    transition: background-color 90ms ease;
+}
+.cm-tooltip-lint .cm-diagnosticAction:hover
+{
+    background: #7CB342;
+}
+
+/* Source tag (mangaplay / fountain / superscript). `flex-basis: 100%`
+ * forces it to wrap onto its own line BELOW the message + button row. */
+.cm-tooltip-lint .cm-diagnosticSource
+{
+    order: 3;
+    flex: 0 0 100%;
+    font-size: 10px;
+    font-weight: 500;
+    text-transform: capitalize;
+    letter-spacing: 0.02em;
+    color: var(--mps-text-secondary, #8a8a8a);
+    opacity: 0.75;
+    margin-top: 2px;
+}
+
+/* Dark-theme override for the tooltip card backplate so the light-grey
+ * text reads against the dark panel surface. */
+html[data-skin="night"] .cm-tooltip.cm-tooltip-lint
+{
+    background: #2a2a2a;
+    border-color: rgba(255, 255, 255, 0.08);
+}
+html[data-skin="night"] .cm-tooltip-lint .cm-diagnostic
+{
+    color: var(--mps-text-secondary, #b0b0b6);
+}
+html[data-skin="night"] .cm-tooltip-lint .cm-diagnosticAction
+{
+    background: #AED581;
+    color: #1a1a1a;
+}
+html[data-skin="night"] .cm-tooltip-lint .cm-diagnosticAction:hover
+{
+    background: #9CCC65;
+}

@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="./img/icon-64-transparent.png" type="image/png">
     <title>Mangaplay Studio</title>
     <!-- Screenplay-role font (Courier Prime). Static <link> so font-prefs.js
          applyScreenplayFont() finds the @font-face declared at boot, before
@@ -19,41 +20,66 @@
     <link rel="stylesheet" href="./css/website/canvas.css">
     <link rel="stylesheet" href="./css/website/screenplay.css">
     <link rel="stylesheet" href="./css/website/mps-color-wheel.css">
+    <!-- Skin-independent tokens (fonts, layout, splash chrome) — loaded
+         BEFORE the active-skin link so pre-boot paint has them even if
+         the skin file is slow to fetch. -->
+    <link rel="stylesheet" href="./default-skins/root.css">
+    <!-- Active skin palette. Swapped at runtime by boot/skins.js →
+         applySkin(). The inline stamper further down rewrites this
+         href pre-paint from window.__MPS_LAST_SKIN__ so Night users
+         never see a Default flicker. -->
+    <link id="active-skin" rel="stylesheet" href="./default-skins/default/default.css">
     <!-- Desktop chrome — overrides where it diverges from website. -->
-    <link id="active-theme" rel="stylesheet" href="./light-theme.css">
     <link rel="stylesheet" href="./app.css">
     <link rel="stylesheet" href="./css/app-modals.css">
     <link rel="stylesheet" href="./css/app-topbar.css">
     <link rel="stylesheet" href="./css/app-picker.css">
     <link rel="stylesheet" href="./css/app-tabs-cta.css">
     <link rel="stylesheet" href="./css/app-subviews.css">
+    <link rel="stylesheet" href="./css/mps-splash.css">
+    <link rel="stylesheet" href="./css/mps-mascot.css">
+    <link rel="stylesheet" href="./css/mps-dialogue.css">
+    <link rel="stylesheet" href="./css/mps-card-tray.css">
+    <link rel="stylesheet" href="./css/mps-pkr-file-explorer.css">
     <!-- Phase-2 spike: visual editor component styles. Safe to load always —
          all rules are namespaced under `mps-visual-editor`. -->
     <link rel="stylesheet" href="./css/visual-editor.css">
     <!-- Inline pre-paint boot screen. Paints with the HTML parse — no FOUC,
-         no fetch gate. Replaces the dead #loading-screen / #start-screen
-         markup. The picker shell is created at runtime by app.js only when
+         no fetch gate. Background is #1a1a1a — matches the splash.png
+         background exactly so the splash → shell handoff is a no-flash
+         crossfade.
+         The picker shell is created at runtime by app.js only when
          standalone mode is active (mobile / tablet skip it entirely). -->
     <style>
+        /* /*MPS_SPLASH_BG*/#XXXXXX markers below are auto-substituted at build   */
+        /* time by scripts/copy-assets.js from icons/brand-colors.json — do NOT  */
+        /* edit the hex values by hand; edit brand-colors.json and rebuild.      */
+        /* Default html/body bg — held through boot, loading, opening, and
+           the 300ms chrome fade-in. Workspace bg (var(--grey-light) in
+           the active skin CSS) only applies once app.js sets
+           data-chrome-visible="true" AFTER chrome finishes fading in,
+           so the light bg never leaks through the fade. */
+        html, body { background: /*MPS_SPLASH_BG*/#1a1a1a; transition: background-color 300ms cubic-bezier(0.4, 0, 0.2, 1); }
         #boot-screen { position: fixed; inset: 0; display: flex; flex-direction: column;
-                       align-items: center; justify-content: center; gap: 16px;
-                       background: #0d0d0d; color: #e0e0e0; z-index: 9999;
+                       align-items: center; justify-content: center; gap: 20px;
+                       background: /*MPS_SPLASH_BG*/#1a1a1a; color: #e0e0e0; z-index: 9999;
                        font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
-        #boot-screen .boot-logo { width: 64px; height: 64px; }
-        :root[data-ux-mode="mobile"] #boot-screen .boot-logo,
-        :root[data-ux-mode="tablet"] #boot-screen .boot-logo { width: 96px; height: 96px; }
-        #boot-progress { width: 220px; height: 2px; background: #2a2a2a; border-radius: 1px; overflow: hidden; }
-        :root[data-ux-mode="mobile"] #boot-progress,
-        :root[data-ux-mode="tablet"] #boot-progress { width: 280px; height: 3px; }
-        #boot-progress-fill { width: 0%; height: 100%; background: #4a9eff; transition: width .2s; }
-        #boot-caption { opacity: .7; min-height: 1em; }
+        @keyframes bootFadeIn { to { opacity: 1; } }
+        #boot-caption { opacity: 0; min-height: 1em; letter-spacing: .02em; animation: bootFadeIn .18s ease-out .18s forwards; color: #a0a0a0; }
     </style>
     <script>
         // Inline. Runs before any module evaluates. window.__MPS_UX_MODE__ is
         // set earlier by Tauri's WebviewWindowBuilder::initialization_script
-        // (see src-tauri/src/lib.rs). Reviewed item #10: guard against the
-        // constant being undefined (initialization_script ordering is not
-        // Tauri-guaranteed on all platforms).
+        // (see src-tauri/src/setup/window.rs). Guarded against undefined
+        // (initialization_script ordering is not Tauri-guaranteed on all
+        // platforms).
+        //
+        // BYTE-DRIVEN PROGRESS BAR — the earlier 8-stage bar advanced in
+        // discrete jumps that stalled during the top-level app.js parse
+        // (biggest single hang in cold boot). The new bar reserves 0-70%
+        // for the app.js download + parse (driven off the app-loaded event
+        // if we can measure bytes, else a smooth ease that hits ~65% right
+        // before app.js finishes parsing) and 70-100% for hydration.
         (function () {
             var mode = window.__MPS_UX_MODE__;
             if (typeof mode !== "string") {
@@ -61,11 +87,119 @@
                 mode = "standalone";
             }
             document.documentElement.setAttribute("data-ux-mode", mode);
+            console.log("[boot:inline] Boot script executing. UX mode:", mode);
 
-            // Review item #2: 15s watchdog + window.onerror handler. If
-            // app.js throws during top-level parse, nothing fires done()
-            // and the user sees "Loading…" forever without this. Repurposes
-            // the existing #error-overlay markup at the bottom of <body>.
+            // Skin injection. Rust reads `skin` from user-settings.json
+            // and injects `window.__MPS_LAST_SKIN__` via
+            // WebviewWindowBuilder::initialization_script BEFORE this IIFE
+            // parses. Stamp `<html data-skin>`, rewrite <link id="active-skin">
+            // href, and update the boot-splash <img> src+srcset — all
+            // pre-paint — so Night users never see a Default splash flicker.
+            // Defaults to "default" if the global is missing (jsdom tests,
+            // pre-Rust-inject platforms).
+            var lastSkin = window.__MPS_LAST_SKIN__;
+            if (typeof lastSkin !== "string" || lastSkin.length === 0)
+            {
+                lastSkin = "default";
+            }
+            var SKIN_ASSETS = {
+                "default": {
+                    css: "./default-skins/default/default.css",
+                    splash1x: "./default-skins/default/splash-default.png",
+                    splash2x: "./default-skins/default/splash-default@2x.png"
+                },
+                "night": {
+                    css: "./default-skins/night/night.css",
+                    splash1x: "./default-skins/night/splash-night.png",
+                    splash2x: "./default-skins/night/splash-night@2x.png"
+                }
+            };
+            var skinAssets = SKIN_ASSETS[lastSkin] || SKIN_ASSETS["default"];
+            document.documentElement.setAttribute("data-skin", lastSkin);
+            if (lastSkin === "default") document.documentElement.classList.add("skin-default");
+            try
+            {
+                var skinLink = document.getElementById("active-skin");
+                if (skinLink && skinLink.getAttribute("href") !== skinAssets.css)
+                {
+                    skinLink.setAttribute("href", skinAssets.css);
+                }
+                var bootImg = document.querySelector("#boot-screen .boot-splash");
+                if (bootImg)
+                {
+                    bootImg.setAttribute("src", skinAssets.splash1x);
+                    bootImg.setAttribute("srcset", skinAssets.splash1x + " 1x, " + skinAssets.splash2x + " 2x");
+                }
+            }
+            catch (_) {}
+
+            // Debug-only: MPS_HIDE_HTML_BOOT_SCREEN=1 (injected by Rust as
+            // window.__MPS_HIDE_HTML_BOOT_SCREEN). Hides #boot-screen so the
+            // raw WebView bg is visible. If the resulting frame is white,
+            // the WebView background_color() didn't apply at first paint.
+            // If it stays dark, the boot-screen isn't the source of the
+            // observed white flash. A small orange corner overlay is
+            // dropped in so the flag being active is unambiguous.
+            if (window.__MPS_HIDE_HTML_BOOT_SCREEN)
+            {
+                console.warn("[boot:inline] MPS_HIDE_HTML_BOOT_SCREEN=1 — hiding #boot-screen; showing WebView bg only");
+                var hideBootScreen = function ()
+                {
+                    var el = document.getElementById("boot-screen");
+                    if (el) el.style.display = "none";
+                    if (!document.getElementById("__mps_hide_boot_marker"))
+                    {
+                        var marker = document.createElement("div");
+                        marker.id = "__mps_hide_boot_marker";
+                        marker.textContent = "[HIDDEN #boot-screen]";
+                        marker.style.cssText = "position:fixed;top:6px;right:6px;z-index:100000;background:#ff8800;color:#000;font:11px/1.2 system-ui,sans-serif;padding:3px 6px;border-radius:3px;pointer-events:none;";
+                        (document.body || document.documentElement).appendChild(marker);
+                    }
+                };
+                if (document.readyState === "loading")
+                {
+                    document.addEventListener("DOMContentLoaded", hideBootScreen, { once: true });
+                }
+                else
+                {
+                    hideBootScreen();
+                }
+            }
+
+            // Boot strings — pre-extracted per-locale from the mangaplay-studio.boot
+            // block by scripts/extract-boot-strings.js and injected via
+            // WebviewWindowBuilder::initialization_script (see setup/boot_strings.rs).
+            // Lets the loading shell paint localised captions BEFORE app.js
+            // parses. Falls back to English defaults if unavailable.
+            var bootStrings = (window.__MPS_BOOT_STRINGS__ && typeof window.__MPS_BOOT_STRINGS__ === "object") ? window.__MPS_BOOT_STRINGS__ : {};
+            console.log("[boot:inline] Boot strings:", Object.keys(bootStrings).length, "keys. Tauri internals:", !!(window.__TAURI_INTERNALS__ || (window.__TAURI__ && window.__TAURI__.core)));
+            function bootStr(path, fallback) {
+                var parts = path.split(".");
+                var node = bootStrings;
+                for (var i = 0; i < parts.length; i++) {
+                    if (node == null || typeof node !== "object") return fallback;
+                    node = node[parts[i]];
+                }
+                return (typeof node === "string" && node.length > 0) ? node : fallback;
+            }
+            // Localise the initial caption immediately.
+            try {
+                var initialCap = document.getElementById("boot-caption");
+                if (initialCap) initialCap.textContent = bootStr("state.loading", "Loading…");
+            } catch (_) {}
+
+            // First-paint marker — read by tests/driver/benchmark-boot-timeline.js.
+            // Also used to fire shell_ready to Rust so it can show the main window.
+            try {
+                var earlyBench = window.__mpsBenchmark || {};
+                earlyBench.firstPaintAt = performance.now();
+                window.__mpsBenchmark = earlyBench;
+            } catch (_) {}
+
+            // Watchdog + window.onerror handler. If app.js throws during
+            // top-level parse, nothing fires done() and the user sees the
+            // boot screen forever without this. Reason string is localised
+            // via the pre-injected boot dict.
             function showRetry(reason) {
                 var overlay = document.getElementById("error-overlay");
                 if (overlay) {
@@ -76,48 +210,165 @@
                     overlay.hidden = false;
                 }
                 var boot = document.getElementById("boot-screen");
-                if (boot) boot.style.opacity = "0.3";
+                if (boot) boot.style.display = "none";
             }
             window.addEventListener("error", function (e) {
                 try { showRetry((e && e.message) || ""); } catch (_) {}
             });
             var watchdogTimer = setTimeout(function () {
-                showRetry("Took longer than expected.");
+                showRetry(bootStr("state.error", "Took longer than expected."));
             }, 15000);
 
-            window.__mpsBoot = {
+            // ── Progress bar mechanic ────────────────────────────────────
+            // Progress is 0..1. UI multiplies to 0..100%. Stage labels
+            // fold into three human phases:
+            //   preparing (0-15%)  — pre-app.js first paint through parse start
+            //   loading   (15-70%) — app.js parsing + settings + user-data
+            //   opening   (70-100%) — auth rehydrate + project mount
+            // Stages that were previously separate bar ticks (iapInit,
+            // analyticsInit, accountInit) no longer advance the bar —
+            // they run fire-and-forget post-PROJECT.
+            var progress = 0;
+            function setPct(p) {
+                if (p < progress) return;  // never move backwards
+                progress = Math.min(1, p);
+                var fill = document.getElementById("boot-progress-fill");
+                if (fill) fill.style.width = (progress * 100).toFixed(1) + "%";
+            }
+            var STAGE_PROGRESS = {
+                paint:         0.05,
+                bundle:        0.30,
+                settings:      0.45,
+                userData:      0.55,
+                iapInit:       0.55, // no bar movement — placeholder
+                analyticsInit: 0.55,
+                accountInit:   0.55,
+                project:       0.85,
+                opening:       0.85
+            };
+            // window.__mpsSplash — queueing shim declared BEFORE app.js
+            // parses. Pre-parse callers (boot-placeholders.js) mutate the
+            // inline #boot-screen DOM directly through this shim; every call
+            // is also pushed into a queue for replay when the <mps-splash>
+            // custom element upgrades in app.js. See:
+            // src/js/components/mps-splash.js — installSplashComponent().
+            var __splashQueue = [];
+            window.__mpsSplash = {
                 mode: mode,
-                stages: ["paint", "bundle", "settings", "iapInit", "analyticsInit", "accountInit", "project"],
+                stages: ["paint", "bundle", "settings", "userData", "iapInit", "analyticsInit", "accountInit", "project"],
                 update: function (stage, msg) {
-                    var fill = document.getElementById("boot-progress-fill");
+                    __splashQueue.push(["update", stage, msg]);
                     var cap = document.getElementById("boot-caption");
-                    var idx = this.stages.indexOf(stage);
-                    if (fill && idx >= 0) {
-                        var pct = ((idx + 1) / this.stages.length) * 100;
-                        fill.style.width = pct + "%";
-                    }
                     if (cap && msg) cap.textContent = msg;
+                    var p = STAGE_PROGRESS[stage];
+                    if (typeof p === "number") setPct(p);
+                },
+                setProgress: function (p) {
+                    __splashQueue.push(["setProgress", p]);
+                    setPct(p);
                 },
                 done: function () {
-                    clearTimeout(watchdogTimer);
-                    var el = document.getElementById("boot-screen");
-                    if (el) {
-                        el.style.transition = "opacity .25s";
-                        el.style.opacity = "0";
-                        setTimeout(function () { try { el.remove(); } catch (_) {} }, 260);
+                    // Idempotent — record the promise the first time so any
+                    // second caller (and the eventual component-level done())
+                    // sees the same resolution timing.
+                    if (window.__mpsSplash.__donePromise) {
+                        return window.__mpsSplash.__donePromise;
                     }
-                }
+                    __splashQueue.push(["done"]);
+                    clearTimeout(watchdogTimer);
+                    setPct(1);
+                    var el = document.getElementById("boot-screen");
+                    var p = new Promise(function (resolve) {
+                        if (el) {
+                            el.style.transition = "opacity .25s";
+                            el.style.opacity = "0";
+                            setTimeout(function () {
+                                try { el.remove(); } catch (_) {}
+                                resolve();
+                            }, 260);
+                        } else {
+                            resolve();
+                        }
+                    });
+                    window.__mpsSplash.__donePromise = p;
+                    return p;
+                },
+                show: function () {
+                    __splashQueue.push(["show"]);
+                    var el = document.getElementById("boot-screen");
+                    if (el) { el.hidden = false; el.style.opacity = "1"; }
+                },
+                __drain: function () { return __splashQueue.splice(0); }
             };
+
+            // Kick the bar into the "preparing" phase immediately so the
+            // user sees animation from the very first frame, not a static
+            // bar until app.js parses.
+            requestAnimationFrame(function () { setPct(0.05); });
+
+            // Fire shell_ready IPC to Rust so it can show() the main
+            // window. Guarded — will retry if Tauri internals aren't
+            // injected yet. No-op outside Tauri (harness / web preview).
+            function getTauriInvoke() {
+                try {
+                    return (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke)
+                        || (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
+                        || null;
+                } catch (_) { return null; }
+            }
+
+            function scheduleComposited() {
+                // Double-RAF: the second callback fires AFTER the browser has committed
+                // the first frame to the compositor. Replaces the old 50ms wall-clock
+                // sleep in Rust — deterministic across hardware.
+                requestAnimationFrame(function () {
+                    requestAnimationFrame(function () {
+                        var invoke = getTauriInvoke();
+                        if (!invoke) return;
+                        try {
+                            invoke("shell_composited").catch(function () { /* older builds don't have this yet */ });
+                            console.log("[boot:inline] shell_composited IPC fired");
+                        } catch (_) {}
+                    });
+                });
+            }
+
+            function fireShellReady() {
+                var invoke = getTauriInvoke();
+                if (!invoke) return false;
+                try {
+                    invoke("shell_ready").catch(function () { /* command may not be registered on older builds */ });
+                    console.log("[boot:inline] shell_ready IPC fired");
+                    scheduleComposited();
+                    return true;
+                } catch (_) { return false; }
+            }
+            // Wait for the first paint frame, then fire. Retry up to ~500ms
+            // if internals aren't ready yet (Tauri injects them very early
+            // but there's no ordering guarantee vs the first inline script).
+            requestAnimationFrame(function () {
+                if (fireShellReady()) return;
+                var tries = 0;
+                var iv = setInterval(function () {
+                    tries++;
+                    if (fireShellReady()) { clearInterval(iv); return; }
+                    if (tries > 25) { clearInterval(iv); console.warn("[boot:inline] shell_ready retries exhausted — Tauri internals never appeared"); }
+                }, 20);
+            });
         })();
     </script>
     <script type="module" src="./app.js"></script>
 </head>
 <body>
     <!-- Pre-paint boot screen. Painted before app.js parses; faded by
-         window.__mpsBoot.done() once the FSM hits PROJECT. -->
+         window.__mpsSplash.done() once the FSM hits PROJECT. Uses the same
+         splash asset that also backs the native OS splash cover. Background
+         matches the splash PNG's own #1a1a1a fill exactly so the crossfade
+         is a no-flash handoff. The <mps-splash> component in app.js
+         upgrades this element in place — no unmount, mascot bounding box
+         stays pixel-stable across the hand-off. -->
+
     <div id="boot-screen">
-        <img class="boot-logo" src="./img/icon-256.png" alt="">
-        <div id="boot-progress"><div id="boot-progress-fill"></div></div>
         <div id="boot-caption">Loading…</div>
     </div>
 
@@ -190,29 +441,32 @@
                  default; window-controls.js unhides it when hasWindowChrome()
                  is true (standalone desktop only). -->
             <div id="window-controls" class="window-controls" hidden>
-                <button id="win-minimize" class="win-ctrl" type="button" aria-label="Minimize">
+                <button id="win-minimize" class="win-ctrl" type="button" aria-label="Minimize"
+                        data-tooltip="Minimize"
+                        data-i18n-tooltip="mangaplay-studio.chrome.tooltip.winMinimize"
+                        data-tooltip-side="bottom">
                     <span class="win-ctrl-dot win-ctrl-dot-min" aria-hidden="true">
                         <svg class="win-ctrl-glyph win-ctrl-glyph-min" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 5 H8"/></svg>
                     </span>
                 </button>
-                <button id="win-maximize" class="win-ctrl" type="button" aria-label="Maximize">
+                <button id="win-maximize" class="win-ctrl" type="button" aria-label="Maximize"
+                        data-tooltip="Maximize"
+                        data-i18n-tooltip="mangaplay-studio.chrome.tooltip.winMaximize"
+                        data-tooltip-side="bottom">
                     <span class="win-ctrl-dot win-ctrl-dot-max" aria-hidden="true">
                         <svg class="win-ctrl-glyph win-ctrl-glyph-max" viewBox="0 0 10 10" aria-hidden="true"><rect x="2.5" y="2.5" width="5" height="5"/></svg>
                     </span>
                 </button>
-                <button id="win-close" class="win-ctrl win-ctrl-close" type="button" aria-label="Close">
+                <button id="win-close" class="win-ctrl win-ctrl-close" type="button" aria-label="Close"
+                        data-tooltip="Close Window"
+                        data-i18n-tooltip="mangaplay-studio.chrome.tooltip.winClose"
+                        data-tooltip-side="left">
                     <span class="win-ctrl-dot win-ctrl-dot-close" aria-hidden="true">
                         <svg class="win-ctrl-glyph win-ctrl-glyph-close" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 3 L7 7 M7 3 L3 7"/></svg>
                     </span>
                 </button>
             </div>
         </div>
-
-        <!-- App Footer — 200×30 panel bottom-right of #app-chrome. Hidden until
-             a project is open. Populated by app-footer.js (mode button, word /
-             char counts, Google Docs sync gear). Hidden in mobile / tablet UX
-             modes via the data-ux-mode rules in app.css. -->
-        <footer id="app-footer" hidden></footer>
 
         <div class="app-body">
             <aside id="left-sidebar">
@@ -249,17 +503,6 @@
                         type="button">
                     <span data-icon="chart-column"></span>
                 </button>
-                <button id="btn-subview-bookmarks"
-                        class="rail-icon top-bar-subview"
-                        aria-label="Bookmarks"
-                        aria-pressed="false"
-                        data-subview="bookmarks"
-                        data-tooltip="Bookmarks"
-                        data-i18n-tooltip="mangaplay-studio.chrome.tooltip.tabBookmarks"
-                        data-tooltip-side="right"
-                        type="button">
-                    <span data-icon="bookmark"></span>
-                </button>
                 <button id="btn-rail-account"
                         class="rail-icon rail-account"
                         aria-label="Account"
@@ -276,9 +519,6 @@
                 <div class="left-pane-content">
                     <div id="subview-folder" class="subview">
                         <div class="folder-list" aria-label="Files"></div>
-                    </div>
-                    <div id="subview-bookmarks" class="subview">
-                        <p class="subview-empty">No bookmarks found</p>
                     </div>
                     <div id="subview-outline" class="subview">
                         <div class="outline-list mps-scrollbar" aria-label="Outline"></div>
@@ -322,7 +562,16 @@
                         <p class="empty-state-hint">Press Enter or click here to create Untitled.mangaplay.md</p>
                     </div>
                 </div>
-                <mps-editor-host></mps-editor-host>
+                <mps-editor-host>
+                    <!-- App Footer — 200×30 panel bottom-right of the editor
+                         pane. Sits inside <mps-editor-host> (position:relative)
+                         so it tracks the editor's width through workspace-seam
+                         resizing. Hidden until a project is open. Populated by
+                         app-footer.js (mode button, word/char counts, two
+                         Google Docs pills). Hidden in mobile/tablet UX modes
+                         via the data-ux-mode rules in app.css. -->
+                    <footer id="app-footer" hidden></footer>
+                </mps-editor-host>
                 <div class="workspace-seam"
                      role="separator" aria-orientation="vertical"
                      aria-label="Resize Editor / Storyboard"></div>

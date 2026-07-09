@@ -1,0 +1,67 @@
+/* default.css — the Default skin palette.
+ *
+ * Scoped under :root[data-skin="default"] rather than a bare :root so
+ * multiple skin CSS files can coexist without cascade order determining
+ * which wins (needed for previewing/switching and future gallery
+ * browse). See default-skins/README.md for the skin-author contract. */
+
+:root[data-skin="default"]
+{
+    --grey-light: #fcfcfc;
+    --grey-dark:  #f6f6f6;
+
+    --rule:              #e0e0e0;
+    --rail-width:        40px;
+    --top-bar-height:    40px;
+    --left-pane-width:   240px;
+    --left-pane-min:     200px;
+
+    --panel-bg:          #ffffff;
+    --row-highlight:     #f0f3f8;
+
+    --storyboard-width:        520px;
+    --storyboard-min:          200px;
+    --editor-min:              200px;
+
+    --btn-hover-bg:   #e8eaee;
+    --btn-active-bg:  #d8dce3;
+    --focus-ring:     #1565c0;
+
+    /* File explorer row pill */
+    --row-bg:    #f3f3f3;
+    --row-text:  #5a5a5a;
+    --row-badge: #9a9a9a;
+
+    /* Destructive action text colour (context-menu items, danger buttons) */
+    --danger-fg:       #c62828;
+    --danger-fg-hover: #b71c1c;
+
+    /* MPS brand primary (mirrors website's --mps-accent). Used by selection
+     * accents, primary buttons, links, focus rings, toggle "on" state. */
+    --mps-primary:       #007aff;
+    --mps-primary-hover: #0056b3;
+
+    --shadow-1:       0 1px 2px rgba(0, 0, 0, 0.06);
+    --shadow-2:       0 2px 4px rgba(0, 0, 0, 0.05);
+    --shadow-3:       0 4px 16px rgba(0, 0, 0, 0.12);
+    --shadow-inset:   inset 0 1px 2px rgba(0, 0, 0, 0.10);
+
+    /* --window-controls-inset removed.
+       Consumers now read --tauri-frame-controls-width (defined on :root in root.css,
+       114px = three 46px buttons matching the in-flow #window-controls block). */
+
+    /* Website-shared tokens — override prefers-color-scheme: dark.
+     * The website's theme.css defines these in a @media (prefers-color-scheme: dark)
+     * block that fires on macOS dark mode. Without explicit light values here,
+     * the dark overrides win even when this Default skin is active. */
+    --mps-editor-bg:            #ffffff;
+    --mps-screenplay-paper:     var(--grey-dark);
+    --mps-screenplay-ink:       #1a1a1a;
+    --mps-screenplay-ink-muted: #666666;
+
+    /* Splash background — hex mirrored into the build-time
+     * MPS_SPLASH_BG marker by scripts/copy-assets.js. Non-Default
+     * skins declare their own value; the native Windows/Android
+     * splash and inline #boot-screen still resolve to THIS value. */
+    --mps-splash-bg: #1a1a1a;
+}

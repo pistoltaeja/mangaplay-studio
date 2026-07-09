@@ -1,0 +1,7 @@
+{
+    "_comment": "Canonical brand colour source-of-truth. Every surface — WebView loading shell, Windows Win32 splash, iOS LaunchScreen storyboard, Android splash theme — renders from this file via `bun scripts/emit-brand-colors.js`. Edit here, then run the script (or a full build, which runs it automatically). Do NOT hardcode brand colours anywhere else in the codebase.",
+    "splashBackground": {
+        "_comment": "The colour behind the mascot on all splash / loading surfaces. Muted near-black; should stay dark enough that the mascot's colours pop but not full black.",
+        "hex": "#1a1a1a"
+    }
+}

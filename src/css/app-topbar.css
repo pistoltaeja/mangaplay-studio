@@ -1,0 +1,631 @@
+/* === Shell (top bar, rail, left pane, workspace columns) === */
+#app-chrome
+{
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+}
+
+#top-bar
+{
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: var(--top-bar-height);
+    padding-left: 8px;
+    /* Right-side controls (#window-controls) are now in-flow children, so the
+     * topbar no longer reserves padding for them. The legacy
+     * --tauri-frame-controls-width variable is still consumed by sibling rules
+     * that anchor against the right edge (.top-bar-action-anchored etc) — kept
+     * at its 138px value for those anchors. */
+    padding-right: 0;
+    border-bottom: 1px solid var(--rule);
+    box-shadow: var(--shadow-1);
+    background: var(--grey-light);
+    flex-shrink: 0;
+    -webkit-app-region: drag;
+    app-region: drag;
+}
+
+/* Children of #top-bar that need to receive pointer events must opt out of
+ * the drag region. The rule cannot use universal '*' because nested SVGs
+ * inside buttons would also opt out and break the no-drag inheritance chain
+ * downstream. */
+#top-bar button,
+#top-bar a,
+#top-bar input,
+#top-bar select,
+#top-bar [role="button"],
+#top-bar .topbar-storyboard-pagination,
+#top-bar .window-controls
+{
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+}
+
+/* .top-bar-tabs is the centre flex spacer. It must STAY a drag region in its
+ * empty areas so the user can pick up the window from the wide middle strip.
+ * The painted .editor-tabs inside it already has pointer-events:none on its
+ * own empty regions so OS drag flows through. Tabs themselves are <button>s
+ * and opt out individually via the rule above. */
+
+.top-bar-left
+{
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+    overflow: hidden;
+}
+
+/* .top-bar-tabs base layout — the strip is absolute-positioned over the
+ * top bar. Full rule lives in the "Editor tab strip" block lower down.
+ *
+ * `flex: 1` keeps `.top-bar-tabs` as the flex spacer so siblings to its
+ * right (pagination + divider) get pushed all the way over to the
+ * right-anchored action buttons. The absolute positioning further down
+ * makes the strip's PAINTED area span left-pane to storyboard-pane edges,
+ * INDEPENDENT of its in-flow contribution. Without `flex: 1` the
+ * pagination collapses to the left of the topbar instead of sitting
+ * just before the storyboard action buttons. */
+.top-bar-tabs
+{
+    flex: 1;
+    min-width: 0;
+}
+
+.top-bar-icon
+{
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: #444;
+    cursor: pointer;
+}
+
+.top-bar-action
+{
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: #444;
+    cursor: pointer;
+    flex: 0 0 auto;
+}
+
+.top-bar-action-anchored
+{
+    position: absolute;
+    top: 50%;
+    right: calc(var(--storyboard-width) - 14px);
+    transform: translateY(-50%);
+    /* z-index 101 keeps this above #top-bar's drag region so OS mouse clicks
+     * reach the button instead of triggering window-move. The opt-out via
+     * app-region: no-drag (above in #top-bar > button rule) handles the OS
+     * side; the z-index handles the page stacking side. */
+    z-index: 101;
+    transition: right 0ms linear, opacity 220ms ease, transform 220ms ease;
+}
+
+/* [C] sits immediately to the LEFT of the seam (which [D] is centred on).
+   Width 28 + 4px gap means right-offset is `storyboard-width + 18`. */
+.top-bar-action-c
+{
+    right: calc(var(--storyboard-width) + 18px);
+}
+
+.top-bar-action-anchored-left
+{
+    position: absolute;
+    top: 50%;
+    left: calc(var(--rail-width, 40px) + var(--left-pane-width, 240px) + 4px);
+    transform: translateY(-50%);
+    z-index: 101;
+    transition: left 220ms cubic-bezier(0.4, 0, 0.2, 1), opacity 220ms ease, transform 220ms ease;
+}
+
+#app-chrome[data-left-pane-collapsed] .top-bar-action-anchored-left
+{
+    left: calc(var(--rail-width, 40px) - 33px);
+}
+
+.top-bar-subview-group
+{
+    /* `will-change: transform` creates a stacking context. Without an explicit
+       z-index here, the buttons inside (z-index: 101 from the shared rule) are
+       only raised within this group's local context. Lift the group itself to
+       101 so the children stay above #top-bar's drag-region siblings. */
+    position: relative;
+    z-index: 101;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: transform 220ms cubic-bezier(0.4, 0, 0.2, 1),
+                opacity   220ms ease;
+    transform-origin: left center;
+    will-change: transform, opacity;
+}
+
+/* Subview buttons no longer get a persistent background highlight when
+ * selected — the active-pane indication is the left pane content itself,
+ * not a button-state marker. (The Home button was always rendered without
+ * an aria-pressed background; the user asked for the rest of the subview
+ * buttons to match that look.) Hover still highlights via the shared
+ * :where(.top-bar-icon, .rail-icon, .top-bar-action):hover rule. */
+
+/* "Home" variant of #btn-subview-folder — uses a transparent PNG instead
+ * of a lucide icon. Size matches the other top-bar-subview buttons; the
+ * image inside scales to fit. No tooltip wrapper here (drop the
+ * data-tooltip on the host element to suppress it). */
+.top-bar-home-icon
+{
+    width: 20px;
+    height: 20px;
+    object-fit: contain;
+    display: block;
+    pointer-events: none;
+}
+
+/* === Top-bar pagination — sits to the LEFT of the storyboard-anchored
+ * actions, mirroring the paint widget's pw-pagination-group. Hidden by
+ * default; JS removes the [hidden] attribute on the first page-state-update.
+ * The trailing divider is a 1px vertical rule that separates pagination
+ * from the absolutely-positioned [C]/[D] buttons. */
+.topbar-storyboard-pagination
+{
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    flex: 0 0 auto;
+    margin-right: 4px;
+    /* z-index 101 lifts above #top-bar's drag region so the Page-N label
+     * still clicks through. The no-drag opt-out is on .topbar-storyboard-pagination
+     * (in the #top-bar > .topbar-storyboard-pagination rule above). */
+    position: relative;
+    z-index: 101;
+    transition: transform 220ms cubic-bezier(0.4, 0, 0.2, 1),
+                opacity   220ms ease;
+}
+
+/* Slide the pagination cluster (and its divider) out + fade when the
+ * storyboard pane collapses. Mirrors #btn-storyboard-action. */
+#app-chrome[data-storyboard-collapsed] .topbar-storyboard-pagination,
+#app-chrome[data-storyboard-collapsed] .topbar-divider
+{
+    transform: translateX(40px);
+    opacity: 0;
+    pointer-events: none;
+}
+
+/* When the storyboard pane is narrow enough that [C]/[D] absolute-positioned
+ * buttons crowd against pagination's natural in-flow position, hide pagination
+ * cleanly instead of letting it half-overlap the buttons.
+ *
+ * The threshold value comes from JS toggling `data-narrow-topbar` on
+ * #app-chrome whenever --storyboard-width < ~280px (the width at which
+ * [C].right meets pagination.left). Pagination fades out smoothly.
+ *
+ * Page navigation isn't lost — the user can still navigate via Ctrl+PgUp /
+ * Ctrl+PgDn keyboard shortcuts (paint-widget's pagination handlers stay
+ * wired) and the canvas itself surfaces the current page in its heading. */
+#app-chrome[data-narrow-topbar] .topbar-storyboard-pagination,
+#app-chrome[data-narrow-topbar] .topbar-divider
+{
+    opacity: 0;
+    pointer-events: none;
+}
+
+.topbar-storyboard-pagination[hidden]
+{
+    display: none;
+}
+
+.topbar-page-label
+{
+    font-size: 12px;
+    color: #444;
+    min-width: 56px;
+    text-align: center;
+    user-select: none;
+    /* Match the chevrons' lift so the label area also sits above #top-bar's
+     * own drag region. The no-drag opt-out on .topbar-storyboard-pagination handles
+     * the OS side. */
+    position: relative;
+    z-index: 101;
+}
+
+.topbar-page-label[data-disabled]
+{
+    color: #b0b0b0;
+}
+
+/* Pagination chevrons need their own z-index lift — the shared
+ * .top-bar-icon rule sets z:101 but only if position is non-static. */
+.topbar-page-btn
+{
+    position: relative;
+    z-index: 101;
+}
+
+.topbar-page-btn:disabled
+{
+    opacity: 0.4;
+    pointer-events: none;
+}
+
+.topbar-divider
+{
+    flex: 0 0 1px;
+    width: 1px;
+    height: 18px;
+    /* var(--rule) is too pale against the topbar background — use a stronger
+     * neutral so the divider actually reads at a glance. */
+    background: rgba(0, 0, 0, 0.25);
+    /* The [C]/[D] buttons are position:absolute anchored against the right
+     * edge — the divider just sits at the end of the in-flow content with
+     * a small right margin so it visibly separates pagination from those
+     * anchored buttons. */
+    margin-right: 8px;
+}
+
+.app-body
+{
+    display: flex;
+    flex: 1;
+    min-height: 0;
+}
+
+#left-sidebar
+{
+    flex: 0 0 var(--rail-width);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 0;
+    border-right: 1px solid var(--rule);
+    background: var(--grey-light);
+}
+
+.rail-icon
+{
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: #444;
+    cursor: pointer;
+}
+
+/* Bottom-anchored account button — pushed to the end of the rail. */
+#btn-rail-account
+{
+    margin-top: auto;
+    overflow: hidden;
+    padding: 0;
+    border-radius: 50%;
+    user-select: none;
+    -webkit-user-select: none;
+}
+#btn-rail-account[hidden] { display: none; }
+#btn-rail-account .rail-account-avatar
+{
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    object-fit: cover;
+    display: block;
+    -webkit-user-drag: none;
+    pointer-events: none;
+}
+
+.icon
+{
+    width: 16px;
+    height: 16px;
+    display: block;
+}
+
+/* === Editor tab strip in the top bar ============================= */
+
+/* Layout:
+ *   The strip is absolute-positioned over the top bar so its bounds
+ *   exactly match the editor pane: starts at the LEFT edge of the Left
+ *   View (`--left-pane-width`) and stops at the LEFT edge of the Right
+ *   View (`--storyboard-width` from the right). Resizing either pane
+ *   shrinks the strip — and tabs shrink with it via flex.
+ *
+ *   The pagination/action controls sit on the right end of #top-bar at
+ *   z-index 101 and are NOT covered by the strip because the strip's
+ *   right edge is anchored to `var(--storyboard-width)`, which is also
+ *   where the action buttons live.
+ *
+ *   #top-bar itself is now the drag region (-webkit-app-region: drag) and
+ *   interactive children opt out via no-drag. All tab elements sit at
+ *   z-index 101 to stay above sibling action buttons.
+ */
+/* In-flow flex spacer. `.top-bar-tabs` itself stays an empty placeholder
+ * in the topbar flex flow — the actual painted strip is the absolute
+ * `.editor-tabs` inside it (rule below). The placeholder is what pushes
+ * the pagination + action cluster all the way to the right (combined
+ * with the `.top-bar-tabs { flex: 1 }` rule near the top of this file). */
+.top-bar-tabs
+{
+    height: var(--top-bar-height, 40px);
+    overflow: visible;
+}
+
+/* The actual painted tab strip. Absolute-positioned so its left/right
+ * edges anchor to the workspace's editor-pane bounds (left = where the
+ * file-explorer sidebar ends; right = where the storyboard pane begins).
+ *
+ * Workspace layout below the topbar:
+ *   #left-sidebar (--rail-width, ~40px)  →  #left-pane (--left-pane-width)
+ *   → .workspace (mps-editor-host + storyboard)
+ *
+ * The editor pane's actual left edge is at viewport-x =
+ *   --rail-width + --left-pane-width.
+ * `#top-bar` has position: relative + padding-left: 8px, so absolute
+ * offsets resolve against the topbar's padding box (which starts at
+ * viewport-x = 8px). To land the strip exactly at the editor pane edge,
+ * subtract the 8px padding from the workspace-relative anchor.
+ *
+ * Same idea on the right: the storyboard pane begins at
+ *   viewport-right - --storyboard-width.
+ * The topbar's padding-right is --tauri-frame-controls-width (~138px),
+ * so the topbar's padding box ends at viewport-right - 138. The strip's
+ * `right:` resolves against THAT edge, so we subtract the 138 to land
+ * exactly at the storyboard edge. */
+.editor-tabs
+{
+    position: absolute;
+    top: 0;
+    left: calc(var(--rail-width, 40px) + var(--left-pane-width, 240px) + 36px);
+    /* Reserve 36px (28px [C] button + 8px gap) so the `+` "new tab" button
+     * stops with breathing room before the [C] storyboard-collapse button.
+     * [C] is anchored at right: calc(--storyboard-width - 14px) and is 28px
+     * wide, so its left edge sits at viewport-right - (--storyboard-width).
+     * Without this reservation the `+` slides under [C]. */
+    right: calc(var(--storyboard-width, 600px) + 36px);
+    /* Strip is shorter than the topbar by --tab-strip-top-inset px so
+     * tabs visually start lower. The topbar itself stays at --top-bar-height.
+     * top:Xpx pushes the strip down; height subtracts the same amount so the
+     * strip's bottom still meets the topbar's bottom edge. */
+    --tab-strip-top-inset: 6px;
+    top: var(--tab-strip-top-inset);
+    height: calc(var(--top-bar-height, 40px) - var(--tab-strip-top-inset));
+    z-index: 101;
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    min-width: 0;
+    /* No overflow-scroll: tabs compress uniformly down to their min-width
+     * so the `+` button stays pinned at the strip's right edge (which sits
+     * at the storyboard column's left edge, just inside [C]). When more
+     * tabs are added than the strip can hold even at min-width, tabs
+     * truncate via the per-tab max-width / text-overflow rules. */
+    overflow: hidden;
+    /* pointer-events:none on the strip itself so empty regions (no tab, no +)
+     * fall through to #top-bar's drag region underneath, letting the user
+     * drag/double-click the window in the centre of the topbar. Children
+     * that should receive clicks (.editor-tab, .editor-tab-new) opt back
+     * in with pointer-events:auto. */
+    pointer-events: none;
+    /* Slide the strip's left edge in lockstep with the left-pane
+     * collapse animation (same 220ms easing used by #left-pane and the
+     * right-pane stack). */
+    transition: left 220ms cubic-bezier(0.4, 0, 0.2, 1),
+                right 220ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* When the left pane is collapsed, --left-pane-width still holds its
+ * resting value (JS only toggles the data-attribute; flex-basis is what
+ * collapses the pane). Without this override the tab strip would stay
+ * anchored to the un-collapsed left-pane edge, leaving an empty gap
+ * between the rail and the first tab. Anchor 4px past the collapse
+ * button's right edge (button at --rail-width - 33px, 28px wide → right
+ * edge at --rail-width - 5px; +4px gap = --rail-width - 1px) so the
+ * strip slides in lockstep with the pane collapse. */
+#app-chrome[data-left-pane-collapsed] .editor-tabs
+{
+    left: calc(var(--rail-width, 40px) - 1px);
+}
+
+/* Tab sizing: min 32px, max 200px. Default 200px.
+ * `flex: 1 1 200px` lets each tab start at 200 and shrink uniformly as
+ * more are added. Once shrink hits min-width 32px, overflow scrolls
+ * horizontally (no wrap, no overflow into the right pane).
+ *
+ * Inactive: flat rectangle, transparent background. Hover: file-explorer
+ * style grey using --btn-hover-bg. No margin gap between tabs.
+ *
+ * Active: light-grey side borders (--rule, same as the topbar | spacers),
+ * top corners curved outward, bottom corners concave (curve INWARD into
+ * the tab body) via the ::before / ::after pseudo-elements. The bottom
+ * concave reads as "the tab sinks into the editor surface" — Obsidian /
+ * Chrome style. Font stays normal-weight. */
+.editor-tab
+{
+    /* Default 200px wide, shrink uniformly toward the 60px floor when more
+     * tabs join. Min-width 60 keeps an ellipsised label readable; the close
+     * (X) gets hidden by the narrow-state rule below before tabs reach that
+     * floor. Tabs never overflow-scroll — the strip clips at its right edge
+     * which sits just inside [C] (storyboard collapse). */
+    flex: 1 1 200px;
+    min-width: 60px;
+    max-width: 200px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 10px 0 16px;
+    height: 100%;
+    background: transparent;
+    border: 0;
+    color: var(--tab-text, #1a1a1a);
+    cursor: pointer;
+    font-family: var(--mps-font-app);
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 1.2;
+    text-align: left;
+    user-select: none;
+    position: relative;
+    z-index: 101;
+    /* Opt back in: parent .editor-tabs is pointer-events:none so window-drag
+     * passes through empty strip area; tabs themselves still need clicks. */
+    pointer-events: auto;
+    /* Width / opacity transition for the close animation. */
+    transition: flex-basis 140ms ease, max-width 140ms ease, opacity 140ms ease, background-color 90ms ease;
+}
+
+/* Inactive: hover only — paint the highlight via a ::before pseudo
+ * positioned inset 4px top/bottom and 2px left/right from the tab box.
+ * Decoupling the pill from the tab's own padding lets the pill geometry
+ * (inset + border-radius) be tuned independently of the text padding,
+ * and avoids the background-clip:content-box trap that anchors the
+ * paint to the padding-shifted content box. */
+.editor-tab:not([data-active])::before
+{
+    content: "";
+    position: absolute;
+    inset: 4px 2px;
+    border-radius: 6px;
+    background: transparent;
+    pointer-events: none;
+    transition: background-color 90ms ease;
+    z-index: -1;
+}
+
+.editor-tab:not([data-active]):hover::before
+{
+    background: var(--btn-hover-bg, #e8eaee);
+}
+
+/* Light divider between adjacent inactive tabs — the "|" spacer the user
+ * referenced. Skip the divider on the tab IMMEDIATELY before the active
+ * tab (the active tab's own left border takes its place) and on the
+ * active tab itself (its own borders are owned by [data-active]). */
+.editor-tab:not([data-active]):not(:last-child)
+{
+    border-right: 1px solid var(--rule, #e0e0e0);
+}
+
+.editor-tab:not([data-active]):has(+ .editor-tab[data-active])
+{
+    border-right-color: transparent;
+}
+
+/* Active tab: editor-surface fill with rounded outward top corners
+ * and light side borders. margin-bottom: -1px overlaps the topbar's
+ * border-bottom so the tab visually "punches through" the topbar
+ * rule into the editor surface below. */
+.editor-tab[data-active]
+{
+    background: #ffffff;
+    border-left: 1px solid var(--rule, #e0e0e0);
+    border-right: 1px solid var(--rule, #e0e0e0);
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    cursor: default;
+    margin-bottom: -1px;
+}
+
+/* Close animation: while the slot manager is mid-close, the JS toggles
+ * data-closing — the tab collapses to 0 width over 140ms before being
+ * removed from the DOM. */
+.editor-tab[data-closing]
+{
+    flex: 0 0 0;
+    min-width: 0;
+    max-width: 0;
+    opacity: 0;
+    overflow: hidden;
+    padding-left: 0;
+    padding-right: 0;
+    border-right-width: 0;
+}
+
+.editor-tab-name
+{
+    flex: 1;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    text-align: left;
+    min-width: 0;
+    font-family: inherit;
+    font-size: inherit;
+}
+
+.editor-tab-close
+{
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    opacity: 0.6;
+}
+
+.editor-tab-close:hover
+{
+    background: rgba(0, 0, 0, 0.12);
+    opacity: 1;
+}
+
+.editor-tab-close [data-icon]
+{
+    width: 12px;
+    height: 12px;
+}
+
+.editor-tab-new
+{
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    margin: auto 6px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    color: #1a1a1a;
+    cursor: pointer;
+    flex-shrink: 0;
+    flex-grow: 0;
+    position: relative;
+    z-index: 101;
+    /* See .editor-tab — parent strip is pointer-events:none. */
+    pointer-events: auto;
+}
+
+.editor-tab-new:hover
+{
+    background: var(--grey-mid, #e8e8e8);
+}
+
+.editor-tab-new [data-icon]
+{
+    width: 14px;
+    height: 14px;
+}
+

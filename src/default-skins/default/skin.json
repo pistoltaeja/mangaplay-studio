@@ -1,0 +1,14 @@
+{
+    "id": "default",
+    "displayName": "Default",
+    "author": "Mangaplay Studio",
+    "version": "1.0.0",
+    "baseVariant": "light",
+    "cssFile": "default.css",
+    "mascotHeadFile": "mascot-head-default.png",
+    "mascotBodyFile": "mascot-body-default.png",
+    "splashFile": "splash-default.png",
+    "splashFile2x": "splash-default@2x.png",
+    "minAppVersion": "0.0.0",
+    "license": "Proprietary — bundled first-party skin"
+}
