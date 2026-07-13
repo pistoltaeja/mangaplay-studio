@@ -1,6 +1,6 @@
 # Mangaplay Studio - Desktop Application
 
-> **Work in progress.** This repository is under active, ongoing development. It does not build and latest changes are months behind intentionally. There is no incentive to share code online anymore in a timely manner.
+> **Work in progress.** This repository is under active, ongoing development. It does not build and latest changes are months behind intentionally. There is no incentive to share code online anymore in a timely manner. I'm sorry
 
 The Mangaplay Studio App is a text edit built solely for writing comic books, manga, graphic novels and webtoons with screenplays and storyboards in mind.
 
