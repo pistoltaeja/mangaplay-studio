@@ -1,0 +1,154 @@
+[package]
+name = "mangaplay-studio"
+version = "1.0.1"
+description = "Mangaplay Studio — desktop comic-script editor"
+authors = ["Mangaplay"]
+license = "MIT"
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+# Default features = "desktop" so existing build:windows / build:osx flows
+# stay byte-identical. Android builds pass `--no-default-features --features mobile`.
+default = ["desktop"]
+desktop = []
+mobile = []
+
+# Reserved for a Phase-2 wave that promotes the env-var-driven UX-mode
+# branch to compile-time gates (Bun DCE + Rust cfg). Empty today.
+ux-mobile = []
+ux-tablet = []
+
+# Loads tauri-plugin-updater. Off by default — turning it on without a real
+# Ed25519 pubkey in tauri.conf.json will crash the app at first update check.
+# Switch on once Signing-Procurement-Plan.md is complete and the real pubkey
+# is populated in app-metadata.json.
+updater = ["dep:tauri-plugin-updater"]
+
+# Dev-only: load the frontend (HTML/JS/CSS) from a directory on disk via a
+# custom URI scheme instead of the embedded assets. Set MPS_FRONTEND_DIR env
+# to override the default path. Enable ONLY for build:windows-dev — release
+# builds must keep this OFF so the .exe is self-contained and so the
+# `custom-protocol` feature stays the only asset path (no risk of Tauri's
+# build.rs emitting cfg!(dev=true) on a production build).
+disk-frontend = ["dep:url"]
+
+# Dev-only: enables the WebView2 DevTools panel (F12, Ctrl+Shift+I,
+# Ctrl+Shift+J). When OFF (release default), DevTools is physically
+# unavailable at the runtime layer regardless of any JS-side gate. Paired
+# with the build-time `window.__MPS_RELEASE_KEY_GUARD__` constant which
+# installs a release-only JS keydown handler for the non-DevTools browser
+# shortcuts (F5, F7, F11, Ctrl+R, Ctrl+U) — Tauri 2.11.2 does not expose
+# `browser_accelerator_keys` on `WebviewWindowBuilder`, so the JS handler
+# is the substitute mechanism for those keys.
+devtools = ["tauri/devtools"]
+
+# Always-on, every platform.
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2", features = ["custom-protocol", "protocol-asset"] }
+tauri-plugin-log = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-os = "2"
+tauri-plugin-updater = { version = "2.10.1", optional = true }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# Used only by the disk-frontend feature (parsing mpsdev://localhost URLs).
+# Cheap dep; pinned to a stable major.
+url = { version = "2", optional = true }
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "linux-native"] }
+# Cross-platform pid liveness check. Replaces hand-rolled Win32
+# OpenProcess/CloseHandle/GetExitCodeProcess + libc kill FFI in lib.rs.
+# Same call works on Windows/macOS/Linux/iOS/Android (removes the
+# #[cfg(...)] branch that previously excluded mobile targets).
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+# Used by auth_success_page_html() to inline the mascot PNG as a data: URI.
+# Already in the transitive graph via Tauri; pinning to a matching major.
+base64 = "0.22"
+# PKCE code_challenge SHA-256 for commands/picker.rs. Pure-Rust,
+# no C deps, tiny. Adds ~40 KB to release .exe.
+sha2 = "0.10"
+# Per-presentation exclusive file lock for the slides-sync image cache.
+# Used by commands/slides_cache.rs to serialise writers across windows.
+fs2 = "0.4"
+
+# tauri-plugin-opener — needed on every target for the Google Drive Picker
+# to launch the system browser. v2.5+ ships a real Android implementation
+# (see plugin `#[cfg(mobile)] open_url`), so the crate is safe to link on
+# Android too. Moving it OUT of the desktop-only block per
+# `android-prereq-opener-android`.
+tauri-plugin-opener = "2"
+
+# tauri-plugin-deep-link — needed on every target for the picker return-URI
+# on Android/iOS AND for the current desktop `mangaplay://` handler in
+# `lib.rs`. The plugin's build.rs generates the `<intent-filter>` entries
+# in `gen/android/app/src/main/AndroidManifest.xml` from
+# `tauri.conf.json` `plugins.deep-link.mobile[]`.
+tauri-plugin-deep-link = "2"
+
+# Desktop-only crates. Pulled in everywhere EXCEPT Android and iOS. trash + notify
+# rely on platform APIs that don't exist on Android (recycle bin, inotify
+# rename cookies).
+[target.'cfg(all(not(target_os = "android"), not(target_os = "ios")))'.dependencies]
+trash = "5"
+notify = "8"
+notify-debouncer-full = "0.7"
+
+# tauri-plugin-http — server-side HTTP client used by the JS layer to fetch
+# Google Slides image bytes without triggering the WebView's CORS/CSP. Desktop
+# only: image download only matters when we have a project on disk to write
+# into. Android/iOS builds skip this entirely (mobile-friendly `desktop`
+# feature stub in commands lets us keep call sites uniform).
+tauri-plugin-http = "2"
+
+# Windows-only: native splash window (see setup/native_splash.rs). Paints the
+# branded splash PNG in ~50ms after process start so the user sees content
+# instead of a taskbar-highlighted-nothing during the ~500-2000ms WebView2
+# warmup. Feature-gated by target so cross-compilation to non-Windows
+# targets never pulls the windows crate blob.
+#
+# `windows` feature list is intentionally minimal — only the areas
+# setup/native_splash.rs touches. Full-crate features would blow compile
+# time (~40s cold) and disk (~600MB target dir).
+#
+# `png` is the smallest option for decoding the splash PNG. `default-features
+# = false` drops the deflate encoder path we don't need.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+    "Win32_Graphics_Gdi",
+] }
+png = { version = "0.17", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"
+
+# Release-profile hardening. Tuned for shipping the desktop .exe on Windows.
+#
+# `panic = "abort"` is intentionally LEFT OFF. lib.rs:387 registers a
+# `std::panic::set_hook(...)` that writes `crash-<ts>.log` files for
+# telemetry. Under `panic = "abort"` the abort path bypasses the unwinding
+# runtime and on most platforms the hook does NOT fire. Crash data is more
+# valuable than the marginal binary-size win — keep default `panic = "unwind"`.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+debug = false
+incremental = false

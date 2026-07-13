@@ -1,0 +1,8 @@
+[build]
+target-dir = "../build/mangaplay-studio/target"
+
+# Enable Control Flow Guard on Windows release builds. ~3% runtime cost,
+# ~0.15% size cost. Mitigates ROP/JOP exploits by checking indirect calls
+# against a compiler-generated table at runtime.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "control-flow-guard=yes"]

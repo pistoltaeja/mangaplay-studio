@@ -1,0 +1,48 @@
+{
+  "$schema": "../gen/schemas/android-schema.json",
+  "identifier": "android-default",
+  "description": "Android capability set. Mobile build skips window-chrome permissions (no titlebar, no window manipulation). Includes FS / dialog / clipboard / OS permissions that work inside the sandbox, PLUS the opener plugin (required by the Google Drive Picker to launch the system browser — see TODO/drive-picker-desktop-mobile.md `android-prereq-opener-android`).",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:default",
+    "core:window:allow-close",
+    "core:window:allow-destroy",
+    "core:webview:default",
+    "core:webview:allow-internal-toggle-devtools",
+    "dialog:default",
+    "fs:default",
+    "fs:allow-read-text-file",
+    "fs:allow-write-text-file",
+    "fs:allow-mkdir",
+    "fs:allow-read-dir",
+    "fs:allow-exists",
+    "fs:allow-remove",
+    "fs:allow-rename",
+    "fs:allow-stat",
+    "fs:allow-copy-file",
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        { "path": "$APPDATA/**" },
+        { "path": "$APPCONFIG/**" }
+      ]
+    },
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text",
+    "os:allow-locale",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://mangaplay.studio/**" },
+        { "url": "https://docs.google.com/**" },
+        { "url": "https://slides.google.com/**" },
+        { "url": "https://api.absolutelyskint.com/**" }
+      ]
+    }
+  ],
+  "platforms": ["android"]
+}

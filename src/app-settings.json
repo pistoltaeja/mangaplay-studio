@@ -1,0 +1,5 @@
+{
+    "_comment": "App-wide configuration, bundled with the app at build time. Fetched at runtime via fetch('./app-settings.json'). For per-user runtime preferences see user-settings.json (managed by the Rust side).",
+    "discordUrl": "https://discord.gg/EnR8uZckh",
+    "officialHelpUrl": "https://mangaplay.studio/guides"
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "../gen/schemas/ios-schema.json",
+  "identifier": "ios-default",
+  "description": "iOS capability set. Mobile build skips shell + window-chrome permissions (no titlebar, no window manipulation). Includes only the FS / dialog / clipboard / OS permissions that work inside the iOS sandbox.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:default",
+    "core:window:allow-close",
+    "core:window:allow-destroy",
+    "core:webview:default",
+    "core:webview:allow-internal-toggle-devtools",
+    "dialog:default",
+    "fs:default",
+    "fs:allow-read-text-file",
+    "fs:allow-write-text-file",
+    "fs:allow-mkdir",
+    "fs:allow-read-dir",
+    "fs:allow-exists",
+    "fs:allow-remove",
+    "fs:allow-rename",
+    "fs:allow-stat",
+    "fs:allow-copy-file",
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        { "path": "$APPDATA/**" },
+        { "path": "$APPCONFIG/**" }
+      ]
+    },
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text",
+    "os:allow-locale"
+  ],
+  "platforms": ["iOS"]
+}

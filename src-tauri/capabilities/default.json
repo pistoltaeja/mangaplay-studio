@@ -1,0 +1,65 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capability set. core:default does NOT include core:event or core:window grants — each must be listed explicitly. Without them, event.listen() silently no-ops and window.close() is denied (Tauri 2 capability-based security).",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:default",
+    "core:window:allow-close",
+    "core:window:allow-destroy",
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
+    "core:window:allow-minimize",
+    "core:window:allow-unminimize",
+    "core:window:allow-maximize",
+    "core:window:allow-unmaximize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-is-minimized",
+    "core:window:allow-is-maximized",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position",
+    "core:webview:default",
+    "core:menu:default",
+    "dialog:allow-open",
+    "dialog:default",
+    "fs:default",
+    {
+      "identifier": "fs:allow-read-text-file",
+      "allow": [
+        { "path": "$APPDATA/**" },
+        { "path": "$DOCUMENT/**/_mangaplaystudio/**" }
+      ]
+    },
+    {
+      "identifier": "fs:allow-write-text-file",
+      "allow": [
+        { "path": "$APPDATA/**" },
+        { "path": "$DOCUMENT/**/_mangaplaystudio/**" }
+      ]
+    },
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text",
+    "os:allow-locale",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://mangaplay.studio/**" },
+        { "url": "https://docs.google.com/**" },
+        { "url": "https://slides.google.com/**" },
+        { "url": "https://api.absolutelyskint.com/**" }
+      ]
+    },
+    {
+      "identifier": "http:default",
+      "allow": [
+        { "url": "https://*.googleusercontent.com/**" },
+        { "url": "https://slides.googleapis.com/**" }
+      ]
+    }
+  ],
+  "platforms": ["linux", "macOS", "windows"]
+}
