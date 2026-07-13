@@ -1,5 +1,7 @@
 # Mangaplay Studio - Desktop Application
 
+> **Work in progress.** This repository is under active, ongoing development. It does not build and latest changes are months behind intentionally. There is no incentive to share code online anymore in a timely manner.
+
 The Mangaplay Studio App is a text edit built solely for writing comic books, manga, graphic novels and webtoons with screenplays and storyboards in mind.
 
 [Superscript](https://superscript.app/) by Justin Silva's was an amazing dedicated comic
@@ -22,28 +24,5 @@ default this lives in the OS-correct user-config directory:
 |---------|--------------------------------------------------------------------|
 | Windows | `%APPDATA%\studio.mangaplay.app\user-settings.json`             |
 | macOS   | `~/Library/Application Support/studio.mangaplay.app/`           |
-| Linux   | `~/.config/studio.mangaplay.app/user-settings.json`             |
-
-### Portable mode (Windows + Linux)
-
-To carry your settings on a USB stick or run from an extracted archive without
-touching your user profile, create an empty file named `portable` (no extension)
-next to `MangaplayStudio.exe` (or the AppImage on Linux). On the next launch
-the app switches storage to `<exe-folder>/userdata/`, including
-`user-settings.json`.
-
-| Marker present | Folder writable | Effective storage                  |
-|----------------|------------------|------------------------------------|
-| Yes            | Yes              | `<exe-folder>/userdata/`           |
-| Yes            | No               | OS default (silent fallback)       |
-| No             | —                | OS default                         |
-
-### Why macOS ignores the marker
-
-macOS short-circuits the marker. Gatekeeper "App Translocation" launches
-quarantined apps from a randomised read-only path, and a notarised `.app`
-bundle's signature seals every resource — writing inside it invalidates the
-signature and Gatekeeper refuses subsequent launches. Settings always live
-under `~/Library/Application Support` on macOS.
 
 ## More coming soon
