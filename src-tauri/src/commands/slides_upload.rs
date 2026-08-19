@@ -1,30 +1,15 @@
-//! `slides_upload_images` — server-side reference stub.
+//! `slides_upload_images` — reserved Rust command name; upload happens in JS.
 //!
 //! ### Status
 //!
-//! The publish upload flow currently runs the Google Drive `files.create`
-//! and Slides `presentations.batchUpdate` calls from the JS side using
-//! `fetch`. This mirrors how `commitSlidesSync` does image downloads —
-//! JS owns HTTP so Rust doesn't need to link an HTTP client (`reqwest` /
-//! `hyper` etc. are NOT current deps of `src-tauri`, per the picker
-//! transport rule in `.claude/rules/mangaplay-studio-app.md`).
+//! The publish upload flow runs from JS in
+//! `slides-upload-transport.js` (Drive files.create → Slides batchUpdate →
+//! Drive files.delete cleanup). This Rust command is no longer called; it
+//! stays in the invoke_handler as a reserved name so a future desktop-only
+//! Rust migration can reclaim it without churn.
 //!
-//! This module exists so `lib.rs`'s `invoke_handler!` can register the
-//! `slides_upload_images` name today. Calling it currently returns a
-//! `"not-implemented"` error; JS callers must use the direct fetch path
-//! in `slides-prepare.js::commitLocalUpload`.
-//!
-//! ### Future work
-//!
-//! When a project-wide HTTP client is introduced (documented `reqwest`
-//! addition + Android-target split), the actual upload — temp Drive file
-//! create, `presentations.batchUpdate`, temp file cleanup — moves here.
-//!
-//! Desktop-only in intent: the `#[cfg(not(target_os = "android"))]` gate
-//! matches the picker-transport rule. On Android the command returns the
-//! same "not-implemented" error; there is currently no way to publish
-//! from mobile anyway (see `capabilities/android.json` which omits
-//! `shell:*`).
+//! Calling it returns a `"not-implemented"` error to make the historical
+//! contract explicit.
 
 use serde::{Deserialize, Serialize};
 

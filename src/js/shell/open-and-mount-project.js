@@ -5,7 +5,8 @@ import { isTauri, basename } from "../util/index.js";
 import { t } from "../adapters/tauri-i18n.js";
 import { scriptRelPathOf } from "../util/paths.js";
 import { openProject, updateRecent, loadMangaart, loadMangaartByUuid } from "../project/project.js";
-import { saveUserSettings } from "../project/user-settings.js";
+import { preloadStoryboardImages } from "../boot/preload-storyboard-images.js";
+import { saveUserSettings, getProjectSession } from "../project/user-settings.js";
 import { mountFolderExplorer } from "./explorer.js";
 import { wireProjectFsChangedListener, wireRegistryFsChangedListener } from "./fs-listeners.js";
 import { mountProjectViews } from "./mount-project-views.js";
@@ -68,6 +69,17 @@ export async function openAndMountProject(chosenPath, opts = {})
         try
         {
             state.currentProject = await openProject(chosenPath);
+            // Fire-and-forget: race the browser image cache against the
+            // remainder of the boot pipeline. If the active script has a
+            // linked Slides deck, this preloads a window of PNGs around
+            // the last-viewed page so <mps-display> paints from cache on
+            // first mount instead of eating a 45-65ms cold decode per
+            // slot. Errors are swallowed inside the preloader — a preload
+            // failure is transparent to the user.
+            preloadStoryboardImages(state.currentProject).catch((e) =>
+            {
+                console.debug("[boot] storyboard image preload failed:", e?.message || e);
+            });
         }
         catch (openErr)
         {
@@ -90,6 +102,17 @@ export async function openAndMountProject(chosenPath, opts = {})
         }
         // Expose project dir to editor extensions (page-fold persistence).
         /** @type {any} */ (window).__mpsCurrentProjectDir = state.currentProject?.path || null;
+        // Sweep any pre-existing empty `.mangaart` files scaffolded eagerly
+        // by older builds. Idempotent, low-risk (pages == [] means no user
+        // work to lose). Best-effort — never blocks the boot path.
+        try
+        {
+            if (isTauri() && state.currentProject?.path)
+            {
+                await invoke("mangaart_sweep_empty", { projectPath: state.currentProject.path });
+            }
+        }
+        catch (e) { console.warn("[boot] mangaart_sweep_empty failed:", e); }
         // Start the FS watcher for the new project root so external
         // edits flow through project-fs-changed.
         try
@@ -138,9 +161,13 @@ export async function openAndMountProject(chosenPath, opts = {})
 
     {
         // One-time seed: if appSettings has no value for a shell field but the
-        // project's meta.json does, copy it over so existing users don't see a
-        // reset on first launch after this change.
+        // project has a persisted value, copy it over so existing users don't
+        // see a reset on first launch. Prefer the per-user projectSessions
+        // entry (post-split); fall back to legacy meta.json for projects that
+        // haven't migrated yet.
         const meta = state.currentProject?.meta || {};
+        const projSessUuid = state.currentProject?.id || null;
+        const projSess = projSessUuid ? getProjectSession(projSessUuid) : {};
         const seed = {};
         const SHELL_FIELDS = [
             "leftPaneWidth", "storyboardWidth",
@@ -157,10 +184,11 @@ export async function openAndMountProject(chosenPath, opts = {})
                 (k === "lastSoloMode") ? current === "solo-storyboard" :
                 (k === "activeSubview") ? current === "folder" :
                 false;
-            if (isUnset && meta[k] !== undefined)
+            const persisted = projSess[k] !== undefined ? projSess[k] : meta[k];
+            if (isUnset && persisted !== undefined)
             {
-                seed[k] = meta[k];
-                appSettings[k] = meta[k];
+                seed[k] = persisted;
+                appSettings[k] = persisted;
             }
         }
         if (Object.keys(seed).length > 0)

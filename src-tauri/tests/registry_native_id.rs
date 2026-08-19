@@ -1,4 +1,4 @@
-//! Unit tests for the `NativeIdBackend` trait boundary (Part 6).
+//! Unit tests for the `NativeIdBackend` trait boundary.
 //!
 //! Verifies that `ActiveBackend::default().read()` on the host platform
 //! returns a well-formed `NativeId` variant. On the WSL Linux host used by

@@ -128,7 +128,21 @@ class MpsCardTray extends HTMLElement
 
         buttons.forEach((btn, i) =>
         {
-            setTimeout(() => btn.classList.add("visible"), i * stagger);
+            setTimeout(() =>
+            {
+                btn.style.willChange = "transform, opacity";
+                requestAnimationFrame(() =>
+                {
+                    requestAnimationFrame(() =>
+                    {
+                        btn.classList.add("visible");
+                        btn.addEventListener("transitionend", () =>
+                        {
+                            btn.style.willChange = "";
+                        }, { once: true });
+                    });
+                });
+            }, i * stagger);
         });
 
         const count = buttons.length;
@@ -219,7 +233,11 @@ class MpsCardTray extends HTMLElement
         const ordered = direction === "rightToLeft" ? buttons.slice().reverse() : buttons.slice();
         ordered.forEach((btn, i) =>
         {
-            setTimeout(() => btn.classList.add("dismissing"), i * stagger);
+            setTimeout(() =>
+            {
+                btn.style.willChange = "transform, opacity";
+                btn.classList.add("dismissing");
+            }, i * stagger);
         });
         const totalMs = (ordered.length - 1) * stagger + DISMISS_ANIM_MS;
         await new Promise(r => setTimeout(r, totalMs));

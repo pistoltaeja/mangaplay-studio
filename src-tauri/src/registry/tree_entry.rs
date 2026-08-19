@@ -1,13 +1,11 @@
 //! JS-facing Data Transfer Object for a registry entry.
 //!
-//! See [`TODO/uuid-file-registry.md`](../../../../TODO/uuid-file-registry.md)
-//! Part 3 — return values switch from paths to
-//! `TreeEntry { uuid, name, kind, parent_uuid, rev, modified_at, created_at }`.
+//! Return shape: `TreeEntry { uuid, name, kind, parent_uuid, rev, modified_at, created_at }`.
 //!
 //! Deliberately named [`TreeEntryDto`] (not `TreeEntry`) to avoid clashing
 //! with the existing JSON-value-based `TreeEntry` used by
-//! `list_project_tree_impl` — that type will be renamed / retired in Parts
-//! 3b/3c once the callers migrate.
+//! `list_project_tree_impl` — that type will be renamed / retired once all
+//! callers have migrated to the UUID-boundary commands.
 
 use std::path::Path;
 

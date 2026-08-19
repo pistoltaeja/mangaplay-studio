@@ -40,10 +40,6 @@ impl UxModeSource {
 /// `.setup()`, so any `log::*!` call from here is dropped on the floor.
 /// Callers use `resolve_ux_mode_with_source()` and log the result AFTER
 /// the log plugin comes online.
-pub fn resolve_ux_mode() -> String {
-    resolve_ux_mode_with_source().0
-}
-
 pub fn resolve_ux_mode_with_source() -> (String, UxModeSource) {
     if let Ok(m) = std::env::var("MPS_UX_MODE") {
         let v = m.to_lowercase();

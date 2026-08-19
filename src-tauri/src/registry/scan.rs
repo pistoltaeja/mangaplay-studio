@@ -1,10 +1,8 @@
 //! Scan-and-mint helper: reconcile the in-memory UUID registry with the
 //! project tree on disk.
 //!
-//! See [`TODO/uuid-file-registry.md`](../../../../TODO/uuid-file-registry.md)
-//! Part 3 — Command Migration (sub-pass 3b) for the design. This module is
-//! the single walker used by both the fresh-migration path (Part 5) and the
-//! new `registry_list_tree` command (Part 3b).
+//! Single walker used by both the migration path (`registry_migrate`) and the
+//! `registry_list_tree` command.
 //!
 //! # Reconciliation cascade
 //!
@@ -23,7 +21,7 @@
 //!
 //! Any entry that was NOT touched during the walk is tombstoned at the end
 //! of the scan (files that vanished while the app was closed). Tombstoned
-//! entries are NOT emitted in the returned Vec; Part 5 handles purge.
+//! entries are NOT emitted in the returned Vec; purge is deferred.
 //!
 //! # Skips
 //!
@@ -40,7 +38,7 @@
 //! created folders and made New Folder feel broken; see the comment at
 //! [`crate::commands::project`] `walk_tree`'s dir branch. Do not reintroduce.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::OpenOptions;
 use std::path::Path;
 
@@ -92,6 +90,19 @@ pub fn scan_and_reconcile(reg: &mut LoadedRegistry) -> Result<Vec<TreeEntryDto>,
             ),
         });
     }
+
+    // Pre-pass: dedupe live entries sharing a `path`.
+    //
+    // Registries built before the `reconcile_file` 2b-guard shipped can contain two or more
+    // live rows for the same rel_path — the `visited` tail-loop below would
+    // otherwise tombstone whichever the walker didn't hit, flipping the
+    // winner every open. Collapse to a single winner up-front so the walk
+    // below sees the invariant "at most one live entry per path".
+    //
+    // Winner: highest `rev`; ties broken by uuid lexicographic order (both
+    // deterministic under BTreeMap iteration). Losers are tombstoned in
+    // place with rev bumped, matching the tail-loop's tombstone shape.
+    dedupe_duplicate_paths(reg);
 
     // Recursive walker. Every on-disk folder + script it visits is added
     // to `visited`; anything already in `reg.entries` that wasn't visited
@@ -394,7 +405,12 @@ fn reconcile_file(
     //     scan → re-create at a different path" — the native_id survives
     //     on Linux/macOS as long as the inode is reused (rare, but the
     //     path cascade below is the more common revival route).
-    if !matches!(native_id, NativeId::Unknown)
+    //
+    //     Guard: skip when a LIVE entry already claims `rel_path` — the
+    //     un-tombstone rewrites `slot.path = rel_path`, which would create
+    //     the duplicate-live-path invariant violation described in step 2b
+    //     (duplicate-live-path invariant violation).
+    if !matches!(native_id, NativeId::Unknown) && !reg.path_index.contains_key(rel_path)
     {
         let dead = reg
             .entries
@@ -424,6 +440,14 @@ fn reconcile_file(
     // 2b. Tombstoned same-path match. Same rationale as 2a but keyed on
     //     path — this is the "same-path re-creation" case with a new
     //     inode (delete then recreate on Linux/macOS).
+    //
+    //     Guard: skip when a LIVE entry already claims `rel_path` (would
+    //     surface in `path_index`). Un-tombstoning a stale row here would
+    //     create a duplicate-live-path invariant violation that the tail
+    //     `visited` loop then tombstones on the losing side — flipping the
+    //     winner between the two entries on every open. Step "2. Path match"
+    //     below handles the live case.
+    if !reg.path_index.contains_key(rel_path)
     {
         let dead = reg
             .entries
@@ -514,4 +538,64 @@ fn reconcile_file(
     }
     reg.dirty = true;
     visited.insert(uuid);
+}
+
+/// Collapse duplicate live entries at the same `path` down to a single winner.
+///
+/// Historical registries from before the mint/heal guards may have two or
+/// more live rows sharing a rel_path. Without a pre-pass, `scan_and_reconcile`'s tail loop would
+/// tombstone whichever row the walker did NOT touch — under a `HashMap`
+/// that alternated per boot, causing rev counters to bump on every open.
+///
+/// Winner selection is deterministic:
+///   1. highest `rev` wins;
+///   2. lexicographic uuid order breaks ties (stable across launches under
+///      the new `BTreeMap` iteration order).
+///
+/// Losers are tombstoned in-place with `rev` bumped. `reg.dirty` is set
+/// when any loser was tombstoned so the fix persists on the next flush.
+/// Called from `scan_and_reconcile` BEFORE `walk_dir` so the walker sees a
+/// single-winner-per-path state; reverse indices are rebuilt by
+/// `with_loaded` on return so we don't touch them here.
+fn dedupe_duplicate_paths(reg: &mut LoadedRegistry)
+{
+    let mut by_path: BTreeMap<String, Vec<Uuid>> = BTreeMap::new();
+    for (uuid, entry) in reg.entries.iter()
+    {
+        if entry.tombstone
+        {
+            continue;
+        }
+        by_path.entry(entry.path.clone()).or_default().push(*uuid);
+    }
+
+    for (path, mut uuids) in by_path
+    {
+        if uuids.len() <= 1
+        {
+            continue;
+        }
+        // Highest rev first; uuid ascending on ties.
+        uuids.sort_by(|a, b|
+        {
+            let ra = reg.entries.get(a).map(|e| e.rev).unwrap_or(0);
+            let rb = reg.entries.get(b).map(|e| e.rev).unwrap_or(0);
+            rb.cmp(&ra).then_with(|| a.cmp(b))
+        });
+        let winner = uuids[0];
+        let loser_count = uuids.len() - 1;
+        log::warn!(
+            "[registry] {} live entries claim path {:?}; keeping {} (highest rev), tombstoning {} other(s)",
+            uuids.len(), path, winner, loser_count,
+        );
+        for &loser in &uuids[1..]
+        {
+            if let Some(entry) = reg.entries.get_mut(&loser)
+            {
+                entry.tombstone = true;
+                entry.rev = entry.rev.saturating_add(1);
+            }
+        }
+        reg.dirty = true;
+    }
 }

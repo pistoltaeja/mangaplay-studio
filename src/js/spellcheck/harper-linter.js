@@ -1,16 +1,34 @@
 // @ts-check
 /**
- * harper-linter.js — module-singleton owner of the Harper WorkerLinter.
+ * harper-linter.js — singleton owner of the Harper WorkerLinter (WASM).
  *
- * Harper ships as a Web Worker + WASM bundle (Apache-2.0). One worker is
- * shared across every CM6 view; dialect changes destroy + rebuild the
- * worker (rare event, settings-driven). The CSP in tauri.conf.json grants
- * `'wasm-unsafe-eval'` and `worker-src 'self' blob:` so the WASM can
- * instantiate and the Blob-URL worker can spawn.
+ * This module owns the Worker lifecycle, dialect resolution, user-
+ * dictionary injection, and benchmark stamping. It is the ONLY file
+ * that imports from `harper.js` — every other module in the spellcheck
+ * pipeline stays free of that 1.5 MB dependency so the boot chunk
+ * remains slim (~50 KB). Lazy-loaded by spellcheck-linter.js on the
+ * first Tier-A lint pass.
  *
- * Public surface: `warmupHarper(dialect)` warms the worker at boot,
- * `lintEnglish(text, dialect)` returns Harper's raw lint result. The
- * shared worker is lazy-built on first use and rebuilt on dialect change.
+ * Modifying Harper behaviour
+ * --------------------------
+ * - To disable/enable specific Harper rules, call `setLintConfig()` on
+ *   the WorkerLinter instance after `ensureHarper()`. Rule names are
+ *   Record<string, boolean | null> — see writewithharper.com/docs/
+ *   harperjs/configurerules. Do NOT hard-code rule names; Harper adds
+ *   and renames rules across versions.
+ *
+ * - To add script-specific words (character names, vocabulary from
+ *   title-page metadata), call `ensureDictionary(words)`. It dedupes
+ *   against the current worker; dictionary clears on dialect rebuild.
+ *
+ * - To filter out entire classes of false positives (e.g. ALL CAPS
+ *   words), do that in spellcheck-linter.js's lint loop — not here.
+ *   This module returns raw Harper results; the caller decides what
+ *   to surface as CM6 Diagnostics.
+ *
+ * CSP: tauri.conf.json grants `'wasm-unsafe-eval'` and
+ * `worker-src 'self' blob:` so the WASM can instantiate and the
+ * Blob-URL worker can spawn.
  */
 
 import { WorkerLinter, Dialect } from "harper.js";
@@ -86,6 +104,32 @@ function ensureHarper(dialect)
     instance = new WorkerLinter({ binary, dialect: resolved });
     currentDialect = resolved;
     return instance;
+}
+
+/**
+ * Add a word to Harper's in-memory user dictionary AND persist it to user settings.
+ * @param {string} word
+ */
+export async function addToDictionary(word)
+{
+    await ensureDictionary([word]);
+    const { getUserSetting, saveUserSettings } = await import("../project/user-settings.js");
+    const existing = getUserSetting("userDictionary", []);
+    if (!existing.includes(word))
+    {
+        await saveUserSettings({ userDictionary: [...existing, word] });
+    }
+}
+
+/**
+ * Load the persisted user dictionary from user settings into Harper.
+ * Call this once after Harper WASM is ready.
+ */
+export async function loadPersistedDictionary()
+{
+    const { getUserSetting } = await import("../project/user-settings.js");
+    const words = getUserSetting("userDictionary", []);
+    if (words.length > 0) { await ensureDictionary(words); }
 }
 
 /**

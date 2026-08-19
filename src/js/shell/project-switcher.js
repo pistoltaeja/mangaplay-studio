@@ -4,7 +4,7 @@ import { basename, isTauri } from "../util/index.js";
 import { icon } from "../panes/icons.js";
 import { t } from "../adapters/tauri-i18n.js";
 import { loadRecent, openProject, updateRecent, clearMangaartCache, loadMangaart, loadMangaartByUuid, migrateLegacySyncEntries } from "../project/project.js";
-import { saveUserSettings } from "../project/user-settings.js";
+import { saveUserSettings, getProjectSession } from "../project/user-settings.js";
 import { scriptRelPathOf } from "../util/paths.js";
 import { getBroker } from "../project/active-script-broker.js";
 import { applyMetaBeforeFirstPaint } from "../boot/shell-restore.js";
@@ -285,6 +285,8 @@ export async function switchProject(path)
         {
             const appSettings = globalThis.__MPS_APP_SETTINGS__ || {};
             const meta = state.currentProject?.meta || {};
+            const projSessUuid = state.currentProject?.id || null;
+            const projSess = projSessUuid ? getProjectSession(projSessUuid) : {};
             const seed = {};
             const SHELL_FIELDS = [
                 "leftPaneWidth", "storyboardWidth",
@@ -301,10 +303,11 @@ export async function switchProject(path)
                     (k === "lastSoloMode") ? current === "solo-storyboard" :
                     (k === "activeSubview") ? current === "folder" :
                     false;
-                if (isUnset && meta[k] !== undefined)
+                const persisted = projSess[k] !== undefined ? projSess[k] : meta[k];
+                if (isUnset && persisted !== undefined)
                 {
-                    seed[k] = meta[k];
-                    appSettings[k] = meta[k];
+                    seed[k] = persisted;
+                    appSettings[k] = persisted;
                 }
             }
             if (Object.keys(seed).length > 0)

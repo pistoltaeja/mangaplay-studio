@@ -12,15 +12,14 @@
 //!
 //! Android storage backend is intentionally deferred. The `keyring` crate
 //! v3 has no native Android backend; the third-party `android-keyring`
-//! crate is explicitly marked "not production-ready" by its maintainer
-//! (see TODO/AuthRefreshToken/06-keyring-android-coverage.md). Refresh
-//! tokens are higher-value than 1-hour access tokens — the Android
+//! crate is explicitly marked "not production-ready" by its maintainer.
+//! Refresh tokens are higher-value than 1-hour access tokens — the Android
 //! backend MUST be at least as strong as iOS Keychain before shipping.
 //! Candidate solutions: tauri-plugin-stronghold (Argon2id-encrypted file)
 //! or a JNI bridge to EncryptedSharedPreferences.
 //!
-//! `auth_success_page_html` is re-exported at the crate root for
-//! `tests/auth_success_page.rs`.
+//! `auth_success_page_html` and `auth_callback_page_html` are re-exported
+//! at the crate root for `tests/auth_success_page.rs`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -227,23 +226,13 @@ code {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 /// Extract the `error=<code>` value from a raw HTTP request-line
 /// path+query like `/?error=access_denied&state=…`. Returns `None`
 /// when no `error` param is present. Google only ever emits ASCII
-/// identifier codes (`access_denied`, `invalid_scope`, etc.) so we
-/// deliberately do NOT pull in a full `url` crate for percent-decode
-/// — only `+` → space normalisation is applied.
+/// identifier codes (`access_denied`, `invalid_scope`, etc.); the shared
+/// `util::query::parse_query` applies `+` → space plus `%NN` decoding —
+/// a harmless superset for ASCII identifiers.
 fn extract_error_param(path_and_query: &str) -> Option<String>
 {
-    let (_, query) = path_and_query.split_once('?')?;
-    for pair in query.split('&')
-    {
-        if let Some((k, v)) = pair.split_once('=')
-        {
-            if k == "error"
-            {
-                return Some(v.replace('+', " "));
-            }
-        }
-    }
-    None
+    crate::util::query::parse_query(path_and_query)
+        .remove("error")
 }
 
 /// Minimal HTML escape — sufficient for interpolating an untrusted
@@ -298,7 +287,6 @@ pub fn auth_listen_loopback(app: tauri::AppHandle) -> Result<serde_json::Value, 
     let redirect_uri = format!("http://127.0.0.1:{}/auth-callback", port);
     let id = uuid::Uuid::new_v4().to_string();
     let id_for_thread = id.clone();
-    let _redirect_uri_clone = redirect_uri.clone();
 
     // Set blocking mode BEFORE inserting the abort flag — if this fails
     // we return Err without ever spawning the thread, and no HashMap

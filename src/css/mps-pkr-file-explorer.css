@@ -17,7 +17,7 @@ mps-pkr-file-explorer
 
 mps-pkr-file-explorer .pkr-left-header
 {
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: #888;
@@ -29,7 +29,7 @@ mps-pkr-file-explorer .pkr-left-header
 mps-pkr-file-explorer .pkr-empty
 {
     color: #777;
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     padding: 8px;
     user-select: none;
     -webkit-user-select: none;
@@ -65,7 +65,7 @@ mps-pkr-file-explorer .pkr-item-main
     color: inherit;
     cursor: pointer;
     font-family: inherit;
-    font-size: 14px;
+    font-size: var(--mps-font-size-md);
 }
 
 mps-pkr-file-explorer .pkr-item-main:active
@@ -126,7 +126,7 @@ mps-pkr-file-explorer .pkr-handle
     border-radius: 4px;
     opacity: 0;
     transition: opacity 100ms ease, background 100ms ease;
-    font-size: 16px;
+    font-size: var(--mps-font-size-lg);
     line-height: 1;
     display: inline-flex;
     align-items: center;

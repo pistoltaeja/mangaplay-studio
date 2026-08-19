@@ -25,6 +25,7 @@
 import { icon } from "../panes/icons.js";
 import { openModal } from "./modal-shell.js";
 import { t } from "../adapters/tauri-i18n.js";
+import { listSystemFonts, resolveFamilyBytes } from "../font/system-fonts.js";
 import {
     saveFileDialog, writeBytes,
     PersistentStorage, STORAGE_KEYS
@@ -99,6 +100,61 @@ function toScreenplay(script, scriptFormat)
     return null;
 }
 
+// ── System font seam ──────────────────────────────────────────────────────────
+//
+// `applySystemFontToExport` resolves a system-installed font family to raw
+// bytes via the Rust `fonts_resolve_family` + `app_read_file_bytes` commands,
+// then feeds them through the `explicitBytes` seam in `font-resolver.js`.
+//
+// Usage (from the family <select> in the PDF options row):
+//
+//   const opts = await applySystemFontToExport("Helvetica", pdfOptions);
+//   const blob = await generateScreenplayPdf(screenplay, opts);
+//
+// Returns a shallow clone of `basePdfOptions` with `explicitBytes` (regular)
+// and `explicitBoldBytes` (bold) injected. On any resolution failure returns
+// `basePdfOptions` unchanged so Courier Prime stays the fallback.
+
+/**
+ * @param {string} family         — system font family name
+ * @param {object} basePdfOptions — the options object passed to generateScreenplayPdf
+ * @returns {Promise<object>}     — basePdfOptions with explicitBytes/explicitBoldBytes
+ *                                  injected, or basePdfOptions unchanged on any error
+ */
+export async function applySystemFontToExport(family, basePdfOptions)
+{
+    if (!family || family === "Courier Prime" || family === "Courier New")
+    {
+        return basePdfOptions;
+    }
+
+    try
+    {
+        const [bytes, boldBytes] = await Promise.all([
+            resolveFamilyBytes(family, "regular"),
+            resolveFamilyBytes(family, "bold"),
+        ]);
+        if (!bytes)
+        {
+            return basePdfOptions;
+        }
+        // Feed through the `explicitBytes` / `explicitBoldBytes` seams in
+        // font-resolver.js. pdf-lib will throw for variable/TTC fonts;
+        // the catch below handles that.
+        const opts = { ...basePdfOptions, explicitBytes: bytes };
+        if (boldBytes) opts.explicitBoldBytes = boldBytes;
+        return opts;
+    }
+    catch
+    {
+        // Unembeddable font (variable, TTC, or I/O error) — fall back to
+        // Courier Prime by returning unmodified options.
+        return basePdfOptions;
+    }
+}
+
+// ── Format conversion ─────────────────────────────────────────────────────────
+
 /**
  * Run the conversion for the chosen format. Returns { bytes, defaultName }
  * or throws.
@@ -109,11 +165,12 @@ function toScreenplay(script, scriptFormat)
  * @param {string} args.sourceText
  * @param {string} args.scriptFormat
  * @param {string} args.stem
+ * @param {string} [args.fontFamily]
  * @returns {Promise<{ bytes: Uint8Array, defaultName: string }>}
  */
 async function runConversion(args)
 {
-    const { formatId, screenplay, sourceText, scriptFormat, stem } = args;
+    const { formatId, screenplay, sourceText, scriptFormat, stem, fontFamily } = args;
     const fmt = FORMATS.find(f => f.id === formatId);
     if (!fmt) throw new Error(`unknown format: ${formatId}`);
     const defaultName = `${stem}${fmt.dotExt}`;
@@ -167,7 +224,7 @@ async function runConversion(args)
             const characterTitleCards = mangaSettings.characterTitleCards !== false;
             const boldHeadings = mangaSettings.boldHeadings === true;
             const pageNumbers = mangaSettings.pageNumbers !== false;
-            const blob = await generateScreenplayPdf(screenplay, {
+            let pdfOptions = {
                 fontCandidates: [
                     "/fonts/courier-prime/CourierPrime-Regular.ttf",
                 ],
@@ -186,7 +243,12 @@ async function runConversion(args)
                     producer: "Pistol Taeja",
                     website: "https://mangaplay.studio",
                 },
-            });
+            };
+            if (fontFamily)
+            {
+                pdfOptions = await applySystemFontToExport(fontFamily, pdfOptions);
+            }
+            const blob = await generateScreenplayPdf(screenplay, pdfOptions);
             const buf = await blob.arrayBuffer();
             bytes = new Uint8Array(buf);
             break;
@@ -203,7 +265,7 @@ async function runConversion(args)
  * save. Resolves when the modal is closed (no return value; side effects
  * are the file write + toast).
  *
- * @param {{ script: any, scriptFormat: string, sourceText: string, basename: string, localPath?: string }} ctx
+ * @param {{ script: any, scriptFormat: string, sourceText: string, basename: string, localPath?: string, aggregateExport?: boolean, aggregateChildBasenames?: string[] }} ctx
  */
 export async function openExportScreenplayModal(ctx)
 {
@@ -214,10 +276,19 @@ export async function openExportScreenplayModal(ctx)
             || "This file has no screenplay surface to export.");
         return;
     }
+    // In aggregate mode `ctx.basename` is the folder name, not a file
+    // basename — passing it through stemFor() is still safe (no known
+    // suffix will match), so the stem == folder name verbatim. Kept the
+    // call for the single-file path.
     const stem = stemFor(ctx.basename || "Untitled");
+    const isAggregate = ctx.aggregateExport === true;
+    const childBasenames = Array.isArray(ctx.aggregateChildBasenames) ? ctx.aggregateChildBasenames : [];
 
     /** @type {string|null} */
     let selectedFormatId = null;
+
+    /** @type {string} — font family chosen in the PDF options row */
+    let selectedFontFamily = "Courier Prime";
 
     await openModal({
         variantClass: "export-screenplay-modal",
@@ -258,6 +329,34 @@ export async function openExportScreenplayModal(ctx)
                 || 'Export "{stem}" to a screenplay format.';
             subtitle.textContent = subtitleTpl.replace("{stem}", stem);
             body.appendChild(subtitle);
+
+            // Aggregate export — show which child files will be joined so a
+            // user notices if a file is missing before clicking Export. Text
+            // shown at most 3 basenames + "+N more" past that.
+            if (isAggregate && childBasenames.length > 0)
+            {
+                const includes = document.createElement("p");
+                includes.className = "export-includes";
+                const count = childBasenames.length;
+                if (count <= 3)
+                {
+                    const tpl = t("mangaplay-studio.exportScreenplay.aggregate.includes")
+                        || "Includes {count} files";
+                    includes.textContent = tpl.replace("{count}", String(count));
+                }
+                else
+                {
+                    const first3 = childBasenames.slice(0, 3).join(", ");
+                    const remaining = count - 3;
+                    const tpl = t("mangaplay-studio.exportScreenplay.aggregate.includesMore")
+                        || "Includes {count} files: {first3}, +{remaining} more";
+                    includes.textContent = tpl
+                        .replace("{count}", String(count))
+                        .replace("{first3}", first3)
+                        .replace("{remaining}", String(remaining));
+                }
+                body.appendChild(includes);
+            }
 
             const heading = document.createElement("div");
             heading.className = "export-section-heading";
@@ -313,6 +412,43 @@ export async function openExportScreenplayModal(ctx)
             }
             body.appendChild(grid);
 
+            // ── PDF options: font family select ─────────────────────────
+            const fontRow = document.createElement("div");
+            fontRow.className = "export-font-row";
+            fontRow.hidden = true;
+            const fontLabel = document.createElement("label");
+            fontLabel.className = "export-font-label";
+            fontLabel.htmlFor = "export-font-select";
+            fontLabel.textContent = t("mangaplay-studio.editorToolbar.fontFamily");
+            const fontSelect = document.createElement("select");
+            fontSelect.id = "export-font-select";
+            fontSelect.className = "mps-select export-font-select";
+            // Populate asynchronously — default option shows immediately.
+            const defaultOpt = document.createElement("option");
+            defaultOpt.value = "Courier Prime";
+            defaultOpt.textContent = "Courier Prime";
+            fontSelect.appendChild(defaultOpt);
+            fontSelect.value = "Courier Prime";
+            fontSelect.addEventListener("change", () =>
+            {
+                selectedFontFamily = fontSelect.value;
+            });
+            listSystemFonts().then((families) =>
+            {
+                fontSelect.textContent = "";
+                for (const fam of families)
+                {
+                    const opt = document.createElement("option");
+                    opt.value = fam;
+                    opt.textContent = fam;
+                    fontSelect.appendChild(opt);
+                }
+                fontSelect.value = selectedFontFamily;
+            });
+            fontRow.appendChild(fontLabel);
+            fontRow.appendChild(fontSelect);
+            body.appendChild(fontRow);
+
             const progress = document.createElement("div");
             progress.className = "export-progress";
             progress.hidden = true;
@@ -358,6 +494,7 @@ export async function openExportScreenplayModal(ctx)
                         sourceText: ctx.sourceText || "",
                         scriptFormat: ctx.scriptFormat,
                         stem,
+                        fontFamily: selectedFontFamily,
                     });
                     const fmt = FORMATS.find(f => f.id === selectedFormatId);
                     const filters = fmt ? [[fmt.filterLabel, [fmt.ext]]] : [];
@@ -402,6 +539,7 @@ export async function openExportScreenplayModal(ctx)
             {
                 selectedFormatId = id;
                 ctaBtn.disabled = false;
+                fontRow.hidden = id !== "pdf";
                 for (const card of grid.querySelectorAll(".export-format-card"))
                 {
                     const el = /** @type {HTMLElement} */ (card);

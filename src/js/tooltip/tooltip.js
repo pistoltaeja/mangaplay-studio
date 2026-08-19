@@ -76,10 +76,14 @@ class BadgeTooltip extends HTMLElement
                     background: #2a2d34;
                     transform: rotate(45deg);
                 }
-                :host([data-side="top"])    .arrow { bottom: -3px; left: 50%; margin-left: -4px; }
-                :host([data-side="bottom"]) .arrow { top: -3px;    left: 50%; margin-left: -4px; }
-                :host([data-side="left"])   .arrow { right: -3px;  top: 50%;  margin-top: -4px;  }
-                :host([data-side="right"])  .arrow { left: -3px;   top: 50%;  margin-top: -4px;  }
+                /* Arrow position is decoupled from the badge centre so placeNear() can
+                 * clamp the box against the viewport edge without the arrow drifting off
+                 * the target. --arrow-x / --arrow-y are set inline by placeNear(); when
+                 * unset the arrow sits at the badge centre (the pre-clamp default). */
+                :host([data-side="top"])    .arrow { bottom: -3px; left: calc(50% + var(--arrow-x, 0px)); margin-left: -4px; }
+                :host([data-side="bottom"]) .arrow { top: -3px;    left: calc(50% + var(--arrow-x, 0px)); margin-left: -4px; }
+                :host([data-side="left"])   .arrow { right: -3px;  top: calc(50% + var(--arrow-y, 0px));  margin-top: -4px;  }
+                :host([data-side="right"])  .arrow { left: -3px;   top: calc(50% + var(--arrow-y, 0px));  margin-top: -4px;  }
             </style>
             <div class="badge"><span class="label"></span><span class="arrow"></span></div>
         `;
@@ -105,8 +109,13 @@ class BadgeTooltip extends HTMLElement
     /**
      * Position relative to a target rect on a given side. Re-tries the opposite side
      * if the badge would overflow the viewport on the requested side.
+     * @param {DOMRect} targetRect
+     * @param {string} side - "top" | "bottom" | "left" | "right"
+     * @param {Set<string>|null} [tried] - recursion guard; sides already attempted.
+     *   Prevents infinite flip-flop when a row wider than the viewport overflows on
+     *   both left and right. Once a side is exhausted the clamp logic handles it.
      */
-    placeNear(targetRect, side)
+    placeNear(targetRect, side, tried = null)
     {
         if (!SIDES.has(side)) side = "bottom";
 
@@ -138,11 +147,48 @@ class BadgeTooltip extends HTMLElement
                 break;
         }
 
-        // Flip to the opposite side if off-viewport.
-        if (side === "top"    && y < 0)                                  return this.placeNear(targetRect, "bottom");
-        if (side === "bottom" && y + h > window.innerHeight)             return this.placeNear(targetRect, "top");
-        if (side === "left"   && x < 0)                                  return this.placeNear(targetRect, "right");
-        if (side === "right"  && x + w > window.innerWidth)              return this.placeNear(targetRect, "left");
+        // Flip to the opposite side if off-viewport, but never re-try a side we
+        // already attempted — a row wider than the viewport would otherwise flip
+        // right<->left forever. Fall through to the clamp logic instead.
+        const attempted = tried || new Set([side]);
+        // returns true if it recursed (caller should return); false to fall through
+        const tryFlip = (next) =>
+        {
+            if (attempted.has(next)) return false;
+            attempted.add(next);
+            this.placeNear(targetRect, next, attempted);
+            return true;
+        };
+        if (side === "top"    && y < 0)                      { if (tryFlip("bottom")) return; }
+        if (side === "bottom" && y + h > window.innerHeight) { if (tryFlip("top"))    return; }
+        if (side === "left"   && x < 0)                      { if (tryFlip("right"))  return; }
+        if (side === "right"  && x + w > window.innerWidth)  { if (tryFlip("left"))   return; }
+
+        // Clamp the free axis against the viewport edge and shift the arrow by
+        // the same delta in the opposite direction so it still points at the
+        // target's centre. MARGIN = viewport gutter; distinct from `gap` above
+        // which is the arrow-to-target distance on the primary axis.
+        const MARGIN = 8;
+        if (side === "top" || side === "bottom")
+        {
+            const naiveX = x;
+            const maxX = window.innerWidth - w - MARGIN;
+            // Pathological: badge wider than viewport minus gutters. Pin left.
+            x = maxX < MARGIN ? MARGIN : Math.max(MARGIN, Math.min(x, maxX));
+            const shiftX = naiveX - x;
+            this._badge.style.setProperty("--arrow-x", `${shiftX}px`);
+            this._badge.style.setProperty("--arrow-y", `0px`);
+        }
+        else
+        {
+            const naiveY = y;
+            const maxY = window.innerHeight - h - MARGIN;
+            // Pathological: badge taller than viewport minus gutters. Pin top.
+            y = maxY < MARGIN ? MARGIN : Math.max(MARGIN, Math.min(y, maxY));
+            const shiftY = naiveY - y;
+            this._badge.style.setProperty("--arrow-y", `${shiftY}px`);
+            this._badge.style.setProperty("--arrow-x", `0px`);
+        }
 
         this.setAttribute("data-side", side);
         this.style.transform = `translate3d(${Math.round(x)}px, ${Math.round(y)}px, 0)`;

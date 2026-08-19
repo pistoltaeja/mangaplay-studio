@@ -1,5 +1,4 @@
-//! Integration tests for `script_map` helpers + `scriptmap_get_or_mint_impl`
-//! (TODO/script-uuid-registry.md).
+//! Integration tests for `script_map` helpers + `scriptmap_get_or_mint_impl`.
 //!
 //! Covers: pure-function shape, legacy artMap pull-forward, concurrent
 //! mint under the per-project lock.

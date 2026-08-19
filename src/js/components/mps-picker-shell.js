@@ -47,7 +47,7 @@ class MpsPickerShell extends HTMLElement
         // Create-project inline panel state. `_page` is "rows" or "create"
         // and drives the slide via data-page on .pkr-shell-pages.
         this._page = "rows";
-        this._createState = { name: "", parentPath: "", targetExists: false };
+        this._createState = { name: "", parentPath: "", targetExists: false, asSubFolder: true };
         this._createDebounce = null;
         // Persistent-scaffold state. `_ensureScaffold()` mounts titlebar +
         // <mps-pkr-file-explorer> + right-pane container once and reuses them
@@ -147,7 +147,7 @@ class MpsPickerShell extends HTMLElement
     showCreatePanel()
     {
         this._page = "create";
-        this._createState = { name: "", parentPath: "", targetExists: false };
+        this._createState = { name: "", parentPath: "", targetExists: false, asSubFolder: true };
         // Clear DOM input so re-entry starts fresh.
         const input = /** @type {HTMLInputElement|null} */ (this.querySelector(".pkr-create-name"));
         if (input) input.value = "";
@@ -303,10 +303,10 @@ class MpsPickerShell extends HTMLElement
         }
         if (!content) return;
 
-        // Onboarding slot is intentionally empty in Phase 1 init — the
-        // mascot lives on document.body as an app-level singleton (see
-        // mps-mascot-app.js) so it can persist across views and animate
-        // without contributing to any picker-shell ancestor's scrollable
+        // Onboarding slot is intentionally empty on init — the mascot lives
+        // on document.body as an app-level singleton (see mps-mascot-app.js)
+        // so it can persist across views and animate without contributing to
+        // any picker-shell ancestor's scrollable
         // overflow. Picker-shell no longer owns the mascot's DOM or its
         // entrance trigger; that lives in shell/boot.js next to the
         // onboarding gate.
@@ -436,6 +436,14 @@ class MpsPickerShell extends HTMLElement
                             <span class="pkr-create-readout-path" data-role="target-readout"></span>
                         </div>
                     </div>
+                    <div class="pkr-divider"></div>
+                    <div class="pkr-row pkr-create-toggle-row">
+                        <div class="pkr-row-label">
+                            <div class="pkr-row-title">${escapeHtml(t("mangaplay-studio.picker.createPanel.useParentFolderLabel"))}</div>
+                            <div class="pkr-row-help" data-role="use-parent-help"></div>
+                        </div>
+                        <button type="button" role="switch" class="mps-toggle pkr-create-as-subfolder" aria-checked="false" aria-label="${escapeHtml(t("mangaplay-studio.picker.createPanel.useParentFolderLabel"))}"></button>
+                    </div>
                 </div>
 
                 <div class="pkr-create-actions">
@@ -488,13 +496,22 @@ class MpsPickerShell extends HTMLElement
             if (!this._isCreateSubmittable()) return;
             this._submitCreate();
         });
+
+        const asSubFolderBtn = /** @type {HTMLButtonElement|null} */ (this.querySelector(".pkr-create-as-subfolder"));
+        asSubFolderBtn?.addEventListener("click", () =>
+        {
+            this._createState.asSubFolder = !this._createState.asSubFolder;
+            asSubFolderBtn.setAttribute("aria-checked", this._createState.asSubFolder ? "false" : "true");
+            this._updateCreateUi();
+            this._scheduleExistsCheck();
+        });
     }
 
     _submitCreate()
     {
         const name = (this._createState.name || "").trim();
         const parent = this._createState.parentPath || "";
-        this._emit("mps-picker-create-submit", { parent, name });
+        this._emit("mps-picker-create-submit", { parent, name, asSubFolder: this._createState.asSubFolder });
     }
 
     _isCreateSubmittable()
@@ -502,7 +519,7 @@ class MpsPickerShell extends HTMLElement
         const name = (this._createState.name || "").trim();
         if (name.length < 1) return false;
         if (!this._createState.parentPath) return false;
-        if (this._createState.targetExists) return false;
+        if (this._createState.asSubFolder && this._createState.targetExists) return false;
         return true;
     }
 
@@ -520,6 +537,12 @@ class MpsPickerShell extends HTMLElement
         {
             clearTimeout(this._createDebounce);
             this._createDebounce = null;
+        }
+        if (this._createState.asSubFolder === false)
+        {
+            this._createState.targetExists = false;
+            this._updateCreateUi();
+            return;
         }
         const name = (this._createState.name || "").trim();
         const parent = this._createState.parentPath || "";
@@ -555,12 +578,34 @@ class MpsPickerShell extends HTMLElement
             parentReadout.textContent = parent || "";
         }
 
+        const helpEl = this.querySelector("[data-role='use-parent-help']");
+        if (helpEl)
+        {
+            const helpKey = this._createState.asSubFolder
+                ? "mangaplay-studio.picker.createPanel.useParentFolderHelpOff"
+                : "mangaplay-studio.picker.createPanel.useParentFolderHelpOn";
+            helpEl.textContent = t(helpKey);
+        }
+
         // Target readout row
         const readoutRow = /** @type {HTMLElement|null} */ (this.querySelector("[data-role='readout-row']"));
         const targetReadout = this.querySelector("[data-role='target-readout']");
         if (readoutRow && targetReadout)
         {
-            if (name && parent)
+            if (this._createState.asSubFolder === false)
+            {
+                if (parent)
+                {
+                    targetReadout.textContent = parent;
+                    readoutRow.classList.add("is-visible");
+                }
+                else
+                {
+                    targetReadout.textContent = "";
+                    readoutRow.classList.remove("is-visible");
+                }
+            }
+            else if (name && parent)
             {
                 targetReadout.textContent = this._joinPath(parent, name);
                 readoutRow.classList.add("is-visible");
@@ -577,7 +622,7 @@ class MpsPickerShell extends HTMLElement
         if (errorEl)
         {
             let msg = "";
-            if (parent && name && this._createState.targetExists)
+            if (this._createState.asSubFolder && parent && name && this._createState.targetExists)
             {
                 msg = t("mangaplay-studio.picker.createPanel.validation.folderExists", { name });
             }
@@ -610,7 +655,7 @@ class MpsPickerShell extends HTMLElement
 
 // Defensive throwing getter for the removed setOpening method. Catches
 // dynamic accessors (`shell[method]` where method is a string variable) that
-// the source-level grep gate can't see. See TODO/unify-splash-component.md.
+// the source-level grep gate can't see.
 // This file is whitelisted in scripts/build-bundle.js so the banned tokens
 // in this block don't trip the build gate.
 Object.defineProperty(MpsPickerShell.prototype, "setOpening", {

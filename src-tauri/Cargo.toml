@@ -1,6 +1,6 @@
 [package]
 name = "mangaplay-studio"
-version = "1.0.1"
+version = "1.0.2"
 description = "Mangaplay Studio — desktop comic-script editor"
 authors = ["Mangaplay"]
 license = "MIT"
@@ -84,6 +84,12 @@ sha2 = "0.10"
 # Used by commands/slides_cache.rs to serialise writers across windows.
 fs2 = "0.4"
 
+# Hoisted per Plan 11a — slides_image_fetch needs reqwest/rand/tokio on all
+# targets (Android/iOS included). Previously in desktop-only target block.
+reqwest = { version = "0.12", default-features = false, features = ["default-tls", "gzip", "http2"] }
+rand = "0.8"
+tokio = { version = "1", features = ["time"] }
+
 # tauri-plugin-opener — needed on every target for the Google Drive Picker
 # to launch the system browser. v2.5+ ships a real Android implementation
 # (see plugin `#[cfg(mobile)] open_url`), so the crate is safe to link on
@@ -98,6 +104,28 @@ tauri-plugin-opener = "2"
 # `tauri.conf.json` `plugins.deep-link.mobile[]`.
 tauri-plugin-deep-link = "2"
 
+# tauri-plugin-mps-firebase — mobile-only Firebase Analytics + Crashlytics
+# bridge (sibling path-dep). Desktop is a pure no-op with ZERO native deps
+# (see the plugin's desktop.rs), so linking it on every target is safe.
+tauri-plugin-mps-firebase = { path = "../tauri-plugin-mps-firebase" }
+
+# tauri-plugin-mps-admob — mobile-only Google AdMob bridge (sibling path-dep).
+# Desktop is a pure no-op with ZERO native deps (see desktop.rs), so linking
+# on every target is safe.
+tauri-plugin-mps-admob = { path = "../tauri-plugin-mps-admob" }
+
+# tauri-plugin-mps-ios-webview — iOS WKWebView configuration: edge-to-edge
+# safe areas, zoom suppression, scroll bounce suppression. Desktop is a pure
+# no-op with ZERO native deps, so linking on every target is safe.
+tauri-plugin-mps-ios-webview = { path = "../tauri-plugin-mps-ios-webview" }
+
+# tauri-plugin-iap — community In-App Purchases plugin (Choochmeque).
+# Android Play Billing + iOS StoreKit 2. Its README claims desktop stubs, so
+# we FIRST try linking it on every target here; if the desktop `cargo check`
+# breaks, this dep moves to the mobile-only target block below and the lib.rs
+# registration gets cfg-gated. See TASK 1b in the IAP plan.
+tauri-plugin-iap = "0.9"
+
 # Desktop-only crates. Pulled in everywhere EXCEPT Android and iOS. trash + notify
 # rely on platform APIs that don't exist on Android (recycle bin, inotify
 # rename cookies).
@@ -105,12 +133,17 @@ tauri-plugin-deep-link = "2"
 trash = "5"
 notify = "8"
 notify-debouncer-full = "0.7"
+# Pure-Rust font database — enumerate + resolve installed system fonts for
+# PDF export font embedding (Phase 5d). No C deps; cross-compiles cleanly.
+# Pinned to 0.5 (stable, no breaking changes since 0.4). Desktop-only:
+# Android has no system font registry accessible without JNI.
+fontdb = "0.5"
 
 # tauri-plugin-http — server-side HTTP client used by the JS layer to fetch
 # Google Slides image bytes without triggering the WebView's CORS/CSP. Desktop
-# only: image download only matters when we have a project on disk to write
-# into. Android/iOS builds skip this entirely (mobile-friendly `desktop`
-# feature stub in commands lets us keep call sites uniform).
+# only: tauri-plugin-http itself stays desktop-only. The shared reqwest client
+# used by slides_image_fetch is hoisted to [dependencies] per Plan 11a so it
+# links on iOS/Android.
 tauri-plugin-http = "2"
 
 # Windows-only: native splash window (see setup/native_splash.rs). Paints the
@@ -137,6 +170,11 @@ png = { version = "0.17", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
+# Used by `tests/slides_image_fetch.rs` to spin up a mock HTTP server
+# for the retry/backoff/allow-list assertions. Simple sync API, no runtime
+# needed at the test-harness level.
+httpmock = "0.7"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
 
 # Release-profile hardening. Tuned for shipping the desktop .exe on Windows.
 #

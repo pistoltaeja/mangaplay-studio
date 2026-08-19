@@ -618,6 +618,38 @@ describe("prepareSlidesSync (phase A — read-only)", () =>
         expect(fetchCalls).toBe(0);
     });
 
+    test("cached page with no deck-side storedCrc stamp is still skipped", async () =>
+    {
+        const imgA = new Uint8Array([1, 2, 3]);
+        const crcA = crc32Hex(imgA);
+        const presentation = buildPresentation([
+            { pageId: "1", imgBytes: imgA, storedCrc: null },
+        ], "NoStamp");
+
+        installInvoke({
+            slides_deck_stat: () => ({
+                manifest: { "1": { crc: crcA, path: "1.png" } },
+                orphanPaths: [],
+                cacheDirExists: true,
+            }),
+        });
+
+        const report = await prepareSlidesSync({
+            presentation,
+            refreshedAt: freshTs(),
+            presentationId: "pid-nostamp",
+            script: { pages: [{ baseNumber: 1 }] },
+            projectPath: "/tmp/proj",
+            authClient: stubAuth("tok"),
+        });
+
+        expect(report.imagesFound).toBe(1);
+        expect(report.imagesCached).toBe(1);
+        expect(report.imagesToDownload).toBe(0);
+        expect(report.toDownload).toEqual([]);
+        expect(fetchCalls).toBe(0);
+    });
+
     test("mismatch: local has extras, deck has extras", async () =>
     {
         const imgA = new Uint8Array([1]);

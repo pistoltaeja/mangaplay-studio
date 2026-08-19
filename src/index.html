@@ -1,8 +1,8 @@
 <!DOCTYPE html>
-<html lang="en" data-app-state="app-init" data-ux-mode="standalone" data-active-pane="editor">
+<html lang="en" data-app-state="app-init" data-ux-mode="standalone" data-platform="desktop">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <link rel="icon" href="./img/icon-64-transparent.png" type="image/png">
     <title>Mangaplay Studio</title>
     <!-- Screenplay-role font (Courier Prime). Static <link> so font-prefs.js
@@ -41,9 +41,10 @@
     <link rel="stylesheet" href="./css/mps-dialogue.css">
     <link rel="stylesheet" href="./css/mps-card-tray.css">
     <link rel="stylesheet" href="./css/mps-pkr-file-explorer.css">
-    <!-- Phase-2 spike: visual editor component styles. Safe to load always —
-         all rules are namespaced under `mps-visual-editor`. -->
-    <link rel="stylesheet" href="./css/visual-editor.css">
+    <link rel="stylesheet" href="./css/mps-display.css">
+    <!-- Easy Editor component styles. Safe to load always —
+         all rules are namespaced under `mps-easy-editor`. -->
+    <link rel="stylesheet" href="./css/easy-editor.css">
     <!-- Inline pre-paint boot screen. Paints with the HTML parse — no FOUC,
          no fetch gate. Background is #1a1a1a — matches the splash.png
          background exactly so the splash → shell handoff is a no-flash
@@ -81,13 +82,34 @@
         // if we can measure bytes, else a smooth ease that hits ~65% right
         // before app.js finishes parsing) and 70-100% for hydration.
         (function () {
-            var mode = window.__MPS_UX_MODE__;
-            if (typeof mode !== "string") {
-                console.warn("[boot] __MPS_UX_MODE__ undefined — initialization_script may not have run. Defaulting to standalone.");
-                mode = "standalone";
+            // Wry's initialization_script fires at document-start on Windows
+            // WebView2 but on macOS/iOS WKWebView the ordering can slip AFTER
+            // this inline <script> parses. If __MPS_UX_MODE__ isn't set yet,
+            // fall back to whatever copy-assets.js baked into <html data-ux-mode>
+            // at build time (build-app.js exports MPS_UX_MODE into process.env
+            // so mobile/tablet builds have the baked attribute set correctly)
+            // and re-check once DOMContentLoaded fires — by then the injection
+            // has always landed.
+            function applyUxMode() {
+                var injected = window.__MPS_UX_MODE__;
+                if (typeof injected === "string" && (injected === "mobile" || injected === "tablet" || injected === "standalone")) {
+                    document.documentElement.setAttribute("data-ux-mode", injected);
+                    return injected;
+                }
+                return document.documentElement.getAttribute("data-ux-mode") || "standalone";
             }
-            document.documentElement.setAttribute("data-ux-mode", mode);
-            console.log("[boot:inline] Boot script executing. UX mode:", mode);
+            function applyPlatform() {
+                var p = window.__MPS_PLATFORM__;
+                if (typeof p === "string" && (p === "ios" || p === "android" || p === "desktop")) {
+                    document.documentElement.setAttribute("data-platform", p);
+                    return p;
+                }
+                return document.documentElement.getAttribute("data-platform") || "desktop";
+            }
+            var mode = applyUxMode();
+            var platform = applyPlatform();
+            document.addEventListener("DOMContentLoaded", function() { applyUxMode(); applyPlatform(); }, { once: true });
+            console.log("[boot:inline] Boot script executing. UX mode:", mode, "platform:", platform);
 
             // Skin injection. Rust reads `skin` from user-settings.json
             // and injects `window.__MPS_LAST_SKIN__` via
@@ -215,9 +237,6 @@
             window.addEventListener("error", function (e) {
                 try { showRetry((e && e.message) || ""); } catch (_) {}
             });
-            var watchdogTimer = setTimeout(function () {
-                showRetry(bootStr("state.error", "Took longer than expected."));
-            }, 15000);
 
             // ── Progress bar mechanic ────────────────────────────────────
             // Progress is 0..1. UI multiplies to 0..100%. Stage labels
@@ -252,16 +271,55 @@
             // is also pushed into a queue for replay when the <mps-splash>
             // custom element upgrades in app.js. See:
             // src/js/components/mps-splash.js — installSplashComponent().
+            // Minimum splash timings — user-facing readability floor.
+            //   SPLASH_MIN_TOTAL_MS — the splash never fades before this many
+            //     ms have elapsed since the inline script parsed.
+            //   SPLASH_MIN_STAGE_MS — two consecutive update() calls are
+            //     spaced at least this many ms apart, so each caption is
+            //     readable rather than flashing past.
+            var SPLASH_MIN_TOTAL_MS = 2000;
+            var SPLASH_MIN_STAGE_MS = 250;
+            var __splashStartAt = performance.now();
+            window.__splashStartAt = __splashStartAt;
+
+            var __splashLastUpdateAt = 0;
+            var __splashPendingTimer = null;
+            var __splashPendingArgs = null;
+
+            function __applySplashUpdate(stage, msg) {
+                var cap = document.getElementById("boot-caption");
+                if (cap && msg) cap.textContent = msg;
+                var p = STAGE_PROGRESS[stage];
+                if (typeof p === "number") setPct(p);
+                __splashLastUpdateAt = performance.now();
+            }
+
+            function __queueSplashUpdate(stage, msg) {
+                var now = performance.now();
+                var gap = now - __splashLastUpdateAt;
+                if (__splashLastUpdateAt === 0 || gap >= SPLASH_MIN_STAGE_MS) {
+                    __applySplashUpdate(stage, msg);
+                    return;
+                }
+                // Coalesce — always keep the LATEST pending update so we never
+                // stall behind a stale caption.
+                __splashPendingArgs = [stage, msg];
+                if (__splashPendingTimer) return;
+                __splashPendingTimer = setTimeout(function () {
+                    __splashPendingTimer = null;
+                    var args = __splashPendingArgs;
+                    __splashPendingArgs = null;
+                    if (args) __applySplashUpdate(args[0], args[1]);
+                }, SPLASH_MIN_STAGE_MS - gap);
+            }
+
             var __splashQueue = [];
             window.__mpsSplash = {
                 mode: mode,
                 stages: ["paint", "bundle", "settings", "userData", "iapInit", "analyticsInit", "accountInit", "project"],
                 update: function (stage, msg) {
                     __splashQueue.push(["update", stage, msg]);
-                    var cap = document.getElementById("boot-caption");
-                    if (cap && msg) cap.textContent = msg;
-                    var p = STAGE_PROGRESS[stage];
-                    if (typeof p === "number") setPct(p);
+                    __queueSplashUpdate(stage, msg);
                 },
                 setProgress: function (p) {
                     __splashQueue.push(["setProgress", p]);
@@ -275,20 +333,32 @@
                         return window.__mpsSplash.__donePromise;
                     }
                     __splashQueue.push(["done"]);
-                    clearTimeout(watchdogTimer);
+                    // Flush any pending caption so the last stage lands before fade.
+                    if (__splashPendingTimer) {
+                        clearTimeout(__splashPendingTimer);
+                        __splashPendingTimer = null;
+                        if (__splashPendingArgs) {
+                            __applySplashUpdate(__splashPendingArgs[0], __splashPendingArgs[1]);
+                            __splashPendingArgs = null;
+                        }
+                    }
                     setPct(1);
+                    var elapsed = performance.now() - __splashStartAt;
+                    var wait = Math.max(0, SPLASH_MIN_TOTAL_MS - elapsed);
                     var el = document.getElementById("boot-screen");
                     var p = new Promise(function (resolve) {
-                        if (el) {
-                            el.style.transition = "opacity .25s";
-                            el.style.opacity = "0";
-                            setTimeout(function () {
-                                try { el.remove(); } catch (_) {}
+                        setTimeout(function () {
+                            if (el) {
+                                el.style.transition = "opacity .25s";
+                                el.style.opacity = "0";
+                                setTimeout(function () {
+                                    try { el.remove(); } catch (_) {}
+                                    resolve();
+                                }, 260);
+                            } else {
                                 resolve();
-                            }, 260);
-                        } else {
-                            resolve();
-                        }
+                            }
+                        }, wait);
                     });
                     window.__mpsSplash.__donePromise = p;
                     return p;
@@ -376,15 +446,6 @@
         <div id="top-bar">
             <div class="top-bar-left">
                 <div id="left-subview-group" class="top-bar-subview-group">
-                    <button id="btn-subview-folder"
-                            class="top-bar-icon top-bar-home"
-                            aria-label="Home"
-                            type="button">
-                        <img class="top-bar-home-icon"
-                             src="./img/icon-64-transparent.png"
-                             alt=""
-                             width="20" height="20">
-                    </button>
                 </div>
             </div>
 
@@ -513,6 +574,15 @@
                         hidden>
                     <img class="rail-account-avatar" alt="" />
                 </button>
+                <button id="btn-app-settings"
+                        class="rail-icon rail-account-slot"
+                        type="button"
+                        aria-label="Settings"
+                        data-tooltip="App Settings"
+                        data-i18n-tooltip="mangaplay-studio.chrome.tooltip.appSettings"
+                        data-tooltip-side="right">
+                    <span data-icon="settings"></span>
+                </button>
             </aside>
 
             <aside id="left-pane" data-subview="folder">
@@ -531,7 +601,7 @@
                 </div>
                 <div class="left-pane-footer">
                     <button id="project-switcher-btn" type="button" class="project-switcher-btn" aria-haspopup="menu" aria-expanded="false">
-                        <span class="project-switcher-chevron" data-icon="chevrons-down-up"></span>
+                        <span class="project-switcher-chevron" data-icon="chevrons-up-down"></span>
                         <span class="project-switcher-label">(project)</span>
                     </button>
                     <button id="btn-app-help"
@@ -539,15 +609,6 @@
                             type="button"
                             aria-label="Help">
                         <span data-icon="circle-help"></span>
-                    </button>
-                    <button id="btn-app-settings"
-                            class="footer-icon"
-                            type="button"
-                            aria-label="Settings"
-                            data-tooltip="App Settings"
-                            data-i18n-tooltip="mangaplay-studio.chrome.tooltip.appSettings"
-                            data-tooltip-side="top">
-                        <span data-icon="settings"></span>
                     </button>
                 </div>
                 <div class="left-pane-resize-handle"
@@ -571,6 +632,7 @@
                          Google Docs pills). Hidden in mobile/tablet UX modes
                          via the data-ux-mode rules in app.css. -->
                     <footer id="app-footer" hidden></footer>
+                    <mps-find-widget hidden></mps-find-widget>
                 </mps-editor-host>
                 <div class="workspace-seam"
                      role="separator" aria-orientation="vertical"
@@ -579,6 +641,7 @@
                     <div id="quick-toggle-strip" class="quick-toggle-strip"></div>
                     <div class="right-pane-slider" data-active="storyboard">
                         <mps-canvas></mps-canvas>
+                        <mps-display hidden></mps-display>
                         <mps-screenplay></mps-screenplay>
                     </div>
                     <div id="right-pane-no-doc" class="right-pane-empty-overlay" hidden></div>
@@ -591,6 +654,8 @@
             </main>
         </div>
     </div>
+
+    <mps-mobile-fab></mps-mobile-fab>
 
     <div id="error-overlay" hidden>
         <div class="error-card">

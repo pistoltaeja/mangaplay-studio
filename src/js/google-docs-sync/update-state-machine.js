@@ -2,7 +2,7 @@
 /**
  * update-state-machine.js — drives the four-panel Update Content modal.
  *
- * Per TODO/push-pull-lock-fix-and-modal.md §3. Mirrors the shape of
+ * Mirrors the shape of
  * `publish-state-machine.js`: pure orchestration with every side effect
  * injected as a worker. That keeps the machine testable without network
  * or Tauri, and lets the modal layer hold the user-confirm pause for the
@@ -160,16 +160,6 @@ export class UpdateStateMachine
      */
     async run()
     {
-        console.warn("[mps:auth:TRACE] UpdateStateMachine.run() ENTRY values=",
-            {
-                docId: this.values.docId,
-                ourSub: this.values.ourSub ? (String(this.values.ourSub).slice(0, 6) + "…") : "null",
-                ourLockToken: this.values.ourLockToken ? "present" : "null",
-                userName: this.values.userName,
-                clientId: this.values.clientId ? "present" : "null",
-                format: this.values.format,
-                expectedRevisionId: this.values.expectedRevisionId
-            });
         const startedAt = Date.now();
         const clockPromise = this._sleep(this.minTotalMs);
 
@@ -204,22 +194,16 @@ export class UpdateStateMachine
 
             const lockState = lockResult && lockResult.lockState;
             const appProps = (lockResult && lockResult.appProps) || {};
-            console.warn("[mps:auth:TRACE] update-SM lockState decision → lockState=", lockState,
-                " ourSub=", this.values.ourSub ? (String(this.values.ourSub).slice(0, 6) + "…") : "null",
-                " ourLockToken=", this.values.ourLockToken ? "present" : "null");
 
             /** @type {boolean} */
             let hasOwnLock = false;
 
             if (lockState === "locked-by-me")
             {
-                console.warn("[mps:auth:TRACE] update-SM → locked-by-me, hasOwnLock=true, skipping confirmForceTake");
                 hasOwnLock = true;
             }
             else if (lockState === "locked-by-other" || lockState === "stale")
             {
-                console.warn("[mps:auth:TRACE] update-SM → PAUSING at confirmForceTake modal (lockState=" + lockState +
-                    ", lockedBy=" + (appProps.mpsLockedBy || "another user") + ", isStale=" + (lockState === "stale") + ")");
                 this._forceTakeDeferred = new Promise((resolve) =>
                 {
                     this._resolveForceTake = resolve;
@@ -230,7 +214,6 @@ export class UpdateStateMachine
                     isStale: lockState === "stale"
                 });
                 const accepted = await this._forceTakeDeferred;
-                console.warn("[mps:auth:TRACE] update-SM confirmForceTake modal resolved accepted=", accepted);
                 this._forceTakeDeferred = null;
                 if (!accepted)
                 {
@@ -238,7 +221,6 @@ export class UpdateStateMachine
                     return;
                 }
 
-                console.warn("[mps:auth:TRACE] update-SM → forceTaking (user clicked Force Update Now)");
                 await this._transition("forceTaking",
                     () => this.workers.forceTake({
                         token: this.token,
@@ -248,10 +230,6 @@ export class UpdateStateMachine
                         lockedBySub: this.values.ourSub || null
                     }));
                 hasOwnLock = true;
-            }
-            else
-            {
-                console.warn("[mps:auth:TRACE] update-SM → unlocked branch, no lift needed");
             }
             // "unlocked" → hasOwnLock stays false; push doesn't lift.
 
@@ -307,9 +285,6 @@ export class UpdateStateMachine
             const message = String((e && e.message) || err || "");
             const diagnostic = `${(e && e.name) || "Error"}: ${message.slice(0, 200)}`;
             const retryable = errorClass !== "fatal.config" && errorClass !== "fatal.unknown";
-            console.warn("[mps:auth:TRACE] UpdateStateMachine.run() → ERROR at failedStep=" + failedStep +
-                " errorClass=" + errorClass + " errorName=" + ((e && e.name) || "Error") +
-                " message=" + message.slice(0, 300));
 
             this.failedStep = failedStep;
             this._toState("error", {
@@ -336,18 +311,7 @@ export class UpdateStateMachine
         const weight = def ? def.weight : 0;
 
         const startedAt = Date.now();
-        let result;
-        try
-        {
-            result = await work();
-        }
-        catch (e)
-        {
-            console.warn("[mps:auth:TRACE] UpdateStateMachine._transition() step=" + stepKey +
-                " THREW name=" + (e && e.name) + " message=" + (e && e.message) +
-                " status=" + (e && e.status));
-            throw e;
-        }
+        const result = await work();
         const elapsed = Date.now() - startedAt;
         if (elapsed < minDwell) await this._sleep(minDwell - elapsed);
 
@@ -362,8 +326,6 @@ export class UpdateStateMachine
      */
     _toState(state, payload)
     {
-        console.warn("[mps:auth:TRACE] UpdateStateMachine._toState() →", state, " pct=", this.pct,
-            " payload=", payload ? Object.keys(payload) : null);
         this.state = state;
         this.onTransition({ state, pct: this.pct, payload });
     }

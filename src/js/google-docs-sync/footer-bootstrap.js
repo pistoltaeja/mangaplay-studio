@@ -10,7 +10,7 @@
  *   - exposing a `gearClickHandler` that opens the publish modal or sync
  *     popover depending on the current sync state (called by the App Footer
  *     when the user clicks its gear),
- *   - running Phase 4 Push / Pull / conflict-toast through the popover,
+ *   - running Push / Pull / conflict-toast through the popover,
  *   - lifecycle for the heartbeat controller (start/stop on focus/blur +
  *     unlock; teardown on script close).
  *
@@ -31,7 +31,6 @@ import {
 } from "../../../../core/google-docs/index.js";
 import { SyncStateMachine } from "./sync-state-machine.js";
 import { openSyncPopover, closeSyncPopover } from "./sync-popover.js";
-import { openPublishModal } from "./publish-modal.js";
 import {
     evaluateLockState,
     lock as lockEngineLock,
@@ -43,6 +42,20 @@ import { showConflictToast, dismissConflictToast } from "./conflict-toast.js";
 import { t } from "../adapters/tauri-i18n.js";
 import { getCurrentProfile } from "../auth/google-oauth.js";
 import { openUpdateContentModal } from "./update-content-modal.js";
+
+/**
+ * Lazy-import for the Google Docs publish modal. Static-importing this at
+ * module top pulls publish-modal.js into every bundle (including mobile
+ * where it's unreachable) via the app.js → footer-bootstrap.js chain.
+ * Only the gear-click handler needs it; deferring the import keeps mobile
+ * bundles clean AND cuts standalone cold-boot parse cost.
+ * @returns {Promise<typeof import("./publish-modal.js").openPublishModal>}
+ */
+async function _loadOpenPublishModal()
+{
+    const mod = await import("./publish-modal.js");
+    return mod.openPublishModal;
+}
 
 /**
  * Minimal surface the bootstrap drives on the App Footer's gear element.
@@ -193,7 +206,6 @@ export function getGoogleDocsGearClickHandler()
 {
     return async () =>
     {
-        console.warn("[mps:auth:TRACE] footer PILL CLICKED — awaiting _activeScriptReady…");
         for (let i = 0; i < 4; i++)
         {
             const p = _activeScriptReady;
@@ -204,16 +216,14 @@ export function getGoogleDocsGearClickHandler()
 
         if (!machine)
         {
-            console.warn("[mps:auth:TRACE] footer PILL → no machine, no-op");
             return;
         }
-        console.warn("[mps:auth:TRACE] footer PILL → machine.state=", machine.state);
         if (machine.state === "unsynced")
         {
             const ctxObj = (opts.getScriptContext && opts.getScriptContext()) || {};
             const profile = (opts.getUserProfile && opts.getUserProfile()) || { name: null };
             const clientId = (opts.getClientId && opts.getClientId()) || "";
-            console.warn("[mps:auth:TRACE] footer PILL → state=unsynced → opening publish modal");
+            const openPublishModal = await _loadOpenPublishModal();
             await openPublishModal({
                 script: null,
                 scriptFormat: ctxObj.format || "text",
@@ -325,7 +335,7 @@ async function _doSetActiveScript(ctx)
                 // itself; this catches non-popover paths to unsynced.
                 closeSyncPopover();
             }
-            // Phase 4 — auto-surface the conflict toast on remote drift.
+            // Auto-surface the conflict toast on remote drift.
             if (state === "remote-ahead")
             {
                 _showConflictToastFromMachine();
@@ -517,13 +527,8 @@ async function _openInBrowser()
 
 async function _runPush()
 {
-    console.warn("[mps:auth:TRACE] footer _runPush() ENTRY machine.state=",
-        machine && machine.state, " docId=", machine && machine.docId,
-        " lastKnownRevisionId=", machine && machine.lastKnownRevisionId,
-        " lastKnownLockToken=", (machine && machine.lastKnownLockToken) ? "present" : "null");
     if (!machine || !machine.docId)
     {
-        console.warn("[mps:auth:TRACE] footer _runPush() → no machine or docId, aborting");
         return;
     }
     const ctxObj = (opts.getScriptContext && opts.getScriptContext()) || {};
@@ -546,7 +551,6 @@ async function _runPush()
             clientId: (opts.getClientId && opts.getClientId()) || "",
             ourLockToken: machine.lastKnownLockToken || null
         });
-        console.warn("[mps:auth:TRACE] footer _runPush() ← modal resolved OK newRevisionId=", newRevisionId);
         await machine.notifyPushSucceeded(newRevisionId || machine.lastKnownRevisionId || "");
     }
     catch (e)
@@ -554,11 +558,8 @@ async function _runPush()
         // UserCancelled rejection from the modal — silent.
         if (e && /** @type {any} */ (e).name === "UserCancelled")
         {
-            console.warn("[mps:auth:TRACE] footer _runPush() ← UserCancelled (silent)");
             return;
         }
-        console.warn("[mps:auth:TRACE] footer _runPush() ← FAILED name=" + (e && e.name) +
-            " message=" + (e && e.message) + " errorClass=" + (e && e.errorClass));
     }
     finally
     {

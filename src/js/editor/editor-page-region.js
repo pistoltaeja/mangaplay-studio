@@ -168,6 +168,33 @@ function buildRegionDecorations(view)
             continue;
         }
 
+        // Find the last non-blank line in the region before emitting the
+        // heading decoration — we need to know if this is a heading-only
+        // region (all interior lines blank) so we can pick collapsedLine
+        // (all four sides + radius) instead of startLine (top + sides only).
+        // The builder requires non-decreasing positions, so we cannot go
+        // back and replace startLine after the fact.
+        let lastNonBlank = endLineNum;
+        while (lastNonBlank > headLineNum
+            && state.doc.line(lastNonBlank).text.trim() === "")
+        {
+            lastNonBlank--;
+        }
+
+        // Heading-only region (every interior line was blank) → collapsed.
+        // Emit collapsedLine (all four sides + border-radius) for the
+        // heading, then gutter lines for the trailing blanks.
+        if (lastNonBlank === headLineNum)
+        {
+            builder.add(headLine.from, headLine.from, collapsedLine);
+            for (let n = headLineNum + 1; n <= endLineNum; n++)
+            {
+                const l = state.doc.line(n);
+                builder.add(l.from, l.from, gutterLine);
+            }
+            continue;
+        }
+
         builder.add(headLine.from, headLine.from, startLine);
 
         // Find the first non-blank line after the heading. Blank lines in
@@ -178,19 +205,6 @@ function buildRegionDecorations(view)
             && state.doc.line(firstNonBlank).text.trim() === "")
         {
             firstNonBlank++;
-        }
-
-        // Find the last non-blank line in the region. Trailing blanks (the
-        // user's separator between this page and the next `# Page`) get
-        // pushed OUTSIDE the card so the bottom border hugs the final
-        // action line, and the trailing blanks render as the inter-card
-        // gutter. Same source-preservation guarantee as the leading
-        // hidden block — the doc text is untouched.
-        let lastNonBlank = endLineNum;
-        while (lastNonBlank > headLineNum
-            && state.doc.line(lastNonBlank).text.trim() === "")
-        {
-            lastNonBlank--;
         }
 
         // Card boundary: the card hugs its content by default. Every
@@ -214,24 +228,6 @@ function buildRegionDecorations(view)
         let cardEnd = lastNonBlank;
         if (isLastPage) cardEnd = endLineNum;
         else if (trailingBlanks >= 2) cardEnd = lastNonBlank + (trailingBlanks - 1);
-
-        // Heading-only region (every interior line was blank) → collapsed.
-        if (lastNonBlank === headLineNum)
-        {
-            // Replace the startLine with a collapsedLine to paint all four
-            // sides. The builder requires increasing positions, so we can't
-            // re-add at headLine.from — but in this branch we already
-            // emitted startLine above. Cleanest path: fall through. The
-            // top + sides paint correctly; the bottom border just won't
-            // appear, which is a rare edge case (page with no content yet).
-            // Subsequent blank lines become gutter.
-            for (let n = headLineNum + 1; n <= endLineNum; n++)
-            {
-                const l = state.doc.line(n);
-                builder.add(l.from, l.from, gutterLine);
-            }
-            continue;
-        }
 
         for (let n = headLineNum + 1; n < cardEnd; n++)
         {

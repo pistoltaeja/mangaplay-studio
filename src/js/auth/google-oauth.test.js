@@ -1,8 +1,7 @@
 // @ts-check
 /**
  * google-oauth.test.js — Bun tests for the refresh / restore / sub
- * verification paths landed in TODO/AuthRefreshToken tickets 02-04, 08-09,
- * 12-13.
+ * verification paths (auth refresh token tickets 02-04, 08-09, 12-13).
  *
  * The module under test has module-scope state and imports real Tauri
  * adapters, so the tests use the test-only seams declared in

@@ -6,6 +6,7 @@
 import { EditorView, keymap, lineNumbers, highlightActiveLine } from "@codemirror/view";
 import { EditorState, Compartment } from "@codemirror/state";
 import { defaultKeymap, history, historyKeymap, selectAll } from "@codemirror/commands";
+import { indentUnit } from "@codemirror/language";
 import { openContextMenu } from "../components/mps-context-menu.js";
 import { editorCut, editorCopy, editorPaste, editorPastePlain } from "./editor-clipboard.js";
 import { t } from "../adapters/tauri-i18n.js";
@@ -13,21 +14,38 @@ import { formatForFilename, languageExtensionsFor } from "./lang-registry.js";
 import { editorSourceTab } from "./editor-source-tab.js";
 import { getSpellcheckState, getSpellcheckConfig } from "../spellcheck/spellcheck-state.js";
 import { combinedLinter } from "./combined-linter.js";
-import { forceLinting } from "@codemirror/lint";
+import { editorPanelTagStyle } from "./editor-panel-tag-style.js";
+import { editorBracketMatch } from "./editor-bracket-match.js";
+import { forceLinting, forEachDiagnostic } from "@codemirror/lint";
+import { registerView, getAllRegisteredViews } from "./focused-view-registry.js";
+import { setRelintHook, addIgnore, setAlwaysCorrect, addToPersonalDict } from "../spellcheck/spellcheck-store.js";
+
+// Wire the spellcheck store's relint hook. When a spelling decision mutates
+// the store (addIgnore, setAlwaysCorrect, addToPersonalDict, etc.) this
+// fires forceLinting on all registered CM6 views so squiggles update
+// immediately without waiting for the next keystroke.
+setRelintHook(() =>
+{
+    for (const v of getAllRegisteredViews())
+    {
+        try { forceLinting(v); }
+        catch (_) { /* view detached — skip */ }
+    }
+});
 
 /**
- * @typedef {"source"|"text"|"visual"} EditorMode
+ * @typedef {"source"|"wysiwyg"|"easy"} EditorMode
  */
 
 /**
- * Module-level current mode. Visual mode lives outside CM entirely; for the
- * CM-resident modes ("source" / "text") this drives which extension set the
+ * Module-level current mode. Easy Editor mode lives outside CM entirely; for the
+ * CM-resident modes ("source" / "wysiwyg") this drives which extension set the
  * Compartment is reconfigured to. New views built while we're in Source
  * mode honour this so a freshly-opened tab doesn't surface the language
  * extensions only to be stripped a tick later.
  * @type {EditorMode}
  */
-let currentEditorMode = "text";
+let currentEditorMode = "wysiwyg";
 
 /** @returns {EditorMode} */
 export function getEditorMode()
@@ -85,6 +103,7 @@ function extensionsForMode(mode, format)
         //      if the state was seeded after the view mounted, the facet
         //      eventually wins but the squiggle paint never wakes up.
         const ext = [
+            indentUnit.of("    "),
             editorSourceTab(),
             EditorView.contentAttributes.of(() =>
             {
@@ -103,14 +122,28 @@ function extensionsForMode(mode, format)
             EditorView.theme({
                 ".cm-content": { WebkitUserModify: "read-write" }
             })
+            // Caret colour lives in default-skins/*/*.css. Because
+            // drawSelection() is disabled the native browser caret is what
+            // paints — so `caret-color` on `.cm-content` is the effective
+            // rule, not `border-left-color` on `.cm-cursor` (which would
+            // only matter with drawSelection active).
         ];
         if (format === "mangaplay" || format === "fountain" || format === "superscript")
         {
             ext.push(combinedLinter(getSpellcheckConfig, format));
+            // Bring the Page-line + [TAG] colouring into Source mode. Text
+            // mode already gets this via lang-registry.js's full extension
+            // set; Source mode is otherwise plaintext and would show these
+            // tokens uncoloured without the explicit push.
+            ext.push(...editorPanelTagStyle());
+            // Bracket-match colouring for `()`, `[]`, `{}` — matched top =
+            // yellow, matched nested = pink, unmatched = red. Whole-doc
+            // scan on every doc/viewport change.
+            ext.push(...editorBracketMatch());
         }
         return ext;
     }
-    // "text" (the default) and "visual" (CM not visible but state survives)
+    // "wysiwyg" (the default) and "easy" (CM not visible but state survives)
     // get the full mangaplay surface. drawSelection() is omitted across
     // all modes — the CM6 selection layer fails to render under WebView2
     // even with z-index/specificity/opacity overrides. Native browser
@@ -142,7 +175,7 @@ export function buildEditor(parent, opts = {}) {
     // (preserves doc, cursor, scroll, undo history).
     const languageCompartment = new Compartment();
     const initialLanguageSlot = extensionsForMode(
-        currentEditorMode === "visual" ? "text" : currentEditorMode,
+        currentEditorMode === "easy" ? "wysiwyg" : currentEditorMode,
         /** @type {any} */ (format)
     );
 
@@ -173,13 +206,11 @@ export function buildEditor(parent, opts = {}) {
     /** @type {any} */ (view).__mpsFormat = format;
 
     // Editor right-click routes through the single capture-phase contextmenu
-    // listener in app.js (see routeContextMenu). We just expose the active
-    // view so the router can build the menu against it. Multiple editors
-    // would only update this on focus; for v1 there's one editor at a time.
-    /** @type {any} */ (window).__mpsActiveEditorView = view;
-    /** @type {any} */ (window).__mpsBuildEditorMenu = () => buildEditorMenu(view);
-
-    activeViews.add(view);
+    // listener in app.js (see routeContextMenu). The registry publishes the
+    // focused view onto `window.__mpsActiveEditorView` (mirror-write) so
+    // legacy consumers keep working; the router still reads the global.
+    registerView(view);
+    /** @type {any} */ (window).__mpsBuildEditorMenu = (ev) => buildEditorMenu(view, ev);
 
     // Belt-and-braces: set the attribute imperatively on first mount so
     // WebView2 sees `spellcheck="true"` at first paint, not a brief flash
@@ -231,33 +262,27 @@ function applySpellcheckAttrs(view)
 }
 
 /**
- * Track live EditorView instances so settings-modal can reconfigure them
- * when the spellcheck toggle or language changes. For v1 there's one
- * editor at a time per the buildEditor comment, but a Set keeps us honest
- * if that changes.
- * @type {Set<EditorView>}
- */
-const activeViews = new Set();
-
-/**
  * Reconfigure every live EditorView's language compartment so the new
  * spellcheck state takes effect immediately. Source-mode views pick up
  * the new `spellcheck` content attribute on the same dispatch. Visual
  * editors in the DOM get the toggle pushed onto their editable fields
  * via the component's `applySpellcheckState` method.
+ *
+ * View iteration comes from the focused-view registry so all mounted
+ * editors (including future aggregate-mode views) are covered.
  */
 export function applySpellcheckToAllViews()
 {
     const enabled = getSpellcheckState().enabled;
 
-    for (const v of activeViews)
+    for (const v of getAllRegisteredViews())
     {
         const compartment = /** @type {Compartment|null} */ (
             /** @type {any} */ (v).__mpsLanguageCompartment
         );
         if (!compartment) continue;
         const format = /** @type {any} */ (v).__mpsFormat || "mangaplay";
-        const effective = currentEditorMode === "visual" ? "text" : currentEditorMode;
+        const effective = currentEditorMode === "easy" ? "wysiwyg" : currentEditorMode;
         try
         {
             v.dispatch({ effects: compartment.reconfigure(extensionsForMode(effective, format)) });
@@ -272,7 +297,7 @@ export function applySpellcheckToAllViews()
 
     if (typeof document !== "undefined")
     {
-        const visuals = document.querySelectorAll("mps-visual-editor");
+        const visuals = document.querySelectorAll("mps-easy-editor");
         for (const el of visuals)
         {
             const fn = /** @type {any} */ (el).applySpellcheckState;
@@ -287,9 +312,9 @@ export function applySpellcheckToAllViews()
 
 /**
  * Reconfigure a single view's language compartment to match `mode`. No-op
- * for "visual" — Visual mode unmounts CM, so callers should not invoke
- * this with "visual"; we tolerate it defensively by falling back to the
- * text-mode extension set so the buffer stays editable if Visual fails
+ * for "easy" — Easy Editor mode unmounts CM, so callers should not invoke
+ * this with "easy"; we tolerate it defensively by falling back to the
+ * wysiwyg-mode extension set so the buffer stays editable if Easy Editor fails
  * to mount.
  * @param {EditorView} view
  * @param {EditorMode} mode
@@ -301,7 +326,7 @@ export function setEditorViewMode(view, mode)
     );
     if (!compartment) return;
     const format = /** @type {any} */ (view).__mpsFormat || "mangaplay";
-    const effective = mode === "visual" ? "text" : mode;
+    const effective = mode === "easy" ? "wysiwyg" : mode;
     view.dispatch({
         effects: compartment.reconfigure(extensionsForMode(effective, format))
     });
@@ -327,15 +352,57 @@ export function setEditorMode(mode)
 }
 
 /**
- * Build the items list for the editor context menu. Selection-aware:
- * Cut / Copy are disabled when no range is selected. Paste / Paste as
- * plain text are always enabled (the menu item is a user gesture so the
- * async clipboard API has activation).
+ * Build the items list for the editor context menu. When `ev` is provided,
+ * checks whether the right-click landed on a spell-suggestion diagnostic; if
+ * so, returns a spell-specific menu instead of the default Cut/Copy/Paste set.
+ * Normal text right-click is byte-for-byte unchanged when `ev` is absent or
+ * the click position covers no spell diagnostic.
+ *
  * @param {EditorView} view
+ * @param {MouseEvent} [ev]
  * @returns {Array<any>}
  */
-function buildEditorMenu(view)
+function buildEditorMenu(view, ev)
 {
+    // ── Spell branch ──
+    if (ev != null)
+    {
+        const pos = view.posAtCoords({ x: ev.clientX, y: ev.clientY });
+        if (pos != null)
+        {
+            /** @type {{ d: import("@codemirror/lint").Diagnostic, from: number, to: number } | null} */
+            let spellHit = null;
+            forEachDiagnostic(view.state, (d, from, to) =>
+            {
+                if (spellHit) return;   // first match wins
+                if (
+                    /** @type {any} */ (d).mpsSpellSuggestion &&
+                    d.actions && d.actions.length > 0 &&
+                    pos >= from && pos <= to
+                )
+                {
+                    spellHit = { d, from, to };
+                }
+            });
+
+            if (spellHit)
+            {
+                const { d, from, to } = spellHit;
+                const flagged = view.state.doc.sliceString(from, to);
+                const suggestion = d.actions[0].name;
+                return [
+                    { kind: "header", label: t("mangaplay-studio.menu.editor.spell.didYouMean") },
+                    { id: "spell-fix",    label: suggestion, onSelect: () => { d.actions[0].apply(view, from, to); } },
+                    { kind: "divider" },
+                    { id: "spell-ignore", label: t("mangaplay-studio.menu.editor.spell.ignoreAll"),                                  onSelect: () => { addIgnore(flagged); } },
+                    { id: "spell-always", label: t("mangaplay-studio.menu.editor.spell.alwaysCorrectTo", { word: suggestion }),      onSelect: () => { setAlwaysCorrect(flagged, suggestion); } },
+                    { id: "spell-dict",   label: t("mangaplay-studio.menu.editor.spell.addToDictionary"),                            onSelect: () => { addToPersonalDict(flagged); } },
+                ];
+            }
+        }
+    }
+
+    // ── Default Cut / Copy / Paste / Select-All menu ──
     const hasSel = view.state.selection.ranges.some((r) => !r.empty);
     return [
         { id: "cut",       label: t("mangaplay-studio.menu.editor.cut"),        icon: "scissors", disabled: !hasSel, onSelect: () => { view.focus(); editorCut(view); } },

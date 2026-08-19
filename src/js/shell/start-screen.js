@@ -1,5 +1,5 @@
 import { state } from "./state.js";
-import { loadRecent, removeRecent, pickProjectFolder, createNewProject } from "../project/project.js";
+import { loadRecent, removeRecent, deleteProject, pickProjectFolder, createNewProject } from "../project/project.js";
 import { renameProject, renameFolder, moveFolder, revealInExplorer } from "../project/project.js";
 import { getLastProjectPathInvalid } from "../project/user-settings.js";
 import { wireDeclarativeTooltips } from "../tooltip/tooltip.js";
@@ -20,6 +20,7 @@ import { t } from "../adapters/tauri-i18n.js";
  *   mps-picker-new            → run new-project flow, resolve with new path
  *   mps-picker-open           → run open-folder flow, resolve with the path
  *   mps-picker-remove         → removeRecent + refresh list
+ *   mps-picker-delete-project → deleteProject + refresh list
  *   mps-picker-rename-project → renameProject + refresh list
  *   mps-picker-rename-folder  → renameFolder (refuses if open here) + refresh
  *   mps-picker-move-folder    → ask for new parent → moveFolder + refresh
@@ -78,17 +79,20 @@ export function renderStartScreen() {
 
         shell.addEventListener("mps-picker-create-submit", async (e) =>
         {
-            const { parent, name } = e.detail || {};
+            const { parent, name, asSubFolder = true } = e.detail || {};
             if (!parent || !name) return;
             try
             {
-                const created = await createNewProject(parent, name);
+                const created = await createNewProject(parent, name, asSubFolder);
                 resolve(created);
             }
             catch (err)
             {
                 console.error("New project failed:", err);
-                const msg = String(err?.message || err);
+                const raw = String(err?.message || err);
+                let msg = raw;
+                if (raw === "E_NOT_EMPTY") msg = t("mangaplay-studio.picker.createPanel.validation.folderNotEmpty");
+                else if (raw === "E_INVALID_NAME") msg = t("mangaplay-studio.picker.createPanel.validation.invalidName");
                 await confirmModal({ title: t("mangaplay-studio.picker.error.title"), body: msg, confirm: "OK" });
             }
         });
@@ -110,6 +114,15 @@ export function renderStartScreen() {
             if (!path) return;
             try { await removeRecent(path); }
             catch (err) { console.warn("removeRecent failed:", err); }
+            await refreshRecent();
+        });
+
+        shell.addEventListener("mps-picker-delete-project", async (e) =>
+        {
+            const path = e.detail?.path;
+            if (!path) return;
+            try { await deleteProject(path); }
+            catch (err) { console.warn("deleteProject failed:", err); }
             await refreshRecent();
         });
 

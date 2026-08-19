@@ -4,7 +4,6 @@ import { isTauri, basename } from "../util/index.js";
 import { t } from "../adapters/tauri-i18n.js";
 import { showBanner } from "../boot/toast.js";
 import { confirmModal } from "../modals/confirm-modal.js";
-import { openContextMenu } from "../components/mps-context-menu.js";
 import { mountFolderList } from "../panes/folder-explorer.js";
 import { getBroker } from "../project/active-script-broker.js";
 import {
@@ -18,8 +17,14 @@ import {
     setLastPageIndex,
     getLastPageIndex,
     revealInExplorer,
+    getFolderType,
+    setFolderType,
 } from "../project/project.js";
-import { getLastProjectPathInvalid } from "../project/user-settings.js";
+import {
+    getActiveAggregate,
+    renderGroupsAsOne,
+} from "../editor/aggregate-view.js";
+import { getLastProjectPathInvalid, getProjectSession, saveProjectSession } from "../project/user-settings.js";
 import {
     registryCopy,
     registryRename,
@@ -29,21 +34,15 @@ import {
     registryCreateFile,
     registryListTree,
 } from "../adapters/tauri-storage.js";
-import { scriptRelPathOf, normalizePath } from "../util/paths.js";
+import { scriptRelPathOf } from "../util/paths.js";
 import { formatForFilename } from "../editor/lang-registry.js";
-import { getRuntimeStorage } from "@mangaplay-studio/core/state";
-import { hasNativeFileDialog } from "../adapters/platform-capabilities.js";
+import { isMobileLike } from "../boot/ux-mode.js";
 import {
     setActiveScript as setGoogleDocsActiveScript,
-    refreshActiveScript as refreshGoogleDocsActiveScript,
 } from "../google-docs-sync/footer-bootstrap.js";
 import {
     setAppState,
-    openExportScreenplayModal,
     updateEmptyState,
-    queueMetaSave,
-    queueAppSettingsSave,
-    currentDoc,
     _setCurrentDoc,
 } from "../app.js";
 import {
@@ -52,8 +51,11 @@ import {
 } from "./boot.js";
 import { renderStartScreen } from "./start-screen.js";
 import { switchProject } from "./project-switcher.js";
-import { applyLeftPaneCollapsedState } from "./layout.js";
-import { switchSubview } from "./subviews.js";
+import { markSelfChange, consumeSelfChange, peekSelfChange } from "./explorer-self-change.js";
+
+// Re-export self-mutation tracking so importers (fs-listeners.js,
+// mount-project-views.js) keep resolving these from explorer.js.
+export { markSelfChange, consumeSelfChange, peekSelfChange };
 
 /**
  * "Manage Projects" menu action: tear down the current project (without
@@ -177,7 +179,7 @@ async function listScriptsForProject(projectRoot)
     return listProjectScripts(projectRoot);
 }
 
-function enrichScripts(scripts, projectRoot)
+export function enrichScripts(scripts, projectRoot)
 {
     if (!Array.isArray(scripts)) return [];
     return scripts.map((s) =>
@@ -222,7 +224,7 @@ function enrichScripts(scripts, projectRoot)
  * binaries, test environment) so callers always get a usable shape.
  * @param {string} projectRoot
  */
-async function listTreeForProject(projectRoot)
+export async function listTreeForProject(projectRoot)
 {
     try { return await listProjectTree(projectRoot); }
     catch (e)
@@ -260,11 +262,30 @@ export async function mountFolderExplorer()
     }
     const listEl = document.querySelector("#subview-folder .folder-list");
     if (!listEl) return;
-    if (state.folderList) { state.folderList.destroy(); state.folderList = null; }
+    // Prefer in-place update when a folderList already exists. `update()`
+    // keeps the live `expanded` Set intact so folders the user expanded stay
+    // open across refreshes triggered by rename / file-swap / fs-events. The
+    // destroy/remount branch below re-seeds `expanded` from persisted state,
+    // which loses runtime expansions that haven't been persisted yet (the
+    // onToggleExpand persist is fire-and-forget).
+    if (state.folderList)
+    {
+        /** @type {any} */ (state.folderList).update(enriched);
+        /** @type {any} */ (state.folderList).setActive(active);
+        return;
+    }
     const meta = state.currentProject.meta || {};
+    // expandedFolders now lives in per-user projectSessions[uuid]. Fall back
+    // to the legacy meta value so the current session survives across the
+    // migration boundary if the user boots mid-migration.
+    const sessUuid = state.currentProject.id || null;
+    const sessInitial = sessUuid ? getProjectSession(sessUuid) : {};
+    const initialExpanded = Array.isArray(sessInitial.expandedFolders)
+        ? sessInitial.expandedFolders
+        : (Array.isArray(meta.expandedFolders) ? meta.expandedFolders : []);
     state.folderList = mountFolderList(listEl, enriched, {
         activeFile: active,
-        initialExpanded: Array.isArray(meta.expandedFolders) ? meta.expandedFolders : [],
+        initialExpanded,
         projectRoot: state.currentProject.path,
         onRename: handleRename,
         onRenameByUuid: async (uuid, newBasename, relPath) =>
@@ -278,12 +299,15 @@ export async function mountFolderExplorer()
         onToggleExpand: (relPath, isExpanded) =>
         {
             if (!state.currentProject) return;
-            const m = state.currentProject.meta || (state.currentProject.meta = {});
-            const set = new Set(Array.isArray(m.expandedFolders) ? m.expandedFolders : []);
+            const uuid = state.currentProject.id;
+            if (!uuid) return;
+            const current = getProjectSession(uuid);
+            const set = new Set(Array.isArray(current.expandedFolders) ? current.expandedFolders : []);
             if (isExpanded) set.add(relPath);
             else set.delete(relPath);
-            m.expandedFolders = [...set].sort();
-            queueMetaSave(state.currentProject.path, m);
+            const next = [...set].sort();
+            saveProjectSession(uuid, { expandedFolders: next })
+                .catch((e) => console.warn("[explorer] expand persist failed:", e));
         },
         onMoveByUuid: async (srcUuid, newParentUuid, srcRel, dstParentRel) =>
         {
@@ -331,330 +355,27 @@ export async function refreshExplorer()
     catch (e) { console.debug("refreshExplorer failed:", e); }
 }
 
-// ── Explorer context menu wiring ──────────────────────────────────────────
-//
-// All contextmenu handling lives in a SINGLE capture-phase listener on
-// document (installed in boot()). Capture-phase + single-listener avoids
-// the WebView2/Chromium quirk where a delegated listener at the consumer
-// element never fires when a separate guard suppresses the native menu —
-// the event is consumed by the suppression and propagation halts. With one
-// listener owning both jobs (route to ctx-menu OR preventDefault native),
-// there is no race.
-//
-// wireExplorerContextMenu / wireEditorContextMenu are gone. Routing is
-// dispatched from buildItemsForTarget(e.target) below.
+// ── Explorer + editor context-menu routing ───────────────────────────────
+// Extracted to explorer-context-menu.js. The menu builders call the file-op
+// actions (onCreate/onDelete/onCopy/parentForCreation/refreshExplorer) that
+// stay here; re-exported below so other shell modules keep resolving the
+// router + navigator helpers from explorer.js.
+import {
+    setSheetContextMenuHandler,
+    routeContextMenu,
+    openEditorMoreOptionsMenu,
+    showNavigator,
+    openRenameFileFlow,
+} from "./explorer-context-menu.js";
+export {
+    setSheetContextMenuHandler,
+    routeContextMenu,
+    openEditorMoreOptionsMenu,
+    showNavigator,
+    openRenameFileFlow,
+};
 
 /**
- * The single contextmenu router. Walks from the event target up the DOM
- * looking for a known consumer root. Returns the menu items to show, or
- * null to mean "no custom menu — suppress native and bail" (or, for the
- * opt-in case, "let the native menu through").
- *
- * @param {EventTarget | null} target
- * @returns {{ items: Array<any> } | "native" | null}
- */
-export function routeContextMenu(target)
-{
-    const t = /** @type {Element | null} */ (target);
-    if (!t || typeof t.closest !== "function") return null;
-
-    // Opt-in zones (rename input) — let native menu through.
-    if (t.closest("[data-allow-native-menu='true']")) return "native";
-
-    // File / folder explorer
-    const list = t.closest(".folder-list");
-    if (list)
-    {
-        const row = /** @type {HTMLElement|null} */ (t.closest(".folder-list-row"));
-        if (row)
-        {
-            const path = row.dataset.path || "";
-            const kind = row.dataset.kind || "file";
-            const filename = row.dataset.filename || "";
-            const relPath = row.dataset.relPath || "";
-            const uuid = row.dataset.uuid || null;
-            // Track the right-clicked folder so subsequent "New …" menu
-            // items create inside it. ANY non-folder right-click clears
-            // this, otherwise a stale folder pin persists across clicks
-            // on files / empty area and "New Storyboard" ends up creating
-            // inside the previously-clicked folder.
-            state.lastRightClickedFolder = kind === "folder" ? path : null;
-            state.lastRightClickedFolderUuid = kind === "folder" ? uuid : null;
-            return { items: kind === "folder"
-                ? buildFolderMenu({ path, filename, relPath, uuid })
-                : buildFileMenu({ path, filename, relPath, uuid }) };
-        }
-        // Empty-area right-click: clear the folder pin so "New …" creates
-        // at the project root.
-        state.lastRightClickedFolder = null;
-        state.lastRightClickedFolderUuid = null;
-        return { items: buildExplorerMenu() };
-    }
-
-    // CodeMirror editable area — mps-editor.js exposes a builder on window
-    // because buildEditorMenu is private to that module.
-    const cmContent = t.closest(".cm-content");
-    if (cmContent)
-    {
-        const builder = /** @type {any} */ (window).__mpsBuildEditorMenu;
-        if (typeof builder === "function") return { items: builder() };
-    }
-
-    return null;
-}
-
-/**
- * @param {{ path: string, filename: string, relPath?: string, uuid?: string|null }} ctx
- * @returns {Array<any>}
- */
-function buildFileMenu(ctx)
-{
-    const log = /** @type {any} */ (window).__mpsLog;
-    const renameKey = ctx.relPath || ctx.filename;
-    const tap = (item, fn) => () => {
-        if (log) log("info", "menuItem", `clicked=${item} ctx.path=${ctx.path} ctx.filename=${ctx.filename} ctx.relPath=${ctx.relPath}`);
-        return fn();
-    };
-    return [
-        { id: "reveal", label: t("mangaplay-studio.menu.file.showInExplorer"), icon: "move-up-right", onSelect: tap("file-reveal", () => { revealInExplorer(ctx.path).catch((e) => console.warn("reveal failed:", e)); }) },
-        { kind: "divider" },
-        { id: "rename", label: t("mangaplay-studio.menu.file.rename"), icon: "pencil",   onSelect: tap("file-rename", () => onBeginRename(renameKey)) },
-        { kind: "divider" },
-        { id: "delete", label: t("mangaplay-studio.menu.file.delete"), icon: "trash-2",  danger: true, disabled: !ctx.uuid, onSelect: tap("file-delete", () => { if (ctx.uuid) onDelete(ctx.path, ctx.uuid); }) },
-    ];
-}
-
-/**
- * @param {{ path: string, filename: string, relPath?: string, uuid?: string|null }} ctx
- * @returns {Array<any>}
- */
-function buildFolderMenu(ctx)
-{
-    const renameKey = ctx.relPath || ctx.filename;
-    return [
-        { id: "reveal", label: t("mangaplay-studio.menu.folder.showInExplorer"), icon: "move-up-right", onSelect: () => { revealInExplorer(ctx.path).catch((e) => console.warn("reveal failed:", e)); } },
-        { kind: "divider" },
-        { id: "rename", label: t("mangaplay-studio.menu.folder.rename"), icon: "pencil",   onSelect: () => onBeginRename(renameKey) },
-        { kind: "divider" },
-        { id: "delete", label: t("mangaplay-studio.menu.folder.delete"), icon: "trash-2",  danger: true, disabled: !ctx.uuid, onSelect: () => { if (ctx.uuid) onDelete(ctx.path, ctx.uuid); } },
-    ];
-}
-
-function buildExplorerMenu()
-{
-    const parent = parentForCreation();
-    const disabled = parent === null;
-    const root = state.currentProject?.path || null;
-    return [
-        { id: "new-folder",      label: t("mangaplay-studio.menu.explorer.newFolder"),      icon: "folder-plus", disabled, onSelect: () => onCreate(parent, "folder") },
-        { id: "new-storyboard",  label: t("mangaplay-studio.menu.explorer.newStoryboard"),  icon: "file-plus",   disabled, onSelect: () => onCreate(parent, "mangaplay") },
-        { id: "new-screenplay",  label: t("mangaplay-studio.menu.explorer.newScreenplay"),  icon: "file-plus",   disabled, onSelect: () => onCreate(parent, "fountain") },
-        { id: "new-text-file",   label: t("mangaplay-studio.menu.explorer.newTextFile"),    icon: "file-plus",   disabled, onSelect: () => onCreate(parent, "text") },
-        { kind: "divider" },
-        { id: "reveal-root",     label: t("mangaplay-studio.menu.explorer.showProjectRootInExplorer"), icon: "move-up-right", disabled: !root, onSelect: () => { if (root) revealInExplorer(root).catch((e) => console.warn("reveal failed:", e)); } },
-    ];
-}
-
-/**
- * Build the editor's "More Options" menu. Reads the active slot state to
- * decide which items are disabled. The labels reuse the existing right-click
- * menu locale keys where possible so the two surfaces stay in sync (rename /
- * delete / show-in-explorer).
- *
- * Items: Rename · Export Screenplay (placeholder — full export ships next) ·
- * Find (placeholder) · Show in System Explorer · Reveal Navigator · Delete.
- * @returns {Array<any>}
- */
-function buildEditorMoreOptionsMenu()
-{
-    const slot = state.slotManager?.getActive();
-    const path = slot?.path || null;
-    const basename = slot?.basename || "";
-    const slotUuid = /** @type {any} */ (slot)?.fileUuid || null;
-    const format = /** @type {any} */ (slot)?.format || "general-text";
-    const isPlaceholder = !path;
-    const baseDisabled = isPlaceholder;
-    // exportDisabled and publishDisabled diverge only on 'general-text' —
-    // do not unify. Export needs a screenplay AST; Publish uploads raw text.
-    const exportDisabled = baseDisabled
-        || format === "general-text"
-        || format === "superscript-bin";
-    const publishDisabled = baseDisabled
-        || format === "superscript-bin";
-    return [
-        { id: "rename", label: t("mangaplay-studio.menu.file.rename"), icon: "pencil",
-          disabled: baseDisabled,
-          onSelect: () => { if (path) openRenameFileFlow(path, basename); } },
-        { id: "import-screenplay",
-          label: t("mangaplay-studio.menu.editor.importScreenplay") || "Import Screenplay",
-          icon: "file-plus",
-          disabled: baseDisabled || format !== "fountain" || !hasNativeFileDialog(),
-          onSelect: async () =>
-          {
-              try
-              {
-                  const mod = await import("../import-screenplay/import-modal.js");
-                  await mod.openImportModal({
-                      basename: state.slotManager?.getActive()?.basename || basename || "Untitled",
-                      localPath: path || "",
-                  });
-              }
-              catch (e) { console.warn("[import-screenplay] open failed:", e); }
-          } },
-        { id: "export", label: t("mangaplay-studio.menu.editor.exportScreenplay") || "Export Screenplay",
-          icon: "file-text",
-          disabled: exportDisabled,
-          onSelect: () =>
-          {
-              const state = getRuntimeStorage().state || {};
-              void openExportScreenplayModal({
-                  script: state.script,
-                  scriptFormat: state.scriptFormat,
-                  sourceText: currentDoc,
-                  basename: state.slotManager?.getActive()?.basename || basename || "Untitled",
-                  localPath: path || "",
-              });
-          } },
-        { id: "publish-google-doc",
-          label: t("mangaplay-studio.menu.editor.publishGoogleDoc") || "Publish Google Docs™",
-          icon: "cloud-upload",
-          disabled: publishDisabled,
-          onSelect: async () =>
-          {
-              const state = getRuntimeStorage().state || {};
-              // Derive scriptRelPath from project root + slot's absolute
-              // path so BUG-001 cache write has the keys it needs. Mirrors
-              // the derivation in setGoogleDocsActiveScript above.
-              let projectPath = "";
-              let scriptRelPath = "";
-              if (state.currentProject && path)
-              {
-                  projectPath = state.currentProject.path || "";
-                  const projNorm = projectPath.replace(/\\/g, "/");
-                  const slotNorm = String(path).replace(/\\/g, "/");
-                  scriptRelPath = slotNorm.startsWith(projNorm + "/")
-                      ? slotNorm.slice(projNorm.length + 1)
-                      : (state.slotManager?.getActive()?.basename || basename || "");
-              }
-              try
-              {
-                  const [mod, authMod] = await Promise.all([
-                      import("../google-docs-sync/publish-modal.js"),
-                      import("../auth/google-oauth.js"),
-                  ]);
-                  await mod.openPublishModal({
-                      script: state.script,
-                      scriptFormat: state.scriptFormat,
-                      sourceText: currentDoc,
-                      basename: state.slotManager?.getActive()?.basename || basename || "Untitled",
-                      localPath: path || "",
-                      projectPath,
-                      scriptRelPath,
-                      authClient: {
-                          getAccessToken: (opts) => authMod.getAccessToken(opts),
-                      },
-                  });
-                  // Refresh footer's SyncStateMachine so the gear flips
-                  // Grey → Blue immediately. See BUG-001.
-                  await refreshGoogleDocsActiveScript();
-              }
-              catch (e) { console.warn("[publish-google-doc] open failed:", e); }
-          } },
-        { kind: "divider" },
-        { id: "find", label: t("mangaplay-studio.menu.editor.find") || "Find",
-          icon: "search",
-          disabled: baseDisabled,
-          onSelect: () => {
-              showBanner(t("mangaplay-studio.menu.editor.findComingSoon")
-                  || "Find is on the next sprint — coming soon.");
-          } },
-        { kind: "divider" },
-        { id: "reveal", label: t("mangaplay-studio.menu.file.showInExplorer"),
-          icon: "move-up-right",
-          disabled: isPlaceholder,
-          onSelect: () => { if (path) { revealInExplorer(path).catch((e) => console.warn("reveal failed:", e)); } } },
-        { id: "reveal-navigator", label: t("mangaplay-studio.menu.editor.revealNavigator") || "Reveal Navigator",
-          icon: "panel-left-open",
-          disabled: isPlaceholder,
-          onSelect: () => { showNavigator(); } },
-        { kind: "divider" },
-        { id: "delete", label: t("mangaplay-studio.menu.file.delete"), icon: "trash-2",
-          danger: true,
-          disabled: baseDisabled || !slotUuid,
-          onSelect: () => { if (path && slotUuid) onDelete(path, slotUuid); } },
-    ];
-}
-
-/**
- * Open the More Options context menu anchored to the button.
- * @param {HTMLElement} anchor
- */
-export function openEditorMoreOptionsMenu(anchor)
-{
-    if (!anchor) return;
-    try
-    {
-        const rect = anchor.getBoundingClientRect();
-        const items = buildEditorMoreOptionsMenu();
-        openContextMenu({
-            x: Math.round(rect.left),
-            y: Math.round(rect.bottom + 2),
-            items,
-        });
-    }
-    catch (e) { console.warn("[more-options] open failed:", e); }
-}
-
-/**
- * Ensure the left pane is expanded, switch the navigator subview to "folder",
- * and surface the active file's row (flash + scroll-into-view).
- */
-export function showNavigator()
-{
-    try { applyLeftPaneCollapsedState(false); } catch {}
-    queueAppSettingsSave({ leftPaneCollapsed: false });
-    void switchSubview("folder");
-    requestAnimationFrame(() =>
-    {
-        try
-        {
-            if (state.folderList && typeof /** @type {any} */ (state.folderList).revealActive === "function")
-            {
-                /** @type {any} */ (state.folderList).revealActive();
-            }
-        }
-        catch (e) { console.debug("[reveal-navigator] revealActive failed:", e); }
-    });
-}
-
-/**
- * Open the Rename File flow. v1: route through the explorer's existing
- * inline-rename UX (handleRename already syncs tab + explorer + meta). A
- * dedicated modal is the next milestone.
- *
- * @param {string} path
- * @param {string} filename
- */
-export function openRenameFileFlow(path, filename)
-{
-    if (!filename) return;
-    // Reveal the navigator first so the user sees the rename input land in
-    // the explorer row.
-    showNavigator();
-    // Prefer a project-relative path so onBeginRename → folderList.beginRename
-    // picks the exact file (disambiguates same-basename in other subfolders).
-    let key = filename;
-    if (path && state.currentProject && state.currentProject.path)
-    {
-        const projNorm = state.currentProject.path.replace(/\\/g, "/");
-        const pathNorm = path.replace(/\\/g, "/");
-        if (pathNorm.startsWith(projNorm + "/"))
-        {
-            key = pathNorm.slice(projNorm.length + 1);
-        }
-    }
-    requestAnimationFrame(() => onBeginRename(key));
-}
 
 /**
  * Resolve the parent folder for a `New …` action. Returns null when no
@@ -720,38 +441,6 @@ export async function onCopy(path, uuid)
     }
 }
 
-/**
- * Trigger inline rename on the explorer mount. The folder-explorer module
- * owns the input DOM; we just delegate.
- * @param {string} filename
- */
-function onBeginRename(filename)
-{
-    const log = /** @type {any} */ (window).__mpsLog;
-    if (log) log("info", "onBeginRename", `start filename=${filename} folderListPresent=${!!state.folderList} hasBeginRename=${!!(state.folderList && typeof state.folderList.beginRename === "function")}`);
-    if (state.folderList && typeof state.folderList.beginRename === "function")
-    {
-        try
-        {
-            state.folderList.beginRename(filename);
-            if (log) log("info", "onBeginRename", "called beginRename");
-        }
-        catch (err)
-        {
-            const msg = String((err && err.message) || err);
-            console.error("[explorer] beginRename threw:", err);
-            if (log) log("error", "onBeginRename", `threw: ${msg}`);
-            showBanner(t("mangaplay-studio.banner.renameFailed", { error: msg }));
-        }
-    }
-    else
-    {
-        // User-visible feedback when the menu fires but the rename mount is
-        // missing. Likely cause: explorer rebuild in-flight; advise retry.
-        if (log) log("warn", "onBeginRename", "folderList null or no beginRename");
-        showBanner(t("mangaplay-studio.banner.renameUnavailable"));
-    }
-}
 
 /**
  * Route an `app_rename_file` call through the broker so the autosave queue
@@ -762,6 +451,18 @@ function onBeginRename(filename)
  * @param {string} newBasename
  * @returns {Promise<string | undefined>}
  */
+// ── aggregate-view mount plumbing ────────────────────────────────────────
+// Extracted to explorer-aggregate-mount.js. The folder-type-changed listener
+// is wired at that module's load (side-effect import below). replaceActiveTab
+// imports the routing helpers from there.
+import {
+    aggregateCompatible,
+    resolveAggregateContext,
+    openAggregateForFile,
+    closeActiveAggregate,
+} from "./explorer-aggregate-mount.js";
+
+
 /**
  * Open a different script by replacing the content of the currently-active
  * tab. Drains the broker, reads the new file from disk, hands the content
@@ -787,6 +488,85 @@ export async function replaceActiveTab(newPath, newUuid = null)
     const outgoingPath = active?.path || null;
     const outgoingBase = active?.basename || "";
     if (norm(outgoingPath) === norm(newPath)) return;
+
+    // ── aggregate-view routing ─────────────────────────────────────────
+    // Storyboard/Screenplay folder-type folders trigger the 3-view
+    // aggregate when the clicked file's format matches the folder mode.
+    // Text-type + Default fall through to the single-file open path
+    // below. If the clicked file is already inside the active aggregate,
+    // just jumpToFile (no destroy/remount). If the aggregate is on a
+    // different folder, close it and mount a fresh one.
+    try
+    {
+        if (newUuid && renderGroupsAsOne)
+        {
+            const activeAgg = getActiveAggregate();
+            // Locate parent folder + resolve type. When the file has no
+            // folder parent (project-root file) parent lookup fails and
+            // we drop straight to single-file open.
+            const projectPath = state.currentProject.path;
+            const entries = await listProjectTree(projectPath);
+            const targetEntry = entries.find((e) => e.uuid === newUuid);
+            const parentUuid = targetEntry?.parentUuid || null;
+            const folderType = parentUuid
+                ? await getFolderType(projectPath, parentUuid)
+                : "default";
+            if (folderType === "storyboard" || folderType === "screenplay")
+            {
+                const fileFormat = formatForFilename(basename(newPath));
+                if (aggregateCompatible(folderType, fileFormat) && parentUuid)
+                {
+                    // Same folder + already mounted? Just jump.
+                    if (activeAgg && activeAgg.folderUuid === parentUuid)
+                    {
+                        try { await activeAgg.jumpToFile(newUuid); }
+                        catch (e) { console.warn("[explorer] jumpToFile failed:", e); }
+                        return;
+                    }
+                    // Different folder — tear down previous.
+                    if (activeAgg) await closeActiveAggregate();
+                    const ctx = await resolveAggregateContext(newUuid, folderType);
+                    if (ctx && ctx.files.length > 0)
+                    {
+                        // Drain the singleton editor's broker before we
+                        // hide it. The aggregate uses its own per-file
+                        // brokers; the singleton might still hold a
+                        // pending write for the previously active tab.
+                        try { await getBroker().drainAllPending(); }
+                        catch (e) { console.warn("[explorer] singleton drain failed pre-aggregate:", e); }
+                        // Best-effort initial mode = last user preference
+                        // via the toggle. Aggregate view will re-validate.
+                        const modeAttr = /** @type {any} */ (state.modeToggleEl)?.mode || "source";
+                        const initialMode = (modeAttr === "easy" || modeAttr === "wysiwyg" || modeAttr === "source") ? modeAttr : "source";
+                        await openAggregateForFile({
+                            fileUuid: newUuid,
+                            parentUuid,
+                            folderName: ctx.folderName,
+                            files: ctx.files,
+                            basenameFor: ctx.basenameFor,
+                            absPathFor: ctx.absPathFor,
+                            mode: initialMode,
+                        });
+                        return;
+                    }
+                    // Fall through to single-file when we couldn't resolve
+                    // a sibling list (e.g. registry hasn't caught up).
+                }
+            }
+            // Format doesn't match folder type → fall through as single-file.
+            // Any other folder type (default / text / null) also drops through.
+            // If an aggregate is live for a different folder we DON'T close it
+            // here — the click might be for a tab from the explorer that
+            // opens alongside; but by contract we route through a single-file
+            // tab so it's safer to close.
+            if (activeAgg)
+            {
+                await closeActiveAggregate();
+            }
+        }
+    }
+    catch (e) { console.warn("[explorer] aggregate routing threw:", e); }
+    // ────────────────────────────────────────────────────────────────────
 
     const broker = getBroker();
     await broker.withLock(async () =>
@@ -917,72 +697,6 @@ export async function replaceActiveTab(newPath, newUuid = null)
 }
 
 /**
- * Tracks paths this window just mutated, so the project-fs-changed listener
- * can distinguish "we did it" from "another window did it". Auto-expires
- * after 5s to handle slow event delivery (notify-based watcher coalescing
- * + cross-window IPC latency) without leaking memory.
- *
- * Keys are normalised to forward slashes via `normalizePath` so the listener
- * side can compare regardless of which separator form Rust sent. Value is
- * the timestamp at which the mark expires.
- * @type {Map<string, number>}
- */
-const __mpsSelfChanges = new Map();
-
-/**
- * Mark a path as self-mutated. Default TTL 5s — wide enough that the
- * watcher's debounce (and any atomic-write fan-out into multiple events)
- * lands inside the window. Pass `ttlMs` to shorten for high-frequency
- * mutations (e.g. autosave) so genuine external edits aren't suppressed
- * for too long.
- * @param {string} path
- * @param {number} [ttlMs] default 5000
- */
-export function markSelfChange(path, ttlMs = 5000)
-{
-    if (!path) return;
-    __mpsSelfChanges.set(normalizePath(path), Date.now() + ttlMs);
-}
-
-/**
- * A single self-initiated write can fan out into multiple watcher events
- * (atomic rename → "deleted" then "modified", on some platforms). So
- * consume is a TTL window peek, NOT a single-use take — any event within
- * the window is treated as self. The map entry expires on its own; we
- * don't delete on read.
- * @param {string} path @returns {boolean}
- */
-export function consumeSelfChange(path)
-{
-    if (!path) return false;
-    const key = normalizePath(path);
-    const expiry = __mpsSelfChanges.get(key);
-    if (expiry === undefined) return false;
-    if (expiry <= Date.now())
-    {
-        __mpsSelfChanges.delete(key);
-        return false;
-    }
-    return true;
-}
-
-/**
- * Non-consuming variant of {@link consumeSelfChange}. Used by the
- * registry-fs-changed listener so both listeners can observe the same TTL
- * mark without racing to delete it. Never removes expired entries — the
- * consuming path handles cleanup.
- * @param {string} path @returns {boolean}
- */
-export function peekSelfChange(path)
-{
-    if (!path) return false;
-    const key = normalizePath(path);
-    const expiry = __mpsSelfChanges.get(key);
-    if (expiry === undefined) return false;
-    return expiry > Date.now();
-}
-
-/**
  * @param {string} oldPath
  * @param {string} newBasename
  * @param {string} uuid  registry UUID of the file being renamed
@@ -1110,6 +824,23 @@ export async function onDelete(path, uuid)
         if (!ok) return;
         broker.dropPendingWrites();
     }
+    await deleteFileByUuid(path, uuid);
+}
+
+/**
+ * Trash-delete core: withLock + markSelfChange + registryDelete
+ * (trash-unavailable → confirm + force), active-file slot-swap tail,
+ * refreshExplorer. No leading open-file confirm — caller (onDelete for
+ * desktop) owns that.
+ *
+ * @param {string} path
+ * @param {string} uuid
+ */
+export async function deleteFileByUuid(path, uuid)
+{
+    const log = /** @type {any} */ (window).__mpsLog;
+    const broker = getBroker();
+    const isActive = broker.isActiveUuid(uuid) || broker.isActivePath(path);
     try
     {
         await broker.withLock(async () =>
@@ -1175,9 +906,8 @@ export async function onDelete(path, uuid)
 }
 
 /**
- * Kind → next-free-basename seed. Mirrors the OLD Rust
- * `create_file_impl` mapping so the fresh basename matches what users saw
- * before Part 4d. Fake-fs stubs and the Rust `next_free_name` helper use the
+ * Kind → next-free-basename seed. Mirrors the Rust `create_file_impl`
+ * mapping. Fake-fs stubs and the Rust `next_free_name` helper use the
  * same "Untitled" / "Untitled folder" seed.
  * @type {Record<string, { base: string, ext: string }>}
  */
@@ -1246,14 +976,25 @@ async function resolveParentUuid(parent)
  * extra guard here is defensive in case the menu items are activated by a
  * keyboard path that bypasses `disabled`.
  *
+ * The optional `target` opens a seam for the mobile explorer popup: it owns a
+ * second mountFolderList instance (never `state.folderList`) and its own
+ * refresh. When omitted, behaviour is byte-equivalent to the desktop path —
+ * `refreshExplorer()` reseeds `state.folderList`, and no rename is auto-begun
+ * (the desktop context menu does not chain into rename). When `target` is
+ * given, after a successful create we `await target.refresh()` then begin
+ * inline rename on `target.list`, mirroring the relPath-preferred identifier
+ * that `openRenameFileFlow` / `onBeginRename` pass to `beginRename`
+ * (uuid → relPath → basename cascade in folder-explorer.beginRename).
+ *
  * @param {string | null} parent
  * @param {"folder"|"mangaplay"|"fountain"|"superscript"|"text"} kind
+ * @param {{ list: any, refresh: () => Promise<void> } | null} [target]
  * @returns {Promise<string | undefined>} absolute path of the created entry.
  */
-export async function onCreate(parent, kind)
+export async function onCreate(parent, kind, target = null)
 {
     const log = /** @type {any} */ (window).__mpsLog;
-    if (log) log("info", "onCreate", `start parent=${parent} kind=${kind}`);
+    if (log) log("info", "onCreate", `start parent=${parent} kind=${kind} target=${!!target}`);
     if (!parent)
     {
         if (log) log("warn", "onCreate", "parent is null/empty — bailing");
@@ -1261,6 +1002,13 @@ export async function onCreate(parent, kind)
     }
     /** @type {string | undefined} */
     let createdPath;
+    /**
+     * Identifier for the post-create inline rename. Prefers the project-
+     * relative path (disambiguates same-basename in other subfolders), same
+     * preference as openRenameFileFlow; falls back to the basename.
+     * @type {string | undefined}
+     */
+    let renameKey;
     try
     {
         // Prefer the tracked lastRightClickedFolderUuid when the parent
@@ -1295,8 +1043,31 @@ export async function onCreate(parent, kind)
                 createdPath = `${rootNorm}/${dto.relPath}`;
                 markSelfChange(createdPath);
             }
+            // relPath preferred (project-relative, disambiguates), basename
+            // fallback — mirrors openRenameFileFlow's key preference.
+            if (dto) renameKey = dto.relPath || dto.name || undefined;
         });
-        await refreshExplorer();
+        if (target)
+        {
+            await target.refresh();
+            if (renameKey && target.list && typeof target.list.beginRename === "function")
+            {
+                try
+                {
+                    target.list.beginRename(renameKey);
+                    if (log) log("info", "onCreate", `target.beginRename key=${renameKey}`);
+                }
+                catch (err)
+                {
+                    console.error("[explorer] target beginRename threw:", err);
+                    if (log) log("error", "onCreate", `target beginRename threw: ${String((err && err.message) || err)}`);
+                }
+            }
+        }
+        else
+        {
+            await refreshExplorer();
+        }
         if (log) log("info", "onCreate", `done created=${createdPath}`);
         return createdPath;
     }

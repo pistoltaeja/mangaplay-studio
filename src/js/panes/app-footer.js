@@ -10,23 +10,25 @@
  *      pills/publish-doc-pill.js; mirrors the SyncStateMachine state and
  *      absorbs the click-target / popover-anchor role the sync gear used
  *      to play. Hidden until a script is active.
- *   4. Google Account pill host (#pill-google-account) — populated by
+ *   4. Publish Slides pill host (#pill-publish-slides) — populated by
+ *      pills/publish-slides-pill.js; opens the Publish Google Slides modal.
+ *      Greyed out on non-mangaplay scripts.
+ *   5. Google Account pill host (#pill-google-account) — populated by
  *      pills/google-account-pill.js; mirrors auth + navigator.onLine.
  *
- * Mode sync contract — see TODO/app-footer-and-platform-window-controls.md.
- * The footer NEVER tracks editor-mode state internally; it only reflects
- * what `setMode()` is called with.
+ * Mode sync contract: the footer NEVER tracks editor-mode state internally;
+ * it only reflects what `setMode()` is called with.
  */
 
 import { icon } from "./icons.js";
 import { t, subscribe } from "../adapters/tauri-i18n.js";
 import { createModeMenu } from "./app-footer-mode-menu.js";
 
-/** @typedef {"source"|"text"|"visual"} EditorMode */
+/** @typedef {"source"|"wysiwyg"|"easy"} EditorMode */
 const ICON_FOR_MODE = {
-    source: "code",
-    text:   "book-open",
-    visual: "wand-sparkles"
+    source:  "code",
+    wysiwyg: "book-open",
+    easy:    "wand-sparkles"
 };
 
 const COUNTS_DEBOUNCE_MS = 150;
@@ -52,6 +54,7 @@ const COUNTS_DEBOUNCE_MS = 150;
  * @property {() => void} notifyDocChanged
  * @property {HTMLElement} root
  * @property {HTMLElement} publishDocPillEl
+ * @property {HTMLElement} publishSlidesPillEl
  * @property {HTMLElement} accountPillEl
  * @property {() => void} destroy
  */
@@ -85,7 +88,7 @@ export function mountAppFooter(opts)
     root.hidden = true;
 
     /** @type {EditorMode} */
-    let currentMode = "text";
+    let currentMode = "wysiwyg";
 
     // ── Mode Button ─────────────────────────────────────────────────────
     const modeBtn = document.createElement("button");
@@ -145,8 +148,9 @@ export function mountAppFooter(opts)
     /** @param {number} words */
     function setCounts(words)
     {
-        const wordsTxt = t("mangaplay-studio.chrome.footer.words", { count: words })
-            || `${words} words`;
+        const formatted = words.toLocaleString("en-GB");
+        const wordsTxt = t("mangaplay-studio.chrome.footer.words", { count: formatted })
+            || `${formatted} words`;
         countsEl.textContent = wordsTxt;
     }
 
@@ -216,6 +220,13 @@ export function mountAppFooter(opts)
     publishDocPillEl.setAttribute("data-tooltip-side", "top");
     root.appendChild(publishDocPillEl);
 
+    const publishSlidesPillEl = document.createElement("button");
+    publishSlidesPillEl.type = "button";
+    publishSlidesPillEl.id = "pill-publish-slides";
+    publishSlidesPillEl.className = "footer-pill footer-pill-publish-slides";
+    publishSlidesPillEl.setAttribute("data-tooltip-side", "top");
+    root.appendChild(publishSlidesPillEl);
+
     const accountPillEl = document.createElement("button");
     accountPillEl.type = "button";
     accountPillEl.id = "pill-google-account";
@@ -227,7 +238,7 @@ export function mountAppFooter(opts)
     /** @param {EditorMode} mode */
     function setMode(mode)
     {
-        if (mode !== "source" && mode !== "text" && mode !== "visual") return;
+        if (mode !== "source" && mode !== "wysiwyg" && mode !== "easy") return;
         currentMode = mode;
         modeBtn.innerHTML = icon(ICON_FOR_MODE[mode], { size: 16 });
         modeBtn.dataset.mode = mode;
@@ -273,6 +284,7 @@ export function mountAppFooter(opts)
         notifyDocChanged: scheduleRecount,
         root,
         publishDocPillEl,
+        publishSlidesPillEl,
         accountPillEl,
         destroy
     };

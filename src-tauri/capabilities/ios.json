@@ -33,7 +33,21 @@
     },
     "clipboard-manager:allow-read-text",
     "clipboard-manager:allow-write-text",
-    "os:allow-locale"
+    "os:allow-locale",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://mangaplay.studio/**" },
+        { "url": "https://docs.google.com/**" },
+        { "url": "https://slides.google.com/**" },
+        { "url": "https://api.absolutelyskint.com/**" },
+        { "url": "https://discord.gg/**" }
+      ]
+    },
+    "mps-firebase:default",
+    "mps-admob:default",
+    "mps-ios-webview:default",
+    "iap:default"
   ],
   "platforms": ["iOS"]
 }

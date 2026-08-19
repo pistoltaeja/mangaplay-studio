@@ -12,22 +12,28 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { icon } from "../panes/icons.js";
-import { openModal } from "../modals/modal-shell.js";
+import { openModal, setModalBusy } from "../modals/modal-shell.js";
 import { t } from "../adapters/tauri-i18n.js";
+import { slidesLinkGet } from "../adapters/tauri-storage.js";
 import { getStoredEmail, mergePickerTokens } from "../auth/google-oauth.js";
-
-/**
- * Generate a process-local lock holder id — combined with a random suffix
- * so two windows of the same app don't collide. Consumed by the
- * `slides_publish_lock_*` Tauri commands.
- * @returns {string}
- */
-function _makeHolderId()
-{
-    const rand = Math.random().toString(36).slice(2, 10);
-    const ts = Date.now().toString(36);
-    return `mps-${ts}-${rand}`;
-}
+import { renderPageToPng } from "./render-page-to-png.js";
+import { uploadPngsViaJsTransport } from "./slides-upload-transport.js";
+import { withPublishLock } from "./publish-lock.js";
+import { isDevBuild } from "../adapters/platform-capabilities.js";
+import {
+    _buildPickerPanel,
+    _buildUpdatePanel,
+    _buildUpdateStoryPanel,
+    _buildUpdateStoryboardPanel,
+} from "./publish-slides-modal-panels.js";
+import {
+    _fetchDeckName,
+    _buildFormPanel,
+} from "./publish-slides-modal-forms.js";
+import {
+    _buildSummaryPanel,
+    _buildProgressPanel,
+} from "./publish-slides-modal-summary.js";
 
 /**
  * @param {string} name
@@ -79,6 +85,15 @@ function stemFor(name)
  */
 export async function openPublishSlidesModal(ctx)
 {
+    // Release-build gate — until Slides sync ships, all entry points land
+    // on a single Coming-Soon card. Pill click behaviour is unchanged
+    // (`no-account` still prompts sign-in) — this only fires when execution
+    // actually reaches the modal opener. Dev builds fall through to the
+    // real flow below.
+    if (!isDevBuild())
+    {
+        return _openComingSoonModal();
+    }
     console.warn(`[slides-modal] ═══════════════════════════════════════════════════════════════`);
     console.warn(`[slides-modal] EXPECTED FLOW (fresh project, signed in, Sync Existing Slides):`);
     console.warn(`[slides-modal]   1. openPublishSlidesModal()`);
@@ -99,11 +114,13 @@ export async function openPublishSlidesModal(ctx)
 
     /** @type {string|null} */
     let existingLinkedPresentationId = null;
+    /** @type {"folder"|"file"|null} — which registry entry slides_link_get resolved to. */
+    let existingLinkedScope = null;
     try
     {
         if (ctx.projectPath && ctx.scriptRelPath)
         {
-            const link = await invoke("slides_link_get", {
+            const link = await slidesLinkGet({
                 projectPath:   ctx.projectPath,
                 scriptRelPath: ctx.scriptRelPath,
                 folderUuid:    ctx.publishScope?.kind === "folder"
@@ -114,7 +131,12 @@ export async function openPublishSlidesModal(ctx)
             if (link && typeof (/** @type {any} */ (link).presentationId) === "string")
             {
                 existingLinkedPresentationId = /** @type {any} */ (link).presentationId;
-                console.warn(`[slides-modal] existingLinkedPresentationId=${existingLinkedPresentationId} — WILL go straight to form with preset URL`);
+                const rawScope = /** @type {any} */ (link).scope;
+                if (rawScope === "folder" || rawScope === "file")
+                {
+                    existingLinkedScope = rawScope;
+                }
+                console.warn(`[slides-modal] existingLinkedPresentationId=${existingLinkedPresentationId} scope=${existingLinkedScope} — WILL go straight to form with preset URL`);
             }
             else
             {
@@ -170,9 +192,9 @@ export async function openPublishSlidesModal(ctx)
             track.className = "publish-track";
             track.dataset.panel = "picker";
 
-            const PANEL_ORDER = ["picker", "form", "summary", "progress"];
+            const PANEL_ORDER = ["picker", "update", "updateStory", "updateStoryboard", "form", "summary", "progress"];
             /**
-             * @param {"picker"|"form"|"summary"|"progress"} name
+             * @param {"picker"|"update"|"updateStory"|"updateStoryboard"|"form"|"summary"|"progress"} name
              */
             const setPanel = (name) =>
             {
@@ -180,10 +202,13 @@ export async function openPublishSlidesModal(ctx)
                 track.dataset.panel = name;
                 /** @type {Record<string, HTMLElement>} */
                 const roots = {
-                    picker:   panelPicker.root,
-                    form:     panelForm.root,
-                    summary:  panelSummary.root,
-                    progress: panelProgress.root,
+                    picker:           panelPicker.root,
+                    update:           panelUpdate.root,
+                    updateStory:      panelUpdateStory.root,
+                    updateStoryboard: panelUpdateStoryboard.root,
+                    form:             panelForm.root,
+                    summary:          panelSummary.root,
+                    progress:         panelProgress.root,
                 };
                 const prevEl = /** @type {HTMLElement|null} */ (prev ? roots[prev] : null);
                 const nextEl = roots[name];
@@ -279,6 +304,374 @@ export async function openPublishSlidesModal(ctx)
                     setPanel("form");
                 }
             });
+
+            // Update panel — landed on when preflight detects an existing
+            // link. Three cards: Update Story / Update Storyboard / Unlink.
+            const panelUpdate = _buildUpdatePanel({
+                onUpdateStory:      () =>
+                {
+                    setPanel("updateStory");
+                    // Fire the prepare pass AFTER the slide-in starts so
+                    // the panel is visible while the "Reading deck…" line
+                    // shows. Non-blocking; the panel manages its own UI.
+                    void panelUpdateStory.onEnter();
+                },
+                onUpdateStoryboard: () =>
+                {
+                    setPanel("updateStoryboard");
+                    panelUpdateStoryboard.onEnter();
+                },
+                onBack:             () => setPanel("picker"),
+                onUnlink:           () => { void _runUnlinkFlow(); },
+            });
+
+            const panelUpdateStory = _buildUpdateStoryPanel({
+                onBack:  () => setPanel("update"),
+                onOkay:  (prepareResult) =>
+                {
+                    void _runUpdateStoryCommit(prepareResult);
+                },
+                runPrepare: async () =>
+                {
+                    if (!existingLinkedPresentationId) throw new Error("no-link");
+                    const token = await authClient.getAccessToken({ allowRefresh: true });
+                    if (!token)
+                    {
+                        const err = new Error("no-token");
+                        /** @type {any} */ (err).kind = "auth";
+                        throw err;
+                    }
+                    const { getPresentation } = await import("./slides-api.js");
+                    const { presentation, refreshedAt } = await getPresentation(
+                        existingLinkedPresentationId, token);
+                    const { prepareSlidesSync } = await import("./slides-prepare.js");
+                    const report = await prepareSlidesSync({
+                        presentation,
+                        refreshedAt,
+                        presentationId: existingLinkedPresentationId,
+                        script:         ctx.script,
+                        projectPath:    ctx.projectPath,
+                        authClient,
+                    });
+                    return { report, presentation, presentationId: existingLinkedPresentationId };
+                },
+            });
+
+            // Update-Storyboard panel — desktop-only for now. Mobile paths
+            // (Android SAF / iOS multi-file) land in Task 2e; the panel
+            // itself renders a "not yet available" message when platform
+            // detection returns android/ios.
+            const panelUpdateStoryboard = _buildUpdateStoryboardPanel({
+                onBack:  () => setPanel("update"),
+                getScript:      () => ctx.script,
+                getProjectPath: () => ctx.projectPath,
+                getPresentationId: () => existingLinkedPresentationId,
+                getAuthClient:     () => authClient,
+                getCtx:            () => ctx,
+                getProgressPanel:  () => panelProgress,
+                slideToProgress:   () => setPanel("progress"),
+                resolveWithNull:   () => resolveWith(null),
+                onImported: (payload) =>
+                {
+                    try
+                    {
+                        if (typeof (/** @type {any} */ (ctx).onStoryboardImported) === "function")
+                        {
+                            (/** @type {any} */ (ctx).onStoryboardImported)(payload);
+                        }
+                    }
+                    catch (e)
+                    {
+                        console.warn("[slides-modal] onStoryboardImported hook threw:",
+                            /** @type {any} */ (e)?.message || e);
+                    }
+                },
+                onSlidesPushed: (payload) =>
+                {
+                    try
+                    {
+                        if (typeof (/** @type {any} */ (ctx).onSlidesPushed) === "function")
+                        {
+                            (/** @type {any} */ (ctx).onSlidesPushed)(payload);
+                        }
+                    }
+                    catch (e)
+                    {
+                        console.warn("[slides-modal] onSlidesPushed hook threw:",
+                            /** @type {any} */ (e)?.message || e);
+                    }
+                },
+            });
+
+            /**
+             * Shared commit runner — replicates the summary-panel Accept
+             * flow but with `skipImagesStep: true` and a fixed
+             * `mismatchPolicy: "use-local"`. Update-Story pushes local text
+             * to the deck; images are already known-current.
+             *
+             * @param {{ report: any, presentation: any, presentationId: string }} prep
+             */
+            async function _runUpdateStoryCommit(prep)
+            {
+                const { report, presentation, presentationId } = prep;
+
+                // Publish lock — acquired via `withPublishLock` helper so
+                // the acquire/heartbeat/release dance is uniform across the
+                // three publish call sites. Throws distinguish `lock-held`
+                // (another holder owns the lease) from `lock-acquire-failed`
+                // (the IPC itself threw — network / Rust panic).
+                try
+                {
+                    await withPublishLock({
+                        projectPath:    ctx.projectPath,
+                        presentationId,
+                    }, async () =>
+                    {
+                        panelProgress.setLabelsForPublish();
+                        panelProgress.reset();
+                        panelProgress.setHeadingForContext(ctx);
+                        setPanel("progress");
+                        commitAbortCtrl = new AbortController();
+                        panelProgress.setOnCancel(() =>
+                        {
+                            if (commitAbortCtrl)
+                            {
+                                try { commitAbortCtrl.abort(); }
+                                catch (_) { /* best-effort */ }
+                            }
+                        });
+
+                        setModalBusy(true);
+                        closeBtn.disabled = true;
+                        closeBtn.setAttribute("aria-disabled", "true");
+                        panelProgress.setWarningVisible(true);
+
+                        try
+                        {
+                            const { runCommit } = await import("./slides-prepare.js");
+                            const result = await runCommit({
+                                report,
+                                script:         ctx.script,
+                                presentation,
+                                presentationId,
+                                mismatchPolicy: "use-local",
+                                skipImagesStep: true,
+                                projectPath:    ctx.projectPath,
+                                authClient,
+                                signal:         commitAbortCtrl.signal,
+                                renderPageToPng: (pageId) => renderPageToPng({
+                                    pageId,
+                                    scriptAST:      ctx.script,
+                                    projectPath:    ctx.projectPath,
+                                    presentationId,
+                                }),
+                                onStep: (i, ev) => panelProgress.onStepEvent(i, ev),
+                                onSaveLink: async () =>
+                                {
+                                    const status = (report && Array.isArray(report.warnings)
+                                        && report.warnings.length > 0)
+                                            ? "with-warnings"
+                                            : "clean";
+                                    // Capture Drive headRevisionId so the background
+                                    // sync-status check can compare on next open.
+                                    let revisionId = null;
+                                    try
+                                    {
+                                        const { getHeadRevisionId } =
+                                            await import("./slides-api.js");
+                                        const token = await ctx.authClient?.getAccessToken?.({ allowRefresh: true });
+                                        if (token)
+                                        {
+                                            revisionId = await getHeadRevisionId(presentationId, token);
+                                        }
+                                    }
+                                    catch (_) { /* best-effort — link saves even without revisionId */ }
+                                    await invoke("slides_link_save", {
+                                        projectPath:    ctx.projectPath,
+                                        scriptRelPath:  ctx.scriptRelPath,
+                                        presentationId,
+                                        prepareStatus:  status,
+                                        folderUuid:     ctx.publishScope?.kind === "folder"
+                                            ? ctx.publishScope.folderUuid
+                                            : null,
+                                        revisionId,
+                                    });
+                                },
+                                onRefreshPill: async () =>
+                                {
+                                    try
+                                    {
+                                        if (typeof (/** @type {any} */ (ctx).onLinked) === "function")
+                                        {
+                                            await (/** @type {any} */ (ctx).onLinked)({
+                                                presentationId,
+                                                folderUuid: ctx.publishScope?.kind === "folder"
+                                                    ? ctx.publishScope.folderUuid
+                                                    : null,
+                                            });
+                                        }
+                                    }
+                                    catch (e)
+                                    {
+                                        console.warn("[publish-slides] onLinked hook threw:",
+                                            /** @type {any} */ (e)?.message || e);
+                                    }
+                                },
+                            });
+                            panelProgress.setDone({
+                                ok:       result.ok,
+                                warnings: report.warnings || [],
+                                onClose:  () => { resolveWith(null); },
+                            });
+                        }
+                        catch (e)
+                        {
+                            console.warn("[publish-slides] runCommit (update-story) failed:",
+                                /** @type {any} */ (e)?.message || e);
+                            panelProgress.setDone({
+                                ok:       false,
+                                warnings: report?.warnings || [],
+                                onClose:  () => { resolveWith(null); },
+                            });
+                        }
+                        finally
+                        {
+                            commitAbortCtrl = null;
+                            setModalBusy(false);
+                            closeBtn.disabled = false;
+                            closeBtn.removeAttribute("aria-disabled");
+                            panelProgress.setWarningVisible(false);
+                        }
+                    });
+                }
+                catch (e)
+                {
+                    if (e && /** @type {any} */ (e).kind === "lock-held")
+                    {
+                        const other = /** @type {any} */ (e).holder?.holderId || "another window";
+                        panelUpdateStory.showError(t(
+                            "mangaplay-studio.googleSlidesSync.publish.summary.commit.lockHeld",
+                            "Another publish is in progress ({holder}). Try again in a moment.",
+                            { holder: String(other) }));
+                    }
+                    else if (e && /** @type {any} */ (e).kind === "lock-acquire-failed")
+                    {
+                        console.warn("[publish-slides] publish lock acquire failed:",
+                            /** @type {any} */ (e).cause);
+                        panelUpdateStory.showError(t(
+                            "mangaplay-studio.googleSlidesSync.publish.summary.commit.lockAcquireFailed",
+                            "Couldn't get exclusive access to the deck. Try again."));
+                    }
+                    else
+                    {
+                        throw e;
+                    }
+                }
+            }
+
+            /**
+             * Unlink flow: confirm → drop the scope-aware link → best-effort
+             * delete of the cached deck PNGs → back to the picker panel.
+             * Scope for the confirm copy comes from `existingLinkedScope`
+             * — the discriminator returned by `slidesLinkGet` in preflight,
+             * i.e. which registry entry actually resolved. A file that
+             * lives inside a Storyboard Folder but only has a file-scope
+             * link resolves to "file", so the confirm reads as file-scope
+             * even though `ctx.publishScope.kind === "folder"`.
+             */
+            async function _runUnlinkFlow()
+            {
+                if (!existingLinkedPresentationId || !ctx.projectPath) return;
+
+                const isFolderScope = existingLinkedScope === "folder";
+                const folderName = isFolderScope
+                    ? (ctx.publishScope?.folderName
+                        || t("mangaplay-studio.googleSlidesSync.publish.update.unlinkConfirm.folderNameFallback",
+                            "this folder"))
+                    : "";
+
+                const body = isFolderScope
+                    ? t("mangaplay-studio.googleSlidesSync.publish.update.unlinkConfirm.folder",
+                        "Unlink this deck? All files under the folder {folderName} will be unlinked. Local files are kept.",
+                        { folderName })
+                    : t("mangaplay-studio.googleSlidesSync.publish.update.unlinkConfirm.file",
+                        "Unlink this deck? Local files are kept; the link to Google Slides will be removed.");
+
+                const { confirmModal } = await import("../modals/confirm-modal.js");
+                const ok = await confirmModal({
+                    title: t("mangaplay-studio.googleSlidesSync.publish.update.unlinkConfirm.title", "Unlink deck"),
+                    body,
+                    confirm: t("mangaplay-studio.googleSlidesSync.publish.update.unlinkConfirm.confirmBtn", "Unlink"),
+                    cancel: t("mangaplay-studio.googleSlidesSync.publish.update.unlinkConfirm.cancelBtn", "Cancel"),
+                    danger: true,
+                });
+                if (!ok) return;
+
+                const presentationId = existingLinkedPresentationId;
+                setModalBusy(true);
+                closeBtn.disabled = true;
+                closeBtn.setAttribute("aria-disabled", "true");
+                try
+                {
+                    try
+                    {
+                        const dropResult = await invoke("slides_link_drop_scoped", {
+                            projectPath:   ctx.projectPath,
+                            scriptRelPath: ctx.scriptRelPath,
+                            folderUuid:    isFolderScope ? ctx.publishScope?.folderUuid : null,
+                        });
+                        console.warn(`[slides-modal] slides_link_drop_scoped result: ${JSON.stringify(dropResult)}`);
+                    }
+                    catch (e)
+                    {
+                        console.warn("[slides-modal] slides_link_drop_scoped failed:",
+                            /** @type {any} */ (e)?.message || e);
+                        // Even if the link drop fails, do not proceed to
+                        // deck delete — the user will retry.
+                        return;
+                    }
+
+                    try
+                    {
+                        const delResult = await invoke("slides_deck_delete", {
+                            projectPath:    ctx.projectPath,
+                            presentationId,
+                        });
+                        console.warn(`[slides-modal] slides_deck_delete result: ${JSON.stringify(delResult)}`);
+                    }
+                    catch (e)
+                    {
+                        // Best-effort — the link is already dropped. Deck
+                        // PNGs get GCed on the next open.
+                        console.warn("[slides-modal] slides_deck_delete failed (best-effort, continuing):",
+                            /** @type {any} */ (e)?.message || e);
+                    }
+
+                    existingLinkedPresentationId = null;
+                    try
+                    {
+                        if (typeof (/** @type {any} */ (ctx).onUnlinked) === "function")
+                        {
+                            await (/** @type {any} */ (ctx).onUnlinked)({
+                                presentationId,
+                                folderUuid: isFolderScope ? ctx.publishScope?.folderUuid : null,
+                            });
+                        }
+                    }
+                    catch (e)
+                    {
+                        console.warn("[slides-modal] onUnlinked hook threw:",
+                            /** @type {any} */ (e)?.message || e);
+                    }
+                    setPanel("picker");
+                }
+                finally
+                {
+                    setModalBusy(false);
+                    closeBtn.disabled = false;
+                    closeBtn.removeAttribute("aria-disabled");
+                }
+            }
             const panelForm = _buildFormPanel(initialValues, {
                 authClient,
                 ctx,
@@ -312,48 +705,43 @@ export async function openPublishSlidesModal(ctx)
 
                     // Acquire the publish lock before ANY commit runs.
                     // Blocks concurrent publishes from a second window /
-                    // device against the same presentation. Released in
-                    // the finally-block below.
-                    const holderId = _makeHolderId();
-                    let locked = false;
+                    // device against the same presentation. The helper
+                    // handles acquire → heartbeat → release; distinct
+                    // throw kinds surface `lock-held` vs `lock-acquire-failed`.
                     try
                     {
-                        const lock = await invoke("slides_publish_lock_acquire", {
+                        await withPublishLock({
                             projectPath:    ctx.projectPath,
                             presentationId,
-                            holderId,
-                            ttlMs:          5 * 60_000,
-                        });
-                        if (lock && lock.ok)
+                        }, async () =>
                         {
-                            locked = true;
-                        }
-                        else
-                        {
-                            const other = lock?.heldBy?.holderId || "another window";
-                            panelSummary.setCaption?.(t(
-                                "mangaplay-studio.googleSlidesSync.publish.summary.commit.lockHeld",
-                                "Another publish is in progress ({holder}). Try again in a moment.",
-                                { holder: String(other) }), "err");
-                            return;
-                        }
-                    }
-                    catch (e)
-                    {
-                        console.warn("[publish-slides] slides_publish_lock_acquire failed:",
-                            /** @type {any} */ (e)?.message || e);
-                        // Best-effort — proceed without a lock rather than
-                        // block the user. Contention is rare in practice.
-                    }
 
                     // Transition into the progress panel BEFORE any Slides
                     // network I/O — the user sees the 5-step timeline
                     // immediately, with step 1 flipping to running as the
                     // first download starts.
+                    panelProgress.setLabelsForPublish();
                     panelProgress.reset();
                     panelProgress.setHeadingForContext(ctx);
                     setPanel("progress");
                     commitAbortCtrl = new AbortController();
+                    panelProgress.setOnCancel(() =>
+                    {
+                        if (commitAbortCtrl)
+                        {
+                            try { commitAbortCtrl.abort(); }
+                            catch (_) { /* best-effort */ }
+                        }
+                    });
+
+                    // Busy window covers the full runCommit promise —
+                    // backdrop-click / Escape / close-X are all gated so a
+                    // stray input can't abort a mid-download. The in-panel
+                    // Cancel button remains the only exit.
+                    setModalBusy(true);
+                    closeBtn.disabled = true;
+                    closeBtn.setAttribute("aria-disabled", "true");
+                    panelProgress.setWarningVisible(true);
 
                     try
                     {
@@ -377,6 +765,20 @@ export async function openPublishSlidesModal(ctx)
                                 // mismatchPolicy is a per-publish user choice — NOT
                                 // persisted. The user picks it fresh every time they
                                 // publish/sync so they consciously reconcile each run.
+                                // Capture Drive headRevisionId so the background
+                                // sync-status check can compare on next open.
+                                let revisionId = null;
+                                try
+                                {
+                                    const { getHeadRevisionId } =
+                                        await import("./slides-api.js");
+                                    const token = await ctx.authClient?.getAccessToken?.({ allowRefresh: true });
+                                    if (token)
+                                    {
+                                        revisionId = await getHeadRevisionId(presentationId, token);
+                                    }
+                                }
+                                catch (_) { /* best-effort — link saves even without revisionId */ }
                                 await invoke("slides_link_save", {
                                     projectPath:    ctx.projectPath,
                                     scriptRelPath:  ctx.scriptRelPath,
@@ -385,6 +787,7 @@ export async function openPublishSlidesModal(ctx)
                                     folderUuid:     ctx.publishScope?.kind === "folder"
                                         ? ctx.publishScope.folderUuid
                                         : null,
+                                    revisionId,
                                 });
                             },
                             onRefreshPill: async () =>
@@ -433,24 +836,35 @@ export async function openPublishSlidesModal(ctx)
                     finally
                     {
                         commitAbortCtrl = null;
-                        // Release the publish lock — same holder that
-                        // acquired it. If acquire failed above, `locked`
-                        // stays false and release is a no-op call.
-                        if (locked)
+                        setModalBusy(false);
+                        closeBtn.disabled = false;
+                        closeBtn.removeAttribute("aria-disabled");
+                        panelProgress.setWarningVisible(false);
+                    }
+
+                        });
+                    }
+                    catch (e)
+                    {
+                        if (e && /** @type {any} */ (e).kind === "lock-held")
                         {
-                            try
-                            {
-                                await invoke("slides_publish_lock_release", {
-                                    projectPath:    ctx.projectPath,
-                                    presentationId,
-                                    holderId,
-                                });
-                            }
-                            catch (e)
-                            {
-                                console.warn("[publish-slides] slides_publish_lock_release failed:",
-                                    /** @type {any} */ (e)?.message || e);
-                            }
+                            const other = /** @type {any} */ (e).holder?.holderId || "another window";
+                            panelSummary.setCaption?.(t(
+                                "mangaplay-studio.googleSlidesSync.publish.summary.commit.lockHeld",
+                                "Another publish is in progress ({holder}). Try again in a moment.",
+                                { holder: String(other) }), "err");
+                        }
+                        else if (e && /** @type {any} */ (e).kind === "lock-acquire-failed")
+                        {
+                            console.warn("[publish-slides] publish lock acquire failed:",
+                                /** @type {any} */ (e).cause);
+                            panelSummary.setCaption?.(t(
+                                "mangaplay-studio.googleSlidesSync.publish.summary.commit.lockAcquireFailed",
+                                "Couldn't get exclusive access to the deck. Try again."), "err");
+                        }
+                        else
+                        {
+                            throw e;
                         }
                     }
                 }
@@ -469,11 +883,17 @@ export async function openPublishSlidesModal(ctx)
             });
 
             track.appendChild(panelPicker.root);
+            track.appendChild(panelUpdate.root);
+            track.appendChild(panelUpdateStory.root);
+            track.appendChild(panelUpdateStoryboard.root);
             track.appendChild(panelForm.root);
             track.appendChild(panelSummary.root);
             track.appendChild(panelProgress.root);
 
             panelPicker.root.hidden = false;
+            panelUpdate.root.hidden = true;
+            panelUpdateStory.root.hidden = true;
+            panelUpdateStoryboard.root.hidden = true;
             panelForm.root.hidden = true;
             panelSummary.root.hidden = true;
             panelProgress.root.hidden = true;
@@ -506,12 +926,26 @@ export async function openPublishSlidesModal(ctx)
 
                 if (token && existingLinkedPresentationId)
                 {
-                    console.warn(`[slides-modal] preflight branch: HAS_LINK — going to form with presetImportUrl for id=${existingLinkedPresentationId}`);
-                    initialValues.intent = "import";
-                    panelForm.setIntent("import");
-                    panelForm.presetImportUrl(
-                        `https://docs.google.com/presentation/d/${existingLinkedPresentationId}/edit`);
-                    setPanel("form");
+                    console.warn(`[slides-modal] preflight branch: HAS_LINK — going to update panel for id=${existingLinkedPresentationId}`);
+                    panelUpdate.setPresentationId(existingLinkedPresentationId);
+                    // Best-effort deck-name fetch — panel mounts immediately
+                    // with "Currently linked"; the name lands when it arrives.
+                    (async () =>
+                    {
+                        try
+                        {
+                            const nameToken = await authClient.getAccessToken({ allowRefresh: true });
+                            if (!nameToken) return;
+                            const name = await _fetchDeckName(existingLinkedPresentationId, nameToken);
+                            if (name) panelUpdate.setDeckName(name);
+                        }
+                        catch (e)
+                        {
+                            console.warn("[slides-modal] deck-name fetch failed:",
+                                /** @type {any} */ (e)?.message || e);
+                        }
+                    })();
+                    setPanel("update");
                 }
                 else
                 {
@@ -560,1462 +994,124 @@ function _initialValues(ctx, stem)
 }
 
 /**
- * Picker panel — two large enabled cards.
+ * Release-build gate — collapses the entire Publish Slides modal to a
+ * single Coming-Soon card. Reuses the existing `.publish-panel` chrome
+ * so no new CSS is needed. Resolves with `null` on any dismissal (Close
+ * button, backdrop click, Esc) to match the shape of the real
+ * `openPublishSlidesModal` return.
  *
- * @param {{
- *   onPublish: () => void,
- *   onImport:  () => void
- * }} handlers
+ * @returns {Promise<null>}
  */
-function _buildPickerPanel(handlers)
+async function _openComingSoonModal()
 {
-    const root = document.createElement("section");
-    root.className = "publish-panel publish-panel-picker";
-
-    const heading = document.createElement("h2");
-    heading.className = "publish-picker-heading";
-    heading.textContent = t(
-        "mangaplay-studio.googleSlidesSync.publish.picker.heading",
-        "What would you like to do?");
-    root.appendChild(heading);
-
-    const cards = document.createElement("div");
-    cards.className = "publish-picker-cards";
-    root.appendChild(cards);
-
-    const publishCard = _buildPickerCard({
-        imageSrc: "./img/google-slides-logo.png",
-        titleKey: "mangaplay-studio.googleSlidesSync.publish.picker.publishCard.title",
-        titleFallback: "Publish Google Slides™",
-        bodyKey: "mangaplay-studio.googleSlidesSync.publish.picker.publishCard.body",
-        bodyFallback: "Create a new Google Slides™ presentation from this document.",
-        onClick: handlers.onPublish
-    });
-    cards.appendChild(publishCard);
-
-    const importCard = _buildPickerCard({
-        imageSrc: "./img/google-drive-logo.png",
-        titleKey: "mangaplay-studio.googleSlidesSync.publish.picker.importCard.title",
-        titleFallback: "Sync Existing Slides",
-        bodyKey: "mangaplay-studio.googleSlidesSync.publish.picker.importCard.body",
-        bodyFallback: "Link this Storyboard & Mangaplay to an existing Google Slides™ presentation.",
-        onClick: handlers.onImport
-    });
-    cards.appendChild(importCard);
-
-    return { root };
-}
-
-/**
- * @param {{ imageSrc: string, titleKey: string, titleFallback: string, bodyKey: string, bodyFallback: string, onClick: () => void }} opts
- * @returns {HTMLButtonElement}
- */
-function _buildPickerCard({ imageSrc, titleKey, titleFallback, bodyKey, bodyFallback, onClick })
-{
-    const card = document.createElement("button");
-    card.type = "button";
-    card.className = "publish-picker-card";
-
-    const image = document.createElement("div");
-    image.className = "publish-picker-card-image";
-    const img = document.createElement("img");
-    img.src = imageSrc;
-    img.width = 48;
-    img.height = 48;
-    img.alt = "";
-    image.appendChild(img);
-    card.appendChild(image);
-
-    const title = document.createElement("div");
-    title.className = "publish-picker-card-title";
-    title.textContent = t(titleKey, titleFallback);
-    card.appendChild(title);
-
-    const body = document.createElement("p");
-    body.className = "publish-picker-card-body";
-    body.textContent = t(bodyKey, bodyFallback);
-    card.appendChild(body);
-
-    card.addEventListener("click", onClick);
-    return card;
-}
-
-/**
- * Extract a Google Slides presentation ID from a URL. Accepts any
- * docs.google.com/presentation/d/<ID>[/…] shape. Returns null when the
- * input isn't recognisable. Used by `presetImportUrl` to resolve a
- * previously-linked script's stored URL back into a Drive file id.
- *
- * @param {string} raw
- * @returns {string|null}
- */
-function _extractSlidesId(raw)
-{
-    if (typeof raw !== "string") return null;
-    const s = raw.trim();
-    if (!s) return null;
-    const m = s.match(/docs\.google\.com\/presentation\/d\/([a-zA-Z0-9_-]+)/);
-    return m ? m[1] : null;
-}
-
-/**
- * Form panel — thin wrapper that mounts both Publish + Sync sub-panels
- * into the shared `form` slot on the track and swaps between them via
- * `setIntent`. Sharing a single builder for both intents was the source
- * of the layout drift the plan refactor addresses; each intent now owns
- * its own builder + its own DOM subtree.
- *
- * @param {ReturnType<typeof _initialValues>} initialValues
- * @param {{
- *   authClient: { getAccessToken: (opts?: { allowRefresh?: boolean }) => Promise<string|null> },
- *   ctx?: any,
- *   onClose: () => void,
- *   onBack: () => void,
- *   onPrepared?: (report: any, presentationId: string) => void
- * }} handlers
- */
-function _buildFormPanel(initialValues, handlers)
-{
-    const root = document.createElement("section");
-    root.className = "publish-panel publish-panel-form";
-
-    const publishPanel = _buildPublishFormPanel(handlers);
-    const syncPanel = _buildSyncFormPanel(initialValues, handlers);
-
-    root.appendChild(publishPanel.root);
-    root.appendChild(syncPanel.root);
-
-    function setIntent(intent)
-    {
-        const prev = initialValues.intent;
-        initialValues.intent = intent;
-        const isImport = intent === "import";
-        publishPanel.root.hidden = isImport;
-        syncPanel.root.hidden = !isImport;
-        console.warn(`[slides-modal] setIntent(${prev} → ${intent}) — publish.hidden=${publishPanel.root.hidden} sync.hidden=${syncPanel.root.hidden}`);
-        if (isImport)
+    await openModal({
+        variantClass: "publish-modal-backdrop",
+        cancelValue: null,
+        build: ({ backdrop, resolveWith, cancel }) =>
         {
-            syncPanel.onShow();
-        }
-    }
-
-    // Default copy so a directly-mounted form (no picker click) still reads.
-    setIntent(initialValues.intent);
-
-    return {
-        root,
-        setIntent,
-        presetImportUrl: syncPanel.presetImportUrl,
-    };
-}
-
-/**
- * Publish-intent form panel — "Coming Soon" page for the future
- * "create a NEW Google Slides deck from this script" flow. Only the Sync
- * flow (link to an existing deck) is shipped. Copy invites the user to
- * pick Sync from the previous card or check back later.
- *
- * @param {{ onClose: () => void, onBack: () => void }} handlers
- */
-function _buildPublishFormPanel(handlers)
-{
-    const root = document.createElement("section");
-    root.className = "publish-panel publish-panel-publish-form";
-
-    const heading = document.createElement("h2");
-    heading.className = "publish-heading";
-    heading.textContent = t(
-        "mangaplay-studio.googleSlidesSync.publish.form.heading",
-        "Google Slides™ publishing is coming soon.");
-    root.appendChild(heading);
-
-    const body = document.createElement("p");
-    body.className = "publish-body";
-    body.textContent = t(
-        "mangaplay-studio.googleSlidesSync.publish.form.publishPlaceholder",
-        "Publishing this document to Google Slides™ is not available yet — check back soon.");
-    root.appendChild(body);
-
-    const footer = document.createElement("div");
-    footer.className = "publish-footer";
-    const backBtn = document.createElement("button");
-    backBtn.type = "button";
-    backBtn.className = "mps-btn-secondary";
-    backBtn.textContent = t(
-        "mangaplay-studio.googleSlidesSync.publish.back", "Back");
-    backBtn.addEventListener("click", () => handlers.onBack());
-    const primaryBtn = document.createElement("button");
-    primaryBtn.type = "button";
-    primaryBtn.className = "mps-btn-primary";
-    primaryBtn.textContent = t(
-        "mangaplay-studio.googleSlidesSync.publish.close", "Close");
-    primaryBtn.addEventListener("click", () => handlers.onClose());
-    footer.appendChild(backBtn);
-    footer.appendChild(primaryBtn);
-    root.appendChild(footer);
-
-    return { root };
-}
-
-/**
- * Sync/Import-intent form panel — the real picker flow.
- *
- * Chrome matches Gate/Picker/End: heading, one-line lede, primary picker
- * button, live caption, two-button `[Back][Okay]` footer. `Okay` is
- * hidden by default; it only surfaces on the `presetImportUrl` re-link
- * path so the user can confirm the linked-to presentation without
- * re-picking.
- *
- * The picker button click handler LAZY-IMPORTS `picker-client.js` — the
- * module never enters the cold-boot bundle.
- *
- * Access-check design: on picker resolve we skip `_accessCheck` because
- * the picker uses `drive.file` scope which grants per-file access at
- * pick-time. `_accessCheck` is preserved for the re-link path where the
- * stored id may point at a file the current session doesn't have access
- * to (e.g. token was revoked, file was unshared).
- *
- * @param {ReturnType<typeof _initialValues>} initialValues
- * @param {{
- *   authClient: { getAccessToken: (opts?: { allowRefresh?: boolean }) => Promise<string|null> },
- *   ctx?: any,
- *   onClose: () => void,
- *   onBack: () => void,
- *   onPrepared?: (report: any, presentationId: string) => void
- * }} handlers
- */
-function _buildSyncFormPanel(initialValues, handlers)
-{
-    const root = document.createElement("section");
-    root.className = "publish-panel publish-panel-sync-form";
-
-    const heading = document.createElement("h2");
-    heading.className = "publish-heading";
-    heading.textContent = t(
-        "mangaplay-studio.googleSlidesSync.publish.form.sync.heading",
-        "Sync existing Google Slides™");
-    root.appendChild(heading);
-
-    const lede = document.createElement("p");
-    lede.className = "publish-body";
-    const publishScope = handlers.ctx?.publishScope || null;
-    if (publishScope && publishScope.kind === "folder")
-    {
-        lede.textContent = t(
-            "mangaplay-studio.googleSlidesSync.publish.form.sync.ledeFolder",
-            "All the files under the folder {folderName} will be linked to this presentation. Please pick a Google Slides Presentation.",
-            { folderName: publishScope.folderName || "" });
-    }
-    else
-    {
-        lede.textContent = t(
-            "mangaplay-studio.googleSlidesSync.publish.form.sync.lede",
-            "Pick a presentation you want to link.");
-    }
-    root.appendChild(lede);
-
-    const form = document.createElement("div");
-    form.className = "publish-sync-form";
-    root.appendChild(form);
-
-    const pickBtn = document.createElement("button");
-    pickBtn.type = "button";
-    pickBtn.className = "mps-btn-primary publish-import-pick";
-    pickBtn.textContent = t(
-        "mangaplay-studio.googleSlidesSync.publish.form.sync.pickButton",
-        "Choose from Google Drive™");
-    form.appendChild(pickBtn);
-
-    const caption = document.createElement("p");
-    caption.className = "publish-sync-caption";
-    caption.setAttribute("aria-live", "polite");
-    form.appendChild(caption);
-
-    /** @type {string|null} */
-    let slidesId = null;
-    /** @type {string|null} */
-    let selectedName = null;
-    let checking = false;
-    let presetMode = false;
-
-    // Footer — [ Back ] always visible; [ Okay ] hidden except on the
-    // `presetImportUrl` re-link confirmation path.
-    const footer = document.createElement("div");
-    footer.className = "publish-footer";
-    const backBtn = document.createElement("button");
-    backBtn.type = "button";
-    backBtn.className = "mps-btn-secondary";
-    backBtn.textContent = t(
-        "mangaplay-studio.googleSlidesSync.publish.back", "Back");
-    backBtn.setAttribute("aria-label", t(
-        "mangaplay-studio.googleSlidesSync.publish.back", "Back"));
-    backBtn.addEventListener("click", async () =>
-    {
-        // Back-during-in-flight-pick: cancel the pick before transitioning
-        // so an orphaned browser callback doesn't fire against a modal
-        // that has moved on. The Rust picker owns cancellation via
-        // timeout / drop; JS-side we short-circuit against the in-flight
-        // flag so we don't wait on it.
-        try
-        {
-            const { isPickerInFlight } = await import("../google-picker/picker-client.js");
-            if (isPickerInFlight())
-            {
-                // Rust drops the oneshot sender when the command's
-                // callback listener is dropped; here we simply move on.
-                // Any late resolution is discarded by the picker-client
-                // finally-block.
-                _setCaption("", "");
-                _setChecking(false);
-            }
-        }
-        catch (_) { /* best-effort */ }
-        handlers.onBack();
-    });
-
-    const okayBtn = document.createElement("button");
-    okayBtn.type = "button";
-    okayBtn.className = "mps-btn-primary";
-    okayBtn.textContent = t(
-        "mangaplay-studio.googleSlidesSync.publish.form.import.okay",
-        "Okay");
-    okayBtn.hidden = true;
-    okayBtn.addEventListener("click", () => { void onOkay(); });
-
-    footer.appendChild(backBtn);
-    footer.appendChild(okayBtn);
-    root.appendChild(footer);
-
-    function _setCaption(text, kind)
-    {
-        caption.textContent = text || "";
-        caption.dataset.kind = kind || "";
-    }
-
-    function _setChecking(v)
-    {
-        checking = v;
-        pickBtn.disabled = v;
-        okayBtn.disabled = v;
-    }
-
-    async function _accessCheck(id)
-    {
-        // Uses Drive API v3 — Slides files are Drive files, so files.get
-        // with fields=id,name,capabilities is the cheapest access probe.
-        // 200 → access. 403 → no access. 404 → doesn't exist.
-        //
-        // Only called on the re-link (presetImportUrl) path — direct
-        // picker resolves skip this because drive.file guarantees access
-        // to files the user just picked.
-        const token = await handlers.authClient.getAccessToken({ allowRefresh: true });
-        if (!token)
-        {
-            const err = new Error("no-token");
-            /** @type {any} */ (err).kind = "auth";
-            throw err;
-        }
-        const url = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?fields=id,name,capabilities`;
-        const res = await fetch(url, {
-            headers: { Authorization: `Bearer ${token}` },
-            signal: AbortSignal.timeout(10_000),
-        });
-        if (res.status === 200) return true;
-        const err = new Error(`http-${res.status}`);
-        /** @type {any} */ (err).kind = res.status === 404 ? "not-found"
-            : res.status === 403 ? "no-access"
-            : "http";
-        throw err;
-    }
-
-    /**
-     * Fetch the file's `name` field via the same Drive files.get endpoint
-     * `_accessCheck` uses. Cheaper than a full presentation fetch; runs
-     * against the picker-issued access token so it works before any
-     * merge into the main session.
-     * @param {string} id
-     * @param {string} token
-     * @returns {Promise<string|null>}
-     */
-    async function _fetchFileName(id, token)
-    {
-        try
-        {
-            const url = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?fields=name`;
-            const res = await fetch(url, {
-                headers: { Authorization: `Bearer ${token}` },
-                signal: AbortSignal.timeout(10_000),
-            });
-            if (res.status !== 200) return null;
-            const body = await res.json();
-            return typeof body?.name === "string" ? body.name : null;
-        }
-        catch (_)
-        {
-            return null;
-        }
-    }
-
-    async function _runPrepare()
-    {
-        console.warn(`[slides-modal] _runPrepare START — slidesId=${slidesId} selectedName="${selectedName}" presetMode=${presetMode}`);
-        // Shared post-pick / post-relink flow: fetch the deck, hand to
-        // the orchestrator, hand the report to the summary panel. Skips
-        // `_accessCheck` on the picker path (drive.file guarantees it),
-        // but the re-link path still needs it — the caller decides.
-        _setChecking(true);
-        pickBtn.classList.add("is-loading");
-        const spinner = document.createElement("span");
-        spinner.className = "settings-update-spinner";
-        pickBtn.appendChild(spinner);
-        try
-        {
-            _setCaption(t(
-                "mangaplay-studio.googleSlidesSync.publish.form.import.preparing.reading",
-                "Reading presentation…"), "info");
-            console.warn(`[slides-modal] _runPrepare: fetching access token for Slides API…`);
-            const token = await handlers.authClient.getAccessToken({ allowRefresh: true });
-            if (!token)
-            {
-                console.warn(`[slides-modal] _runPrepare: NO TOKEN — throwing auth error`);
-                const err = new Error("no-token");
-                /** @type {any} */ (err).kind = "auth";
-                throw err;
-            }
-            console.warn(`[slides-modal] _runPrepare: calling getPresentation(${slidesId})…`);
-            const { getPresentation } = await import("./slides-api.js");
-            const { presentation, refreshedAt } = await getPresentation(slidesId, token);
-            console.warn(`[slides-modal] _runPrepare: getPresentation RESOLVED — title="${presentation?.title || ""}" slides.length=${presentation?.slides?.length ?? "?"}`);
-
-            _setCaption(t(
-                "mangaplay-studio.googleSlidesSync.publish.form.import.preparing.matching",
-                "Matching pages…"), "info");
-            console.warn(`[slides-modal] _runPrepare: calling prepareSlidesSync()…`);
-            const { prepareSlidesSync } = await import("./slides-prepare.js");
-            const report = await prepareSlidesSync({
-                presentation,
-                refreshedAt,
-                presentationId: slidesId,
-                script:         handlers.ctx?.script,
-                projectPath:    handlers.ctx?.projectPath,
-                authClient:     handlers.authClient,
-                onProgress:     (p) =>
-                {
-                    if (p.phase === "downloading" && p.total)
-                    {
-                        _setCaption(t(
-                            "mangaplay-studio.googleSlidesSync.publish.form.import.preparing.downloading",
-                            "Downloading images… ({current}/{total})",
-                            { current: p.current, total: p.total }), "info");
-                    }
-                },
-            });
-            console.warn(`[slides-modal] _runPrepare: prepareSlidesSync RESOLVED — aborted=${report?.aborted ? JSON.stringify(report.aborted) : "false"} deckPages=${JSON.stringify(report?.deckPages)?.slice(0, 80)} localPages=${JSON.stringify(report?.localPages)?.slice(0, 80)}`);
-
-            if (report.aborted)
-            {
-                console.warn(`[slides-modal] _runPrepare: report.aborted=${report.aborted.reason} — STAYING on form panel with error caption (should NOT show summary)`);
-                const reason = report.aborted.reason;
-                /** @type {string} */
-                let msg;
-                if (reason === "EMPTY_DECK")
-                {
-                    msg = t(
-                        "mangaplay-studio.googleSlidesSync.publish.form.import.err.emptyDeck",
-                        "The presentation has no slides.");
-                }
-                else if (reason === "FETCH_FAILED")
-                {
-                    msg = t(
-                        "mangaplay-studio.googleSlidesSync.publish.form.import.err.fetchFailed",
-                        "Couldn't fetch the presentation. Try again.");
-                }
-                else if (reason === "LOCK_HELD")
-                {
-                    msg = t(
-                        "mangaplay-studio.googleSlidesSync.publish.form.import.err.lockHeld",
-                        "Another window is preparing this deck — try again in a moment.");
-                }
-                else
-                {
-                    msg = t(
-                        "mangaplay-studio.googleSlidesSync.publish.form.import.err.auth",
-                        "Sign in to Google to continue.");
-                }
-                _setCaption(msg, "err");
-                return;
-            }
-
-            if (typeof handlers.onPrepared === "function")
-            {
-                console.warn(`[slides-modal] _runPrepare: about to call handlers.onPrepared() — this WILL transition to summary panel`);
-                handlers.onPrepared(report, slidesId, presentation);
-            }
-            else
-            {
-                console.warn(`[slides-modal] _runPrepare: handlers.onPrepared is NOT a function — summary transition SKIPPED`);
-            }
-        }
-        catch (e)
-        {
-            const kind = /** @type {any} */ (e)?.kind;
-            const msgRaw = String((/** @type {any} */ (e))?.message || e || "");
-            console.warn(`[slides-modal] _runPrepare CAUGHT error — kind=${kind || "unknown"} msg=${msgRaw.slice(0, 200)}`);
-            /** @type {string} */
-            let msg;
-            if (kind === "auth")           msg = t("mangaplay-studio.googleSlidesSync.publish.form.import.err.auth",     "Sign in to Google to continue.");
-            else if (kind === "no-access") msg = t("mangaplay-studio.googleSlidesSync.publish.form.import.err.noAccess", "You don't have access to this presentation.");
-            else if (kind === "not-found") msg = t("mangaplay-studio.googleSlidesSync.publish.form.import.err.notFound", "That presentation couldn't be found.");
-            else                           msg = t("mangaplay-studio.googleSlidesSync.publish.form.import.err.network",  "Couldn't reach Google Slides™. Check your connection.");
-            _setCaption(msg, "err");
-        }
-        finally
-        {
-            console.warn(`[slides-modal] _runPrepare FINALLY — resetting spinner + checking`);
-            spinner.remove();
-            pickBtn.classList.remove("is-loading");
-            _setChecking(false);
-        }
-    }
-
-    async function onOkay()
-    {
-        console.warn(`[slides-modal] onOkay CLICKED — okayBtn.disabled=${okayBtn.disabled} checking=${checking} slidesId=${slidesId}`);
-        if (okayBtn.disabled || checking || !slidesId) return;
-        // Re-link confirmation path — the stored id may point at a file
-        // the current session can't access, so we DO need `_accessCheck`
-        // here (unlike the fresh picker path).
-        _setChecking(true);
-        _setCaption(t(
-            "mangaplay-studio.googleSlidesSync.publish.form.import.checkingAccess",
-            "Checking access…"), "info");
-        try
-        {
-            console.warn(`[slides-modal] onOkay: calling _accessCheck(${slidesId}) — re-link path only`);
-            await _accessCheck(slidesId);
-            console.warn(`[slides-modal] onOkay: _accessCheck OK`);
-        }
-        catch (e)
-        {
-            const kind = /** @type {any} */ (e)?.kind;
-            console.warn(`[slides-modal] onOkay: _accessCheck FAILED — kind=${kind}`);
-            /** @type {string} */
-            let msg;
-            if (kind === "auth")           msg = t("mangaplay-studio.googleSlidesSync.publish.form.import.err.auth",     "Sign in to Google to continue.");
-            else if (kind === "no-access") msg = t("mangaplay-studio.googleSlidesSync.publish.form.import.err.noAccess", "You don't have access to this presentation.");
-            else if (kind === "not-found") msg = t("mangaplay-studio.googleSlidesSync.publish.form.import.err.notFound", "That presentation couldn't be found.");
-            else                           msg = t("mangaplay-studio.googleSlidesSync.publish.form.import.err.network",  "Couldn't reach Google Slides™. Check your connection.");
-            _setCaption(msg, "err");
-            _setChecking(false);
-            return;
-        }
-        console.warn(`[slides-modal] onOkay: proceeding to _runPrepare()`);
-        await _runPrepare();
-    }
-
-    pickBtn.addEventListener("click", async () =>
-    {
-        console.warn(`[slides-modal] pickBtn CLICKED — checking=${checking} presetMode=${presetMode} current slidesId=${slidesId}`);
-        if (checking)
-        {
-            console.warn(`[slides-modal] pickBtn click IGNORED — already checking`);
-            return;
-        }
-        _setChecking(true);
-        _setCaption(t(
-            "shared.ui.picker.openingBrowser", "Opening browser…"), "info");
-        // Hoisted above the try so the catch block can `instanceof` the
-        // error classes — const bindings inside a try are scoped to the try.
-        console.warn(`[slides-modal] importing picker-client.js…`);
-        const { pickFile, PickerCancelledError, PickerTimeoutError, PickerInFlightError }
-            = await import("../google-picker/picker-client.js");
-        try
-        {
-
-            // Update caption once the browser has been opened. Rust's
-            // `picker_open` returns only after the callback lands, so
-            // there's no explicit "opened" hook — swap the caption to
-            // the waiting state on the next microtask and let Rust
-            // race against the browser.
-            queueMicrotask(() =>
-            {
-                if (checking && caption.dataset.kind === "info")
-                {
-                    _setCaption(t(
-                        "shared.ui.picker.awaitingCallback",
-                        "Waiting for you to pick a file…"), "info");
-                }
-            });
-
-            const emailHint = getStoredEmail();
-            console.warn(`[slides-modal] calling pickFile({kind:"slide"}) — Rust will open system browser to Google Picker; awaiting user pick… hint=${emailHint ? "PRESENT" : "null"}`);
-            const result = await pickFile({ kind: "slide", hint: emailHint || undefined });
-            console.warn(`[slides-modal] pickFile RESOLVED — fileId=${result?.fileId} token=${result?.token ? "PRESENT" : "NULL"}`);
-            slidesId = result.fileId;
-
-            // Seed the app-wide auth session so downstream Drive/Slides calls
-            // in _runPrepare (and later re-syncs) can use handlers.authClient
-            // instead of only the picker-scoped token. Also populates identity
-            // via Drive about.get so future picks pass login_hint.
-            try
-            {
-                await mergePickerTokens(result);
-            }
-            catch (e)
-            {
-                console.warn(`[slides-modal] mergePickerTokens failed (non-fatal):`, e);
-            }
-
-            // Fetch the picked file's display name — cheap, uses the
-            // picker-issued token so it works before token merge. Falls
-            // back to the id if the name lookup fails.
-            const nameToken = result.token || await handlers.authClient.getAccessToken({ allowRefresh: true });
-            if (nameToken)
-            {
-                selectedName = await _fetchFileName(slidesId, nameToken);
-                console.warn(`[slides-modal] fetched picked file's display name: "${selectedName}"`);
-            }
-
-            _setCaption(t(
-                "mangaplay-studio.googleSlidesSync.publish.form.sync.selectedCaption",
-                "Selected: {name}",
-                { name: selectedName || slidesId }), "ok");
-
-            // Fresh pick — drive.file scope guarantees access at
-            // pick-time, so skip `_accessCheck` and go straight to
-            // `_runPrepare()`. The `_accessCheck` fn is preserved for
-            // the re-link (presetImportUrl) path.
-            console.warn(`[slides-modal] fresh pick path — skipping _accessCheck, calling _runPrepare()`);
-            await _runPrepare();
-        }
-        catch (e)
-        {
-            const errName = (/** @type {any} */ (e))?.name || (/** @type {any} */ (e))?.constructor?.name || "unknown";
-            const errMsg  = String((/** @type {any} */ (e))?.message || e || "");
-            console.warn(`[slides-modal] pickBtn caught error — name=${errName} msg=${errMsg.slice(0, 200)}`);
-            if (e instanceof PickerCancelledError)
-            {
-                console.warn(`[slides-modal] pickBtn error branch: PickerCancelledError (user closed browser or picker without picking)`);
-                slidesId = null;
-                selectedName = null;
-                _setCaption(t(
-                    "mangaplay-studio.googleSlidesSync.publish.form.sync.pickerCancelled",
-                    "Picker cancelled — try again"), "err");
-            }
-            else if (e instanceof PickerTimeoutError)
-            {
-                console.warn(`[slides-modal] pickBtn error branch: PickerTimeoutError`);
-                _setCaption(t(
-                    "shared.ui.picker.timeoutRetry",
-                    "Timed out — try again"), "err");
-            }
-            else if (e instanceof PickerInFlightError)
-            {
-                console.warn(`[slides-modal] pickBtn error branch: PickerInFlightError — another pick in progress`);
-                _setCaption(t(
-                    "shared.ui.picker.awaitingCallback",
-                    "Waiting for you to pick a file…"), "info");
-            }
-            else
-            {
-                const msg = String((/** @type {any} */ (e))?.message || e || "");
-                console.warn(`[slides-modal] pickBtn error branch: OTHER/${msg.includes("network") ? "network" : "http"}`);
-                if (msg.includes("network"))
-                {
-                    _setCaption(t(
-                        "shared.ui.picker.networkError",
-                        "Couldn't reach the picker service. Check your connection."), "err");
-                }
-                else
-                {
-                    _setCaption(t(
-                        "shared.ui.picker.httpError",
-                        "The picker service returned an error. Try again."), "err");
-                }
-            }
-            _setChecking(false);
-        }
-    });
-
-    /**
-     * Pre-populate the panel for an already-linked script. Extracts the
-     * presentation id from the stored URL, shows a "Currently linked to
-     * <name>" caption, and reveals the `Okay` button so the user can
-     * confirm without re-picking. Picker button label switches to
-     * "Choose different presentation".
-     *
-     * @param {string} url
-     */
-    function presetImportUrl(url)
-    {
-        console.warn(`[slides-modal] presetImportUrl("${url}") — entering RE-LINK mode; user will see Okay button + skip picker`);
-        const id = _extractSlidesId(url);
-        if (!id) { console.warn(`[slides-modal] presetImportUrl: could not extract id — bailing`); return; }
-        presetMode = true;
-        slidesId = id;
-        selectedName = null;
-        pickBtn.textContent = t(
-            "mangaplay-studio.googleSlidesSync.publish.form.sync.pickButtonRelink",
-            "Choose different presentation");
-        okayBtn.hidden = false;
-        _setCaption(t(
-            "mangaplay-studio.googleSlidesSync.publish.form.sync.currentlyLinkedTo",
-            "Currently linked to {name}",
-            { name: id }), "info");
-        // Best-effort fetch of the current linked name; runs against the
-        // session's existing token, no picker needed.
-        (async () =>
-        {
-            const token = await handlers.authClient.getAccessToken({ allowRefresh: true });
-            if (!token) return;
-            const name = await _fetchFileName(id, token);
-            if (name && slidesId === id && presetMode)
-            {
-                selectedName = name;
-                _setCaption(t(
-                    "mangaplay-studio.googleSlidesSync.publish.form.sync.currentlyLinkedTo",
-                    "Currently linked to {name}",
-                    { name }), "info");
-            }
-        })();
-    }
-
-    /**
-     * Called by the wrapper `setIntent("import")`. Resets the caption
-     * (unless a preset is live) and focuses the picker button so
-     * keyboard users can Space/Enter to open the picker.
-     */
-    function onShow()
-    {
-        if (!presetMode)
-        {
-            slidesId = null;
-            selectedName = null;
-            okayBtn.hidden = true;
-            pickBtn.textContent = t(
-                "mangaplay-studio.googleSlidesSync.publish.form.sync.pickButton",
-                "Choose from Google Drive™");
-            _setCaption("", "");
-        }
-        _setChecking(false);
-        // Defer focus past the 260ms slide transition. focus() triggers
-        // scroll-into-view on ancestors — during a translateX(100% → 0)
-        // transition that forces the browser to snap the transform to
-        // reveal the button, killing the animation. preventScroll would
-        // be enough on modern engines but is unreliable in WebView2, so
-        // just wait until the slide is done.
-        setTimeout(() =>
-        {
-            try { pickBtn.focus({ preventScroll: true }); } catch (_)
-            {
-                try { pickBtn.focus(); } catch (_) { /* best-effort */ }
-            }
-        }, 300);
-    }
-
-    return { root, presetImportUrl, onShow };
-}
-
-/**
- * Format a list of page fullIds for the summary counts row.
- *
- * Rules per plan spec:
- *   - ≤ 4 pages: comma-separated list of all ids, plus "(N total)".
- *   - Contiguous numeric 1..N: "first – last (N total)".
- *   - Non-contiguous or any non-numeric id (COVER, roman, sub-page): show
- *     first three + "…" + last, plus "(N total)".
- *
- * @param {string[]} pages
- * @returns {string}
- */
-function _formatPageRange(pages)
-{
-    const n = pages.length;
-    if (n === 0) return "0 total";
-    if (n <= 4) return `${pages.join(", ")} (${n} total)`;
-
-    // Contiguous check: every entry equals String(i + 1) starting at 1.
-    let contiguous = true;
-    for (let i = 0; i < n; i++)
-    {
-        if (pages[i] !== String(i + 1))
-        {
-            contiguous = false;
-            break;
-        }
-    }
-    if (contiguous)
-    {
-        return `${pages[0]} – ${pages[n - 1]} (${n} total)`;
-    }
-    return `${pages[0]}, ${pages[1]}, ${pages[2]}, …, ${pages[n - 1]} (${n} total)`;
-}
-
-/**
- * Summary panel — post-prep report + reconcile UI + Accept/Cancel.
- *
- * `onAccept` receives `{ mismatchPolicy }` where policy is `"use-deck"` or
- * `"use-local"` when the mismatch section is visible, else `null`.
- *
- * @param {{
- *   onCancel: () => void,
- *   onBack?:  () => void,
- *   onAccept: (args: { mismatchPolicy: "use-deck"|"use-local"|null }) => void
- * }} handlers
- */
-function _buildSummaryPanel(handlers)
-{
-    const root = document.createElement("section");
-    root.className = "publish-panel publish-panel-summary";
-
-    // ── Scope header (folder vs single-file) ─────────────────────────────
-    const scopeHeader = document.createElement("p");
-    scopeHeader.className = "publish-summary-scope-header";
-    scopeHeader.hidden = true;
-    root.appendChild(scopeHeader);
-
-    // ── Meta row (presentation + local script) ──────────────────────────
-    const meta = document.createElement("div");
-    meta.className = "publish-summary-meta";
-    const metaPresentation = document.createElement("p");
-    const metaLocal = document.createElement("p");
-    meta.appendChild(metaPresentation);
-    meta.appendChild(metaLocal);
-    root.appendChild(meta);
-
-    // ── Counts card (two columns: Local | Presentation) ─────────────────
-    const counts = document.createElement("div");
-    counts.className = "publish-summary-counts";
-
-    const colLocal = document.createElement("div");
-    colLocal.className = "publish-summary-counts-col";
-    const colLocalHeading = document.createElement("h4");
-    colLocalHeading.className = "publish-summary-counts-col-heading";
-    colLocalHeading.textContent = t(
-        "mangaplay-studio.googleSlidesSync.publish.summary.counts.localHeading",
-        "Local");
-    colLocal.appendChild(colLocalHeading);
-
-    const colDeck = document.createElement("div");
-    colDeck.className = "publish-summary-counts-col";
-    const colDeckHeading = document.createElement("h4");
-    colDeckHeading.className = "publish-summary-counts-col-heading";
-    colDeckHeading.textContent = t(
-        "mangaplay-studio.googleSlidesSync.publish.summary.counts.deckHeading",
-        "Presentation");
-    colDeck.appendChild(colDeckHeading);
-
-    counts.appendChild(colLocal);
-    counts.appendChild(colDeck);
-
-    /**
-     * @param {HTMLElement} parent
-     * @param {string} labelText
-     * @returns {HTMLSpanElement}
-     */
-    const addCountRow = (parent, labelText) =>
-    {
-        const row = document.createElement("p");
-        const label = document.createElement("span");
-        label.className = "publish-summary-counts-label";
-        label.textContent = labelText;
-        const value = document.createElement("span");
-        value.className = "publish-summary-counts-value";
-        row.appendChild(label);
-        row.appendChild(value);
-        parent.appendChild(row);
-        return value;
-    };
-
-    const valLocalPages = addCountRow(colLocal, t(
-        "mangaplay-studio.googleSlidesSync.publish.summary.counts.localPages",
-        "Pages in the local document:"));
-    const valImagesToDownload = addCountRow(colLocal, t(
-        "mangaplay-studio.googleSlidesSync.publish.summary.counts.imagesToDownload",
-        "Images to download:"));
-
-    const valDeckPages = addCountRow(colDeck, t(
-        "mangaplay-studio.googleSlidesSync.publish.summary.counts.deckPages",
-        "Pages in the presentation:"));
-    const valImagesFound = addCountRow(colDeck, t(
-        "mangaplay-studio.googleSlidesSync.publish.summary.counts.imagesFound",
-        "Images found on slides:"));
-    const valDeckOutOfScope = addCountRow(colDeck, t(
-        "mangaplay-studio.googleSlidesSync.publish.summary.counts.deckOutOfScope",
-        "Extra pages in deck (outside this script):"));
-    // Hidden until setReport() sees a non-empty deckOutOfScope bucket.
-    /** @type {HTMLElement} */
-    (valDeckOutOfScope.parentElement).hidden = true;
-
-    root.appendChild(counts);
-
-    // ── Live caption row (progress during commit) ──────────────────────
-    const caption = document.createElement("p");
-    caption.className = "publish-summary-caption";
-    caption.hidden = true;
-    root.appendChild(caption);
-
-    // ── Mismatch section (hidden unless report.mismatch !== null) ───────
-    const mismatchSection = document.createElement("div");
-    mismatchSection.className = "publish-summary-mismatch";
-    mismatchSection.hidden = true;
-    const mismatchPrompt = document.createElement("p");
-    mismatchPrompt.className = "publish-summary-mismatch-prompt";
-    mismatchSection.appendChild(mismatchPrompt);
-    const mismatchFieldset = document.createElement("fieldset");
-
-    // Radio 1: Use Local Version
-    const labelLocal = document.createElement("label");
-    labelLocal.className = "publish-summary-mismatch-option";
-    const radioLocal = document.createElement("input");
-    radioLocal.type = "radio";
-    radioLocal.name = "publish-summary-mismatch-policy";
-    radioLocal.value = "use-local";
-    const localTextWrap = document.createElement("span");
-    localTextWrap.className = "publish-summary-mismatch-text";
-    const localTitle = document.createElement("span");
-    localTitle.className = "publish-summary-mismatch-title";
-    localTitle.textContent = t(
-        "mangaplay-studio.googleSlidesSync.publish.summary.mismatch.useLocal",
-        "Use Local Version");
-    const localDesc = document.createElement("span");
-    localDesc.className = "publish-summary-mismatch-desc";
-    localDesc.textContent = t(
-        "mangaplay-studio.googleSlidesSync.publish.summary.mismatch.useLocalDescription",
-        "This will upload my local version of the pages and overwrite what is in Google Slides for the specific pages.");
-    localTextWrap.appendChild(localTitle);
-    localTextWrap.appendChild(localDesc);
-    labelLocal.appendChild(radioLocal);
-    labelLocal.appendChild(localTextWrap);
-
-    // Radio 2: Use Google Slides Version (default checked — safer, doesn't overwrite deck)
-    const labelDeck = document.createElement("label");
-    labelDeck.className = "publish-summary-mismatch-option";
-    const radioDeck = document.createElement("input");
-    radioDeck.type = "radio";
-    radioDeck.name = "publish-summary-mismatch-policy";
-    radioDeck.value = "use-deck";
-    radioDeck.checked = true;
-    const deckTextWrap = document.createElement("span");
-    deckTextWrap.className = "publish-summary-mismatch-text";
-    const deckTitle = document.createElement("span");
-    deckTitle.className = "publish-summary-mismatch-title";
-    deckTitle.textContent = t(
-        "mangaplay-studio.googleSlidesSync.publish.summary.mismatch.useDeck",
-        "Use Google Slides Version");
-    const deckDesc = document.createElement("span");
-    deckDesc.className = "publish-summary-mismatch-desc";
-    deckDesc.textContent = t(
-        "mangaplay-studio.googleSlidesSync.publish.summary.mismatch.useDeckDescription",
-        "This will overwrite my local version and accept the Google Slides version as the source of truth for the specific pages.");
-    deckTextWrap.appendChild(deckTitle);
-    deckTextWrap.appendChild(deckDesc);
-    labelDeck.appendChild(radioDeck);
-    labelDeck.appendChild(deckTextWrap);
-
-    mismatchFieldset.appendChild(labelLocal);
-    mismatchFieldset.appendChild(labelDeck);
-    mismatchSection.appendChild(mismatchFieldset);
-    root.appendChild(mismatchSection);
-
-    // ── Warnings section (hidden unless report.warnings.length > 0) ─────
-    const warningsSection = document.createElement("div");
-    warningsSection.className = "publish-summary-warnings";
-    warningsSection.hidden = true;
-    const warningsHeading = document.createElement("h3");
-    warningsHeading.textContent = t(
-        "mangaplay-studio.googleSlidesSync.publish.summary.warnings.heading",
-        "Warnings");
-    const warningsList = document.createElement("ul");
-    warningsSection.appendChild(warningsHeading);
-    warningsSection.appendChild(warningsList);
-    root.appendChild(warningsSection);
-
-    // ── Footer ──────────────────────────────────────────────────────────
-    const footer = document.createElement("div");
-    footer.className = "publish-footer";
-    const backBtn = document.createElement("button");
-    backBtn.type = "button";
-    backBtn.className = "mps-btn-secondary";
-    backBtn.textContent = t(
-        "mangaplay-studio.googleSlidesSync.publish.back", "Back");
-    backBtn.addEventListener("click", () => handlers.onBack?.());
-    const cancelBtn = document.createElement("button");
-    cancelBtn.type = "button";
-    cancelBtn.className = "mps-btn-secondary";
-    cancelBtn.textContent = t(
-        "mangaplay-studio.googleSlidesSync.publish.summary.cancel",
-        "Cancel");
-    cancelBtn.addEventListener("click", () => handlers.onCancel());
-    const acceptBtn = document.createElement("button");
-    acceptBtn.type = "button";
-    acceptBtn.className = "mps-btn-primary";
-    acceptBtn.textContent = t(
-        "mangaplay-studio.googleSlidesSync.publish.summary.accept",
-        "Accept & Link");
-    acceptBtn.addEventListener("click", () =>
-    {
-        /** @type {"use-deck"|"use-local"|null} */
-        let policy = null;
-        if (!mismatchSection.hidden)
-        {
-            policy = radioDeck.checked ? "use-deck" : "use-local";
-        }
-        handlers.onAccept({ mismatchPolicy: policy });
-    });
-    footer.appendChild(backBtn);
-    footer.appendChild(cancelBtn);
-    footer.appendChild(acceptBtn);
-    root.appendChild(footer);
-
-    /**
-     * Render a warning as an `<li>` with a t-keyed message.
-     * @param {any} w
-     * @returns {HTMLLIElement}
-     */
-    function renderWarning(w)
-    {
-        const li = document.createElement("li");
-        const kind = w && w.kind;
-        const pageId = w && w.pageId;
-        const slideIndex = w && w.slideIndex;
-        const message = w && w.message ? String(w.message) : "";
-        /** @type {string} */
-        let text;
-        if (kind === "PARSE_ERROR")
-        {
-            text = t(
-                "mangaplay-studio.googleSlidesSync.publish.summary.warn.parseError",
-                "Slide {slideIndex}: {message}",
-                { slideIndex: String(slideIndex ?? "?"), message });
-        }
-        else if (kind === "DUPLICATE")
-        {
-            text = t(
-                "mangaplay-studio.googleSlidesSync.publish.summary.warn.duplicate",
-                "Duplicate PAGE {pageId} on slide {slideIndex}",
-                { pageId: String(pageId ?? "?"), slideIndex: String(slideIndex ?? "?") });
-        }
-        else if (kind === "NO_IMAGE_ON_SLIDE")
-        {
-            text = t(
-                "mangaplay-studio.googleSlidesSync.publish.summary.warn.noImage",
-                "Page {pageId} has no image on the slide",
-                { pageId: String(pageId ?? "?") });
-        }
-        else if (kind === "URL_EXPIRED")
-        {
-            text = t(
-                "mangaplay-studio.googleSlidesSync.publish.summary.warn.urlExpired",
-                "Page {pageId} image URL expired — skipped",
-                { pageId: String(pageId ?? "?") });
-        }
-        else if (kind === "DOWNLOAD_FAILED")
-        {
-            text = t(
-                "mangaplay-studio.googleSlidesSync.publish.summary.warn.downloadFailed",
-                "Page {pageId} download failed — {message}",
-                { pageId: String(pageId ?? "?"), message });
-        }
-        else if (kind === "NO_DECK_HEADER_TEXT")
-        {
-            text = t(
-                "mangaplay-studio.googleSlidesSync.publish.summary.warn.noDeckHeaderText",
-                "Page {pageId} has no body text on the slide — treated as differing from local.",
-                { pageId: String(pageId ?? "?") });
-        }
-        else if (kind === "VERIFY_FAILED")
-        {
-            text = t(
-                "mangaplay-studio.googleSlidesSync.publish.summary.warn.verifyFailed",
-                "Page {pageId} content didn't match after upload. Try Publish again.",
-                { pageId: String(pageId ?? "?") });
-        }
-        else
-        {
-            text = message || String(kind || "");
-        }
-        li.textContent = text;
-        return li;
-    }
-
-    /**
-     * Populate the panel with a `PrepareReport` + display strings.
-     * @param {any} report
-     * @param {string} presentationTitle
-     * @param {string} basename
-     * @param {any} [scope]  publishScope — { kind: "folder"|"file", ... }
-     */
-    function setReport(report, presentationTitle, basename, scope)
-    {
-        metaPresentation.textContent = t(
-            "mangaplay-studio.googleSlidesSync.publish.summary.meta.presentation",
-            "Presentation: {title}",
-            { title: presentationTitle || "" });
-
-        // Scope header + `Local script:` line vary by scope kind. Folder
-        // scope shows the folder name; file scope shows the basename.
-        const localPagesArr = Array.isArray(report?.localPages) ? report.localPages : [];
-        const pageCount = localPagesArr.length || Number(scope?.pageCount || 0);
-        if (scope && scope.kind === "folder")
-        {
-            metaLocal.textContent = t(
-                "mangaplay-studio.googleSlidesSync.publish.summary.meta.localFolder",
-                "Storyboard folder: {folderName}",
-                { folderName: scope.folderName || "" });
-            scopeHeader.textContent = t(
-                "mangaplay-studio.googleSlidesSync.publish.summary.scope.folder",
-                "Publishing folder {folderName} ({fileCount} files, {pageCount} pages)",
-                {
-                    folderName: scope.folderName || "",
-                    fileCount:  String(scope.fileCount || 0),
-                    pageCount:  String(pageCount),
-                });
-            scopeHeader.hidden = false;
-        }
-        else
-        {
-            metaLocal.textContent = t(
-                "mangaplay-studio.googleSlidesSync.publish.summary.meta.local",
-                "Local script: {basename}",
-                { basename: basename || "" });
-            if (scope && scope.kind === "file")
-            {
-                scopeHeader.textContent = t(
-                    "mangaplay-studio.googleSlidesSync.publish.summary.scope.file",
-                    "Publishing {basename} ({pageCount} pages)",
-                    { basename: basename || "", pageCount: String(pageCount) });
-                scopeHeader.hidden = false;
-            }
-            else
-            {
-                scopeHeader.textContent = "";
-                scopeHeader.hidden = true;
-            }
-        }
-
-        const deckPages = Array.isArray(report?.deckPages) ? report.deckPages : [];
-        const localPages = Array.isArray(report?.localPages) ? report.localPages : [];
-        valDeckPages.textContent = _formatPageRange(deckPages);
-        valLocalPages.textContent = _formatPageRange(localPages);
-
-        const imagesFound = Number(report?.imagesFound || 0);
-        const imagesToDownload = Number(report?.imagesToDownload || 0);
-        valImagesFound.textContent = t(
-            "mangaplay-studio.googleSlidesSync.publish.summary.counts.imagesFoundValue",
-            "{found} of {total}",
-            { found: String(imagesFound), total: String(deckPages.length) });
-        valImagesToDownload.textContent = String(imagesToDownload);
-
-        // Mismatch section — three buckets.
-        //   diffCount = pairedDifferent.length + localOnly.length
-        //   deckOutOfScope surfaces as an informational line, NEVER as a
-        //   mismatch. Radio section hides when diffCount === 0.
-        const mismatch = report?.mismatch;
-        const pairedDifferent = Array.isArray(mismatch?.pairedDifferent) ? mismatch.pairedDifferent : [];
-        const localOnly = Array.isArray(mismatch?.localOnly) ? mismatch.localOnly : [];
-        const deckOutOfScope = Array.isArray(mismatch?.deckOutOfScope) ? mismatch.deckOutOfScope : [];
-        const diffCount = pairedDifferent.length + localOnly.length;
-        if (diffCount > 0)
-        {
-            mismatchSection.hidden = false;
-            mismatchPrompt.textContent = t(
-                "mangaplay-studio.googleSlidesSync.publish.summary.mismatchPrompt",
-                "{count} pages need reconciling. Which version do you want to use for those pages?",
-                { count: String(diffCount) });
-            radioDeck.checked = true;
-            radioLocal.checked = false;
-        }
-        else
-        {
-            mismatchSection.hidden = true;
-        }
-        const dosRow = /** @type {HTMLElement} */ (valDeckOutOfScope.parentElement);
-        if (deckOutOfScope.length > 0)
-        {
-            valDeckOutOfScope.textContent = t(
-                "mangaplay-studio.googleSlidesSync.publish.summary.counts.deckOutOfScopeValue",
-                "{count}",
-                { count: String(deckOutOfScope.length) });
-            if (dosRow) dosRow.hidden = false;
-        }
-        else
-        {
-            valDeckOutOfScope.textContent = "0";
-            if (dosRow) dosRow.hidden = true;
-        }
-
-        // Warnings section
-        const warnings = Array.isArray(report?.warnings) ? report.warnings : [];
-        warningsList.innerHTML = "";
-        if (warnings.length > 0)
-        {
-            warningsSection.hidden = false;
-            for (const w of warnings) warningsList.appendChild(renderWarning(w));
-        }
-        else
-        {
-            warningsSection.hidden = true;
-        }
-    }
-
-    /**
-     * Update the live caption row shown during commit. Pass empty string to
-     * hide.
-     * @param {string} text
-     * @param {"info"|"err"} [kind]
-     */
-    function setCaption(text, kind)
-    {
-        caption.textContent = text || "";
-        caption.hidden = !text;
-        caption.classList.toggle("is-err", kind === "err");
-    }
-
-    return { root, setReport, setCaption };
-}
-
-/**
- * Progress panel — 5-step commit timeline.
- *
- * Steps:
- *   0. Downloading images
- *   1. Syncing page text
- *   2. Verifying page text
- *   3. Finalising (save link)
- *   4. Refreshing linked indicator
- *
- * Each step row renders `<pip> <label> <detail>`. Pip statuses:
- *   queued (○), running (⟳ spinner), done (✓), warn (⚠), failed (✗), skipped (—).
- *
- * The footer button is `[ Cancel ]` while steps 1-2 are eligible and
- * swaps to `[ Close ]` once the run is done (via `setDone`).
- *
- * The heading renders "Publishing …" during the run and swaps to the
- * outcome header on `setDone`.
- *
- * @param {{
- *   onCancel: () => void,
- *   onClose:  () => void,
- * }} handlers
- */
-function _buildProgressPanel(handlers)
-{
-    const root = document.createElement("section");
-    root.className = "publish-panel publish-panel-progress";
-
-    const heading = document.createElement("h2");
-    heading.className = "publish-heading publish-progress-heading";
-    heading.textContent = t(
-        "mangaplay-studio.googleSlidesSync.publish.progress.heading",
-        "Publishing");
-    root.appendChild(heading);
-
-    const scopeHeader = document.createElement("p");
-    scopeHeader.className = "publish-progress-scope";
-    scopeHeader.hidden = true;
-    root.appendChild(scopeHeader);
-
-    // Slim horizontal progress bar — reuses the exact CSS classes shipped
-    // by the Docs publish modal (see app-modals.css:1596-1618).
-    const bar = document.createElement("div");
-    bar.className = "publish-progress-bar";
-    const fill = document.createElement("div");
-    fill.className = "publish-progress-bar-fill";
-    bar.appendChild(fill);
-    root.appendChild(bar);
-
-    const stepLabelEl = document.createElement("div");
-    stepLabelEl.className = "publish-step-label";
-    stepLabelEl.setAttribute("aria-live", "polite");
-    root.appendChild(stepLabelEl);
-
-    // 5 steps × 20% each — monotonic 0 → 100% across the whole run.
-    const STEP_LABEL_KEYS = [
-        { key: "stepImages", fallback: "Downloading images" },
-        { key: "stepText",   fallback: "Syncing page text" },
-        { key: "stepVerify", fallback: "Verifying page text" },
-        { key: "stepDone",   fallback: "Finalising" },
-        { key: "stepLinked", fallback: "Refreshing linked indicator" },
-    ];
-    const STEP_WEIGHT = 100 / STEP_LABEL_KEYS.length;
-
-    /** Monotonic percentage — never regress mid-run. */
-    let lastPct = 0;
-
-    /** @param {number} i */
-    function labelFor(i)
-    {
-        const meta = STEP_LABEL_KEYS[i];
-        if (!meta) return "";
-        return t(
-            `mangaplay-studio.googleSlidesSync.publish.progress.${meta.key}`,
-            meta.fallback);
-    }
-
-    const footer = document.createElement("div");
-    footer.className = "publish-footer";
-    const actionBtn = document.createElement("button");
-    actionBtn.type = "button";
-    actionBtn.className = "mps-btn-secondary";
-    actionBtn.textContent = t(
-        "mangaplay-studio.googleSlidesSync.publish.progress.cancel", "Cancel");
-    actionBtn.addEventListener("click", () =>
-    {
-        if (actionBtn.dataset.mode === "close")
-        {
-            handlers.onClose();
-        }
-        else
-        {
-            handlers.onCancel();
-        }
-    });
-    actionBtn.dataset.mode = "cancel";
-    footer.appendChild(actionBtn);
-    root.appendChild(footer);
-
-    /** @param {number} pct */
-    function setPct(pct)
-    {
-        const clamped = Math.max(0, Math.min(100, pct));
-        // Enforce monotonic sweep — later steps starting must not roll back.
-        if (clamped < lastPct) return;
-        lastPct = clamped;
-        fill.style.width = `${clamped}%`;
-    }
-
-    /**
-     * Consume an onStep event from `runCommit`. Maps step index + phase to
-     * a monotonic 0 → 100% bar sweep plus a single "current step" label.
-     * Warnings surface in the footer/summary — not in the progress row.
-     *
-     * @param {number} i
-     * @param {any} ev
-     */
-    function onStepEvent(i, ev)
-    {
-        const phase = ev && ev.phase;
-        const base = i * STEP_WEIGHT;
-        const total = Number(ev && ev.total) || 0;
-        const current = Number(ev && ev.current) || 0;
-
-        if (phase === "skipped" || phase === "done" || phase === "warn")
-        {
-            // Step completed → snap to the end of its slice.
-            setPct(base + STEP_WEIGHT);
-            stepLabelEl.textContent = labelFor(i);
-            return;
-        }
-        if (phase === "failed")
-        {
-            fill.classList.add("is-error");
-            stepLabelEl.textContent = labelFor(i);
-            return;
-        }
-        if (phase === "running")
-        {
-            const inner = (total > 0)
-                ? Math.min(1, Math.max(0, current / total)) * STEP_WEIGHT
-                : 0;
-            setPct(base + inner);
-            stepLabelEl.textContent = labelFor(i);
-        }
-    }
-
-    function reset()
-    {
-        lastPct = 0;
-        fill.style.width = "0%";
-        fill.classList.remove("is-error");
-        stepLabelEl.textContent = "";
-        actionBtn.dataset.mode = "cancel";
-        actionBtn.className = "mps-btn-secondary";
-        actionBtn.textContent = t(
-            "mangaplay-studio.googleSlidesSync.publish.progress.cancel", "Cancel");
-        heading.textContent = t(
-            "mangaplay-studio.googleSlidesSync.publish.progress.heading",
-            "Publishing");
-        scopeHeader.textContent = "";
-        scopeHeader.hidden = true;
-    }
-
-    /** @param {any} ctx */
-    function setHeadingForContext(ctx)
-    {
-        const scope = ctx?.publishScope;
-        if (scope && scope.kind === "folder")
-        {
-            scopeHeader.textContent = t(
-                "mangaplay-studio.googleSlidesSync.publish.summary.scope.folder",
-                "Publishing folder {folderName} ({fileCount} files, {pageCount} pages)",
-                {
-                    folderName: scope.folderName || "",
-                    fileCount:  String(scope.fileCount || 0),
-                    pageCount:  String(scope.pageCount || 0),
-                });
-            scopeHeader.hidden = false;
-        }
-        else if (scope && scope.kind === "file")
-        {
-            scopeHeader.textContent = t(
-                "mangaplay-studio.googleSlidesSync.publish.summary.scope.file",
-                "Publishing {basename} ({pageCount} pages)",
-                { basename: ctx?.basename || "", pageCount: String(scope.pageCount || 0) });
-            scopeHeader.hidden = false;
-        }
-        else
-        {
-            scopeHeader.hidden = true;
-        }
-    }
-
-    /**
-     * @param {{ ok: boolean, warnings: any[], onClose: () => void }} opts
-     */
-    function setDone(opts)
-    {
-        const warnings = Array.isArray(opts.warnings) ? opts.warnings : [];
-        const hasWarn = warnings.length > 0;
-        if (!opts.ok)
-        {
+            const dialog = document.createElement("div");
+            dialog.className = "settings-dialog publish-modal publish-modal-slides";
+            dialog.setAttribute("role", "dialog");
+            dialog.setAttribute("aria-modal", "true");
+            const modalTitle = t(
+                "mangaplay-studio.googleSlidesSync.publish.modalTitle",
+                "Publish to Google Slides™");
+            dialog.setAttribute("aria-label", modalTitle);
+
+            // Titlebar — matches the real modal's structure.
+            const titlebar = document.createElement("div");
+            titlebar.className = "settings-titlebar publish-titlebar";
+            const titleText = document.createElement("div");
+            titleText.className = "publish-title";
+            titleText.textContent = modalTitle;
+            const closeXBtn = document.createElement("button");
+            closeXBtn.type = "button";
+            closeXBtn.className = "settings-close";
+            closeXBtn.setAttribute("aria-label",
+                t("mangaplay-studio.googleSlidesSync.publish.close", "Close"));
+            closeXBtn.insertAdjacentHTML("afterbegin", icon("x", { size: 16 }));
+            closeXBtn.addEventListener("click", () => cancel());
+            titlebar.appendChild(titleText);
+            titlebar.appendChild(closeXBtn);
+
+            // Track — the .publish-modal-slides .publish-track > .publish-panel
+            // selectors in app-modals.css need this exact ancestor chain to
+            // apply position/size/transition. Without it the panel collapses
+            // to 14.2857% of viewport unstyled.
+            const track = document.createElement("div");
+            track.className = "publish-track";
+
+            // Single Coming-Soon panel. is-active flips the base off-screen
+            // transform (translateX(100%) opacity:0) to the on-screen state.
+            const panel = document.createElement("section");
+            panel.className = "publish-panel publish-panel-coming-soon is-active";
+
+            // Picker-heading — matches the real picker panel's chrome so the Coming-
+            // Soon card reads as "the same kind of panel, minus a second card."
+            const heading = document.createElement("h2");
+            heading.className = "publish-picker-heading";
             heading.textContent = t(
-                "mangaplay-studio.googleSlidesSync.publish.progress.outcomeFailed",
-                "Publish failed");
-            fill.classList.add("is-error");
-        }
-        else if (hasWarn)
-        {
-            heading.textContent = t(
-                "mangaplay-studio.googleSlidesSync.publish.progress.outcomeWarnings",
-                "Publish complete with warnings");
-            setPct(100);
-        }
-        else
-        {
-            heading.textContent = t(
-                "mangaplay-studio.googleSlidesSync.publish.progress.outcomeSuccess",
-                "Publish complete");
-            setPct(100);
-        }
-        stepLabelEl.textContent = "";
-        actionBtn.dataset.mode = "close";
-        actionBtn.className = "mps-btn-primary";
-        actionBtn.textContent = t(
-            "mangaplay-studio.googleSlidesSync.publish.progress.close", "Close");
-        // Rebind close on this run.
-        handlers.onClose = opts.onClose;
-    }
+                "mangaplay-studio.googleSlidesSync.comingSoon.heading",
+                "Coming Soon");
+            panel.appendChild(heading);
 
-    return {
-        root,
-        reset,
-        setHeadingForContext,
-        onStepEvent,
-        setDone,
-    };
+            // Cards row — reused from the real picker so a single card slots into the
+            // same flex container. A single .publish-picker-card would stretch to 100%
+            // because it's `flex: 1 1 0`; a max-width + margin:auto below keeps it
+            // looking like a card, not a wall.
+            const cards = document.createElement("div");
+            cards.className = "publish-picker-cards publish-picker-cards-coming-soon";
+
+            const card = document.createElement("div");
+            card.className = "publish-picker-card publish-picker-card--disabled";
+
+            const image = document.createElement("div");
+            image.className = "publish-picker-card-image";
+            const img = document.createElement("img");
+            img.src = "./img/Google_Slides_logo_(2014-2020).svg";
+            img.width = 48;
+            img.height = 48;
+            img.alt = "";
+            image.appendChild(img);
+            card.appendChild(image);
+
+            const title = document.createElement("div");
+            title.className = "publish-picker-card-title";
+            title.textContent = t(
+                "mangaplay-studio.googleSlidesSync.comingSoon.cardTitle",
+                "Sync coming soon");
+            card.appendChild(title);
+
+            const bodyEl = document.createElement("p");
+            bodyEl.className = "publish-picker-card-body";
+            bodyEl.textContent = t(
+                "mangaplay-studio.googleSlidesSync.comingSoon.body",
+                "Soon you'll be able to sync a Google Slides™ presentation with a Mangaplay document.");
+            card.appendChild(bodyEl);
+
+            cards.appendChild(card);
+            panel.appendChild(cards);
+
+            // Footer — Close button on the right, same as the other Slides modal panels.
+            const footer = document.createElement("div");
+            footer.className = "publish-footer";
+            const closeBtn = document.createElement("button");
+            closeBtn.type = "button";
+            closeBtn.className = "mps-btn-primary";
+            closeBtn.textContent = t(
+                "mangaplay-studio.googleSlidesSync.publish.close", "Close");
+            closeBtn.addEventListener("click", () => resolveWith(null));
+            footer.appendChild(closeBtn);
+            panel.appendChild(footer);
+
+            track.appendChild(panel);
+            dialog.appendChild(titlebar);
+            dialog.appendChild(track);
+            backdrop.appendChild(dialog);
+        }
+    });
+    return null;
 }
-
 /**
  * Stub auth client used when callers don't supply one. Always returns null
  * so preflight surfaces the sign-in panel cleanly.

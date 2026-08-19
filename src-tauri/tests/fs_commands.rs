@@ -204,7 +204,7 @@ fn rename_blocks_on_existing_target()
     assert_eq!(err, "target-exists");
 }
 
-// ── art-map rewrite on rename (Phase 3) ──────────────────────────────────
+// ── art-map rewrite on rename ─────────────────────────────────────────────
 
 #[test]
 fn rename_script_with_art_rewrites_map_key_and_does_not_move_file()
@@ -423,7 +423,7 @@ fn force_delete_missing_errors()
     assert_eq!(err, "not-found");
 }
 
-// ── art-map cleanup on delete (Phase 4) ──────────────────────────────────
+// ── art-map cleanup on delete ─────────────────────────────────────────────
 //
 // Force-variant tests so the cleanup is deterministic without depending on a
 // freedesktop / Win32 trash backend that might not exist on the CI host.
@@ -556,8 +556,8 @@ fn delete_folder_does_not_touch_art_map()
     let uuid = "99998888-7777-4666-8555-444433332222";
 
     // Seed an art mapping for a real script — independent of the folder we
-    // delete below. The folder-delete must NOT drop this entry (Phase 6's job
-    // to handle folder-scoped art cleanup).
+    // delete below. The folder-delete must NOT drop this entry — folder-scoped
+    // art cleanup is the folder branch's job.
     fs::write(root.join("hero.mangaplay.md"), "x").unwrap();
     let art_path = seed_project_with_art(root, "hero.mangaplay.md", uuid);
 

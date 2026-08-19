@@ -42,7 +42,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     font-weight: 700;
     color: var(--row-text);
     background: var(--row-bg);
@@ -66,7 +66,7 @@
 {
     margin: 0;
     color: var(--mps-text-secondary, #666);
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     opacity: 0.8;
 }
 
@@ -144,7 +144,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     font-weight: 400;
     color: var(--row-text);
     background: var(--row-bg);
@@ -177,7 +177,7 @@
 {
     margin: 0;
     color: var(--mps-text-secondary, #666);
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     opacity: 0.8;
 }
 #subview-statistics .statistics-text-file
@@ -195,7 +195,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     font-weight: 400;
     color: var(--row-text);
     background: var(--row-bg);

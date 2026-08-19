@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// scriptMap — durable per-script identity (TODO/script-uuid-registry.md).
+// scriptMap — durable per-script identity.
 //
 // scriptMap is the authority for script→UUID identity. Lives at
 // `project.json.scriptMap`, keyed by project-relative forward-slash path:
@@ -157,33 +157,13 @@ pub fn script_map_rewrite_prefix(
     new_prefix: &str,
 )
 {
-    if old_prefix == new_prefix { return; }
-
     let Some(root) = project_json.as_object_mut() else { return; };
     let Some(script_map) = root.get_mut("scriptMap").and_then(|v| v.as_object_mut())
     else
     {
         return;
     };
-
-    let old_with_slash = format!("{}/", old_prefix.trim_end_matches('/'));
-    let new_trimmed = new_prefix.trim_end_matches('/');
-
-    let keys_to_rewrite: Vec<String> = script_map
-        .keys()
-        .filter(|k| k.starts_with(&old_with_slash))
-        .cloned()
-        .collect();
-
-    for old_key in keys_to_rewrite
-    {
-        let suffix = &old_key[old_with_slash.len()..];
-        let new_key = format!("{}/{}", new_trimmed, suffix);
-        if let Some(value) = script_map.remove(&old_key)
-        {
-            script_map.insert(new_key, value);
-        }
-    }
+    crate::util::json_prefix::map_rewrite_prefix(script_map, old_prefix, new_prefix);
 }
 
 /// Remove every key under `<prefix>/`. Trailing-slash semantics match
@@ -199,16 +179,5 @@ pub fn script_map_drop_prefix(
     {
         return;
     };
-
-    let with_slash = format!("{}/", prefix.trim_end_matches('/'));
-    let keys_to_drop: Vec<String> = script_map
-        .keys()
-        .filter(|k| k.starts_with(&with_slash))
-        .cloned()
-        .collect();
-
-    for key in keys_to_drop
-    {
-        script_map.remove(&key);
-    }
+    crate::util::json_prefix::map_drop_prefix(script_map, prefix);
 }

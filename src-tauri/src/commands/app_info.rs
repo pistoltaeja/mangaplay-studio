@@ -5,8 +5,10 @@
 
 use tauri::Manager;
 
-use crate::commands::file_ops::fs_events::path_eq_caseless;
-use crate::commands::project::read_project_json_field;
+use crate::commands::project::{read_project_json_field, read_project_json_locked};
+use crate::fs_helpers::trash_or_remove;
+use crate::user_data::paths::resolve_user_data_dir;
+use crate::user_data::settings::drop_project_session_impl;
 use crate::{chrono_iso_now, PACKAGED_APP_VERSION_INFO_JSON};
 
 #[tauri::command]
@@ -84,12 +86,29 @@ pub fn app_recent(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
             .or(shared_name)
             .unwrap_or(folder_name);
 
+        let locked = if exists {
+            path_str.as_ref()
+                .map(|p| read_project_json_locked(std::path::Path::new(p)))
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
         if let Some(obj) = entry.as_object_mut() {
             obj.insert("exists".into(), serde_json::Value::Bool(exists));
             obj.insert("resolvedName".into(), serde_json::Value::String(resolved));
+            obj.insert("locked".into(), serde_json::Value::Bool(locked));
         }
     }
     Ok(serde_json::Value::Array(recent))
+}
+
+/// Caseless, separator-normalised path equality for recent.json entries.
+/// `path_eq_caseless` (fs_events) compares raw strings, so `D:\x` != `D:/x`
+/// — recent.json accumulated duplicate entries for the same project.
+fn recent_path_eq(a: &str, b: &str) -> bool {
+    a.replace('\\', "/").trim_end_matches('/').to_lowercase()
+        == b.replace('\\', "/").trim_end_matches('/').to_lowercase()
 }
 
 #[tauri::command]
@@ -99,7 +118,8 @@ pub fn app_remove_recent(app: tauri::AppHandle, project_path: String) -> Result<
 }
 
 /// Drops every recent.json entry whose `path` field matches `project_path`
-/// under `path_eq_caseless`. Idempotent; ignores missing recent.json.
+/// under `recent_path_eq` (caseless + separator-normalised). Idempotent;
+/// ignores missing recent.json.
 pub fn app_remove_recent_impl(app_data_dir: &std::path::Path, project_path: &str) -> Result<(), String> {
     let recent_path = app_data_dir.join("recent.json");
     if !recent_path.exists() {
@@ -107,16 +127,15 @@ pub fn app_remove_recent_impl(app_data_dir: &std::path::Path, project_path: &str
     }
     let s = std::fs::read_to_string(&recent_path).map_err(|e| e.to_string())?;
     let mut recent: Vec<serde_json::Value> = serde_json::from_str(&s).unwrap_or_default();
-    let target = std::path::Path::new(project_path);
     recent.retain(|v| {
         match v.get("path").and_then(|p| p.as_str()) {
-            Some(stored) => !path_eq_caseless(std::path::Path::new(stored), target),
+            Some(stored) => !recent_path_eq(stored, project_path),
             None => true,
         }
     });
 
     let tmp = recent_path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(&recent).unwrap())
+    std::fs::write(&tmp, serde_json::to_string_pretty(&recent).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &recent_path).map_err(|e| e.to_string())?;
     Ok(())
@@ -147,17 +166,16 @@ pub fn app_update_recent_impl(app_data_dir: &std::path::Path, project_path: &str
     let project_id = read_project_json_field(std::path::Path::new(project_path), "id");
 
     // Preserve any per-machine displayName override that was on the old entry.
-    let target = std::path::Path::new(project_path);
     let prev_override = recent.iter()
         .find(|v| v.get("path").and_then(|p| p.as_str())
-            .map(|stored| path_eq_caseless(std::path::Path::new(stored), target))
+            .map(|stored| recent_path_eq(stored, project_path))
             .unwrap_or(false))
         .and_then(|v| v.get("displayNameOverride").cloned());
 
-    // Remove existing entry for this path
+    // Remove existing entry for this path (all separator/case variants).
     recent.retain(|v| {
         match v.get("path").and_then(|p| p.as_str()) {
-            Some(stored) => !path_eq_caseless(std::path::Path::new(stored), target),
+            Some(stored) => !recent_path_eq(stored, project_path),
             None => true,
         }
     });
@@ -182,9 +200,74 @@ pub fn app_update_recent_impl(app_data_dir: &std::path::Path, project_path: &str
 
     // Atomic write
     let tmp = recent_path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(&recent).unwrap())
+    std::fs::write(&tmp, serde_json::to_string_pretty(&recent).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &recent_path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn app_delete_project(app: tauri::AppHandle, project_path: String) -> Result<(), String>
+{
+    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let user_data_dir = resolve_user_data_dir(&app)?;
+    app_delete_project_impl(&app_data_dir, &user_data_dir, &project_path)
+}
+
+/// Delete a Mangaplay project atomically:
+///   1. Guard: `<project_path>/_mangaplaystudio/project.json` must exist
+///      and `project_path` must be a directory. Otherwise → `not-a-project`.
+///   2. Read `project.json` `id` (may be None — sessions cleanup is a no-op).
+///   3. `trash_or_remove(project_path)` — desktop → Recycle Bin / Trash,
+///      mobile → hard delete. On error → return; nothing else touched.
+///   4. `app_remove_recent_impl(app_data_dir, project_path)` — best-effort.
+///   5. `drop_project_session_impl(user_data_dir, id)` — best-effort.
+///
+/// Steps 4 and 5 self-heal (missing recent entry / stale session key are
+/// harmless), so a partial failure there does NOT fail the whole call.
+pub fn app_delete_project_impl(
+    app_data_dir: &std::path::Path,
+    user_data_dir: &std::path::PathBuf,
+    project_path: &str,
+) -> Result<(), String>
+{
+    if project_path.is_empty()
+    {
+        return Err("not-a-project".to_string());
+    }
+    let path = std::path::Path::new(project_path);
+    if !path.is_dir()
+    {
+        return Err("not-a-project".to_string());
+    }
+    let pj = path.join("_mangaplaystudio").join("project.json");
+    if !pj.exists()
+    {
+        return Err("not-a-project".to_string());
+    }
+
+    if read_project_json_locked(path)
+    {
+        return Err("project-locked".to_string());
+    }
+
+    let project_id = read_project_json_field(path, "id");
+
+    trash_or_remove(path)?;
+
+    if let Err(e) = app_remove_recent_impl(app_data_dir, project_path)
+    {
+        eprintln!("[app_delete_project] recent scrub failed: {}", e);
+    }
+
+    if let Some(id) = project_id
+    {
+        if let Err(e) = drop_project_session_impl(user_data_dir, &id)
+        {
+            eprintln!("[app_delete_project] projectSessions drop failed: {}", e);
+        }
+    }
+
     Ok(())
 }
 

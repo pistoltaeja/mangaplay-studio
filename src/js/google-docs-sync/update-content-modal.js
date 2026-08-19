@@ -3,8 +3,7 @@
  * update-content-modal.js — four-panel modal that drives the Update Content
  * (push-to-Google-Docs) flow.
  *
- * Per TODO/push-pull-lock-fix-and-modal.md §4-§6. Replaces the previous
- * silent footer `_runPush` toast plumbing. The modal owns its own state
+ * Replaces the previous silent footer `_runPush` toast plumbing. The modal owns its own state
  * machine (`UpdateStateMachine`); the four panels mirror the publish-modal
  * end-panel idiom:
  *
@@ -152,9 +151,6 @@ function buildUpdateWorkers(ctx)
      */
     async function readLockState({ token, docId, ourLockToken, ourSub })
     {
-        console.warn("[mps:auth:TRACE] readLockState() ENTRY docId=", docId,
-            " ourSub=", ourSub ? (ourSub.slice(0, 6) + "…") : "null",
-            " ourLockToken=", ourLockToken ? "present" : "null");
         const meta = await filesGet({
             token,
             fileId: docId,
@@ -162,16 +158,7 @@ function buildUpdateWorkers(ctx)
         });
         const appProps = (meta && meta.appProperties) || {};
         const headRevisionId = meta && meta.headRevisionId ? String(meta.headRevisionId) : null;
-        console.warn("[mps:auth:TRACE] readLockState() Drive returned appProperties=",
-            {
-                mpsLockToken: appProps.mpsLockToken ? "present" : "(empty)",
-                mpsLockedAt: appProps.mpsLockedAt || "(empty)",
-                mpsLockedBy: appProps.mpsLockedBy || "(empty)",
-                mpsLockedBySub: appProps.mpsLockedBySub ? (String(appProps.mpsLockedBySub).slice(0, 6) + "…") : "(empty)",
-                mpsClientId: appProps.mpsClientId ? "present" : "(empty)"
-            }, " headRevisionId=", headRevisionId);
         const lockState = evaluateLockState({ appProperties: appProps, ourLockToken, ourSub });
-        console.warn("[mps:auth:TRACE] readLockState() ← lockState=", lockState);
         return { lockState, appProps, headRevisionId };
     }
 
@@ -201,49 +188,31 @@ function buildUpdateWorkers(ctx)
      */
     async function runPush(args)
     {
-        console.warn("[mps:auth:TRACE] runPush() ENTRY docId=", args.docId, " hasOwnLock=", args.hasOwnLock,
-            " format=", args.format, " sourceLen=", (args.sourceText || "").length,
-            " expectedRevisionId=", args.expectedRevisionId,
-            " projectPath=", ctx.projectPath, " scriptRelPath=", ctx.scriptRelPath);
         const entry = ctx.projectPath && ctx.scriptRelPath
             ? await projectGetSyncEntry(ctx.projectPath, ctx.scriptRelPath)
             : null;
         const rootTabId = entry && /** @type {any} */ (entry).rootTabId;
         const screenplayTabId = entry && /** @type {any} */ (entry).screenplayTabId;
-        console.warn("[mps:auth:TRACE] runPush() sync-cache entry=",
-            entry ? { hasRootTabId: !!rootTabId, hasScreenplayTabId: !!screenplayTabId } : "null");
         if (!entry || !rootTabId)
         {
-            console.warn("[mps:auth:TRACE] runPush() → MissingTabIdInCache (entry=" + !!entry +
-                ", rootTabId=" + !!rootTabId + ") — user will see 're-publish' error");
             const e = new Error(
                 "This Doc was published before sync improvements landed — please re-publish to enable updates.");
             e.name = "MissingTabIdInCache";
             throw e;
         }
-        try
-        {
-            const { newRevisionId } = await pushWorker({
-                token: args.token,
-                docId: args.docId,
-                format: args.format,
-                localSourceText: args.sourceText,
-                expectedRevisionId: args.expectedRevisionId,
-                localPath: args.localPath,
-                rootTabId,
-                screenplayTabId: screenplayTabId || null,
-                hasOwnLock: args.hasOwnLock,
-                userName: args.userName
-            });
-            console.warn("[mps:auth:TRACE] runPush() ← success newRevisionId=", newRevisionId);
-            return { newRevisionId: newRevisionId || "" };
-        }
-        catch (e)
-        {
-            console.warn("[mps:auth:TRACE] runPush() ← THREW name=" + (e && e.name) +
-                " message=" + (e && e.message) + " status=" + (e && e.status));
-            throw e;
-        }
+        const { newRevisionId } = await pushWorker({
+            token: args.token,
+            docId: args.docId,
+            format: args.format,
+            localSourceText: args.sourceText,
+            expectedRevisionId: args.expectedRevisionId,
+            localPath: args.localPath,
+            rootTabId,
+            screenplayTabId: screenplayTabId || null,
+            hasOwnLock: args.hasOwnLock,
+            userName: args.userName
+        });
+        return { newRevisionId: newRevisionId || "" };
     }
 
     return {

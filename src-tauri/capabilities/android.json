@@ -40,9 +40,13 @@
         { "url": "https://mangaplay.studio/**" },
         { "url": "https://docs.google.com/**" },
         { "url": "https://slides.google.com/**" },
-        { "url": "https://api.absolutelyskint.com/**" }
+        { "url": "https://api.absolutelyskint.com/**" },
+        { "url": "https://discord.gg/**" }
       ]
-    }
+    },
+    "mps-firebase:default",
+    "mps-admob:default",
+    "iap:default"
   ],
   "platforms": ["android"]
 }

@@ -6,8 +6,16 @@
  * Behaviours:
  *   - Enter on `# Page N` → inserts `\n\nPanel 1` below, cursor at end of `Panel 1`.
  *   - Enter on `Panel N ...` → inserts `\n\n`, cursor at column 0 of a blank action line.
- *   - Tab on a blank column-0 line → indents 4 spaces and enters the
- *     dialogue block in CHARACTER (uppercase) mode.
+ *   - Tab on a blank column-0 line (Writer-Duet-style element cycling):
+ *       - First Tab: next element in the format's cycle order.
+ *       - Repeated Tab on the same empty line: advances the cycle.
+ *       - Shift+Tab on the same empty line: retreats the cycle.
+ *       - Moving to a different line resets the cycle position.
+ *     Cycle orders (format-aware):
+ *       fountain / superscript: Action → Scene → Character → Dialogue →
+ *                               Parenthetical → Transition → (back to Action)
+ *       mangaplay:              Action → Character → Dialogue → Parenthetical →
+ *                               Panel → Page → SFX → (back to Action)
  *   - Tab on a blank indented line under a dialogue line → wraps to `    ()`,
  *     cursor between the parens (mixed casing). Guard: refuses to insert a
  *     second consecutive parenthetical.
@@ -20,15 +28,19 @@
  *     at column 0 of a fresh action line. Returns false when not active so
  *     other Esc bindings still fire.
  *
- * State: a single `dialogueBlock` state field of `{ active, casing }`. A
- * `transactionFilter` upper-cases inserted text while `casing === "upper"`.
- * A view update listener clears the block when the selection leaves the
- * indented region (clicks / arrow keys = same exit as Esc).
+ * State:
+ *   - `dialogueBlock` — `{ active, casing }`. A `transactionFilter`
+ *     upper-cases inserted text while `casing === "upper"`. A view update
+ *     listener clears the block when the selection leaves the indented region.
+ *   - `elementCycle` — `{ lineFrom: number, index: number } | null`. Tracks
+ *     which element the user has cycled to on an empty line. Resets to null
+ *     when the selection moves to a different line.
  */
 
 import { StateField, StateEffect, Prec, EditorSelection, EditorState } from "@codemirror/state";
 import { keymap, EditorView } from "@codemirror/view";
 import { snippet, completionStatus } from "@codemirror/autocomplete";
+import { nextPageNumber, panelCountInCurrentPageBeforeLocation } from "./element-autonumber.js";
 
 /** Snippet expander for `# Page ${1:N}` — keymap-driven fallback when the
  *  autocompletion-source path didn't open the picker (e.g. `#` is not a word
@@ -62,6 +74,64 @@ const dialogueBlock = StateField.define({
             {
                 return e.value;
             }
+        }
+        return value;
+    }
+});
+
+/** Effect — set or clear the element-cycle state. */
+const setElementCycle = StateEffect.define();
+
+/**
+ * State field tracking the element-cycle position on an empty line.
+ *
+ * Shape: `{ lineFrom: number, index: number } | null`
+ *   - `lineFrom` — `line.from` of the empty line the user is cycling on.
+ *   - `index`    — current index into the format's CYCLE_ORDER array.
+ *
+ * Resets to null when the main selection's anchor line-start differs from
+ * the stored `lineFrom` — mirrors how `dialogueBlock` clears on selection
+ * moves, but driven by the field itself rather than a separate listener so
+ * the state is always consistent with `tr.newSelection`.
+ *
+ * @type {StateField<{ lineFrom: number, index: number } | null>}
+ */
+const elementCycle = StateField.define({
+    create()
+    {
+        return null;
+    },
+    update(value, tr)
+    {
+        // Explicit effect wins first (our own dispatches). The effect path
+        // returns early so it never reaches the doc-change mapping below —
+        // the cycle survives its own dispatch unchanged.
+        for (const e of tr.effects)
+        {
+            if (e.is(setElementCycle))
+            {
+                return e.value; // null clears; object sets
+            }
+        }
+        if (value === null) return null;
+
+        // BUG 2 fix: when doc changed (autosave, lint, remote edit), map the
+        // stored anchor through the changeset BEFORE comparing. Without this,
+        // an edit above the anchored line shifts its offset and either
+        // spuriously resets the cycle or falsely matches a different line.
+        let mappedLineFrom = value.lineFrom;
+        if (tr.docChanged)
+        {
+            mappedLineFrom = tr.changes.mapPos(value.lineFrom);
+            value = { ...value, lineFrom: mappedLineFrom };
+        }
+
+        // Reset when the caret has moved to a different line.
+        const head = tr.newSelection.main.head;
+        const lineFrom = tr.state.doc.lineAt(head).from;
+        if (lineFrom !== mappedLineFrom)
+        {
+            return null;
         }
         return value;
     }
@@ -455,10 +525,201 @@ function handleEnter(view)
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// Element-type cycling (Writer-Duet-style Tab / Shift+Tab on empty lines)
+// ---------------------------------------------------------------------------
+
+/**
+ * Cycle order for fountain / superscript format.
+ * Index 0 = Action (the "rest" state — plain empty line).
+ */
+const CYCLE_FOUNTAIN = ["action", "scene", "character", "dialogue", "parenthetical", "transition"];
+
+/**
+ * Cycle order for mangaplay format.
+ * Index 0 = Action (the "rest" state — plain empty line).
+ */
+const CYCLE_MANGAPLAY = ["action", "character", "dialogue", "parenthetical", "panel", "page", "sfx"];
+
+/**
+ * Return the cycle order array for the current `_format`.
+ *
+ * @returns {string[]}
+ */
+function getCycleOrder()
+{
+    return _format === "mangaplay" ? CYCLE_MANGAPLAY : CYCLE_FOUNTAIN;
+}
+
+/**
+ * Dispatch the skeleton for an element type onto an empty line.
+ * Returns true on success, false if nothing was dispatched.
+ *
+ * @param {EditorView} view
+ * @param {import("@codemirror/state").Line} line — the empty line to rewrite
+ * @param {string} elementType — one of the cycle strings
+ * @param {number} newIndex — the cycle index to store in elementCycle
+ * @returns {boolean}
+ */
+function dispatchElementSkeleton(view, line, elementType, newIndex)
+{
+    const state = view.state;
+
+    switch (elementType)
+    {
+        case "action":
+        {
+            // Action = plain empty line. Clear any existing content on the line
+            // and reset the cycle (index stays so the field clears naturally on
+            // next move, but we keep it so repeated Tab keeps cycling).
+            view.dispatch({
+                changes: { from: line.from, to: line.to, insert: "" },
+                selection: EditorSelection.cursor(line.from),
+                effects: [
+                    setDialogueBlock.of({ active: false, casing: "mixed" }),
+                    setElementCycle.of({ lineFrom: line.from, index: newIndex })
+                ],
+                scrollIntoView: true
+            });
+            return true;
+        }
+        case "character":
+        {
+            const insertText = "    ";
+            view.dispatch({
+                changes: { from: line.from, to: line.to, insert: insertText },
+                selection: EditorSelection.cursor(line.from + insertText.length),
+                effects: [
+                    setDialogueBlock.of({ active: true, casing: "upper" }),
+                    setElementCycle.of({ lineFrom: line.from, index: newIndex })
+                ],
+                scrollIntoView: true
+            });
+            return true;
+        }
+        case "dialogue":
+        {
+            const insertText = "    ";
+            view.dispatch({
+                changes: { from: line.from, to: line.to, insert: insertText },
+                selection: EditorSelection.cursor(line.from + insertText.length),
+                effects: [
+                    setDialogueBlock.of({ active: true, casing: "mixed" }),
+                    setElementCycle.of({ lineFrom: line.from, index: newIndex })
+                ],
+                scrollIntoView: true
+            });
+            return true;
+        }
+        case "parenthetical":
+        {
+            const insertText = "    ()";
+            const cursorOffset = line.from + 5; // between ( and )
+            view.dispatch({
+                changes: { from: line.from, to: line.to, insert: insertText },
+                selection: EditorSelection.cursor(cursorOffset),
+                effects: [
+                    setDialogueBlock.of({ active: true, casing: "mixed" }),
+                    setElementCycle.of({ lineFrom: line.from, index: newIndex })
+                ],
+                scrollIntoView: true
+            });
+            return true;
+        }
+        case "scene":
+        {
+            // fountain / superscript only
+            const insertText = "INT. ";
+            view.dispatch({
+                changes: { from: line.from, to: line.to, insert: insertText },
+                selection: EditorSelection.cursor(line.from + insertText.length),
+                effects: [
+                    setDialogueBlock.of({ active: false, casing: "mixed" }),
+                    setElementCycle.of({ lineFrom: line.from, index: newIndex })
+                ],
+                scrollIntoView: true
+            });
+            return true;
+        }
+        case "transition":
+        {
+            // fountain / superscript only
+            const insertText = "CUT TO:";
+            view.dispatch({
+                changes: { from: line.from, to: line.to, insert: insertText },
+                selection: EditorSelection.cursor(line.from + insertText.length),
+                effects: [
+                    setDialogueBlock.of({ active: false, casing: "mixed" }),
+                    setElementCycle.of({ lineFrom: line.from, index: newIndex })
+                ],
+                scrollIntoView: true
+            });
+            return true;
+        }
+        case "panel":
+        {
+            // mangaplay only — auto-number within the current page
+            const docText = state.doc.toString();
+            const panelCount = panelCountInCurrentPageBeforeLocation(docText, line.from);
+            const n = panelCount + 1;
+            const insertText = `Panel ${n}`;
+            view.dispatch({
+                changes: { from: line.from, to: line.to, insert: insertText },
+                selection: EditorSelection.cursor(line.from + insertText.length),
+                effects: [
+                    setDialogueBlock.of({ active: false, casing: "mixed" }),
+                    setElementCycle.of({ lineFrom: line.from, index: newIndex })
+                ],
+                scrollIntoView: true
+            });
+            return true;
+        }
+        case "page":
+        {
+            // mangaplay only — auto-number from total page count
+            const docText = state.doc.toString();
+            const n = nextPageNumber(docText);
+            const insertText = `# Page ${n}`;
+            view.dispatch({
+                changes: { from: line.from, to: line.to, insert: insertText },
+                selection: EditorSelection.cursor(line.from + insertText.length),
+                effects: [
+                    setDialogueBlock.of({ active: false, casing: "mixed" }),
+                    setElementCycle.of({ lineFrom: line.from, index: newIndex })
+                ],
+                scrollIntoView: true
+            });
+            return true;
+        }
+        case "sfx":
+        {
+            // mangaplay only
+            const insertText = "SFX: ";
+            view.dispatch({
+                changes: { from: line.from, to: line.to, insert: insertText },
+                selection: EditorSelection.cursor(line.from + insertText.length),
+                effects: [
+                    setDialogueBlock.of({ active: false, casing: "mixed" }),
+                    setElementCycle.of({ lineFrom: line.from, index: newIndex })
+                ],
+                scrollIntoView: true
+            });
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
 /**
  * Tab handler — multiplexes by line shape.
  *
- *   - Blank line, column 0 → indent + enter CHARACTER mode (upper).
+ *   - Blank line, column 0 (Writer-Duet-style element cycling):
+ *       - Consults `elementCycle` state field. If null (first Tab on this
+ *         line), treats current element as "Action" (index 0) and advances
+ *         to index 1. Otherwise advances index by +1 mod cycle length.
+ *       - Case A (prev non-empty line is indented dialogue) still fires first
+ *         for a FIRST Tab in that context.
  *   - Blank indented line under a dialogue line → wrap to `    ()` (mixed).
  *     Refuses if the previous line is already a parenthetical (guard).
  *
@@ -506,18 +767,32 @@ function handleTab(view)
         }
     }
 
-    // Case B: blank line at column 0 (no prior indented dialogue context) —
-    //   enter CHARACTER mode.
-    if (text === "" && head === line.from)
+    // Case B: Writer-Duet-style element cycling on an empty or cycle-owned line.
+    //
+    //   SUBSEQUENT-Tab (cycle-owned): if `elementCycle` is active for this
+    //   line (anchor matched after BUG-2 mapping in the field's update),
+    //   advance the index regardless of current line text or caret column.
+    //   This path must come BEFORE Case C/D so those can't grab Tab and
+    //   corrupt a non-empty skeleton line (e.g. `# Page 2    `).
+    //
+    //   FIRST-Tab (empty col-0, no active cycle): start the cycle at index 1.
     {
-        const insertText = "    ";
-        view.dispatch({
-            changes: { from: head, insert: insertText },
-            selection: EditorSelection.cursor(head + insertText.length),
-            effects: setDialogueBlock.of({ active: true, casing: "upper" }),
-            scrollIntoView: true
-        });
-        return true;
+        const order = getCycleOrder();
+        const cycle = state.field(elementCycle);
+        const cycleOwned = cycle !== null && cycle.lineFrom === line.from;
+
+        if (cycleOwned)
+        {
+            // Already cycling — advance regardless of line content.
+            const nextIndex = (cycle.index + 1) % order.length;
+            return dispatchElementSkeleton(view, line, order[nextIndex], nextIndex);
+        }
+
+        if (text === "" && head === line.from)
+        {
+            // First Tab on this empty line — start from Action (0), go to 1.
+            return dispatchElementSkeleton(view, line, order[1], 1);
+        }
     }
 
     // Case C: line is `    ` (4 spaces, nothing else) with cursor at end —
@@ -553,13 +828,20 @@ function handleTab(view)
 }
 
 /**
- * Shift+Tab handler — converts a parenthetical line back to a column-0
- * action line by stripping the indent and the parens.
+ * Shift+Tab handler — two behaviours:
  *
- *   `    (thought)`  →  `thought`
+ *   1. Empty line (text === "" at col 0): cycle BACKWARD through the format's
+ *      element order. If `elementCycle` is active for this line, retreat by
+ *      one; otherwise start from the LAST element in the order (wrap backward
+ *      from Action).
  *
- * Exits the dialogue block. Returns false on non-parenthetical lines so
- * other Shift+Tab bindings (e.g. CodeMirror's indentLess) still fire.
+ *   2. Non-empty parenthetical line: converts it back to a column-0 action
+ *      line by stripping the indent and the parens.
+ *        `    (thought)`  →  `thought`
+ *      Exits the dialogue block.
+ *
+ * Returns false on all other line shapes so other Shift+Tab bindings (e.g.
+ * CodeMirror's indentLess) still fire.
  *
  * @param {EditorView} view
  * @returns {boolean}
@@ -570,6 +852,34 @@ function handleShiftTab(view)
     const sel = state.selection.main;
     if (!sel.empty) return false;
     const line = state.doc.lineAt(sel.head);
+
+    // Backward cycle on a cycle-owned or empty col-0 line.
+    //
+    //   SUBSEQUENT Shift+Tab (cycle-owned): retreat index regardless of line
+    //   text or caret column — mirrors the BUG-1 fix in handleTab.
+    //
+    //   FIRST Shift+Tab (empty col-0, no active cycle): wrap backward from
+    //   Action to the last element in the order.
+    {
+        const order = getCycleOrder();
+        const cycle = state.field(elementCycle);
+        const cycleOwned = cycle !== null && cycle.lineFrom === line.from;
+
+        if (cycleOwned)
+        {
+            const prevIndex = (cycle.index - 1 + order.length) % order.length;
+            return dispatchElementSkeleton(view, line, order[prevIndex], prevIndex);
+        }
+
+        if (line.text === "" && sel.head === line.from)
+        {
+            // First Shift+Tab — wrap backward to last element.
+            const prevIndex = order.length - 1;
+            return dispatchElementSkeleton(view, line, order[prevIndex], prevIndex);
+        }
+    }
+
+    // Non-empty parenthetical → demote to action.
     if (!isParentheticalLine(line.text)) return false;
 
     const trimmed = line.text.trim();
@@ -775,6 +1085,7 @@ export function editorTypingAutos(format = "mangaplay")
     _format = format;
     return [
         dialogueBlock,
+        elementCycle,
         upperCaseFilter,
         selectionWatch,
         Prec.high(keymap.of([

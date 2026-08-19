@@ -20,7 +20,6 @@
  * index.html. Each locale's warmList still includes "Courier Prime" so the
  * screenplay preview's first paint after a locale switch is FOUC-free.
  *
- * Source of truth: TODO/obsidian-font-pass.md, Section 3.
  */
 
 /**

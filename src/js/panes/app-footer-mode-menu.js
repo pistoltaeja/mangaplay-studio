@@ -14,28 +14,29 @@
 
 import { icon } from "./icons.js";
 import { t, subscribe } from "../adapters/tauri-i18n.js";
+import { isEasyEditorEnabled } from "../boot/editor-features.js";
 
-/** @typedef {"source"|"text"|"visual"} EditorMode */
+/** @typedef {"source"|"wysiwyg"|"easy"} EditorMode */
 
 /** @type {ReadonlyArray<EditorMode>} */
-const MODES = ["source", "text", "visual"];
+const MODES = ["source", "wysiwyg", "easy"];
 
 const ICON_FOR_MODE = {
-    source: "code",
-    text:   "book-open",
-    visual: "wand-sparkles"
+    source:  "code",
+    wysiwyg: "book-open",
+    easy:    "wand-sparkles"
 };
 
 const LABEL_KEY_FOR_MODE = {
-    source: "mangaplay-studio.chrome.tooltip.editorModeSwitchToSource",
-    text:   "mangaplay-studio.chrome.tooltip.editorModeSwitchToText",
-    visual: "mangaplay-studio.chrome.tooltip.editorModeSwitchToVisual"
+    source:  "mangaplay-studio.chrome.tooltip.editorModeNameSource",
+    wysiwyg: "mangaplay-studio.chrome.tooltip.editorModeNameWysiwyg",
+    easy:    "mangaplay-studio.chrome.tooltip.editorModeNameEasy"
 };
 
 const FALLBACK_LABEL_FOR_MODE = {
-    source: "Source Editor",
-    text:   "Text Editor",
-    visual: "Visual Editor"
+    source:  "Source Editor",
+    wysiwyg: "WYSIWYG",
+    easy:    "Easy Editor"
 };
 
 /**
@@ -69,15 +70,9 @@ export function createModeMenu()
 
     function _labelFor(mode)
     {
-        // Plan §"Mode sub-menu localisation": reuse the existing
-        // editorModeSwitchTo* tooltip strings ("Switch to Source Editor" /
-        // etc). We strip the "Switch to " prefix — but i18n strings don't
-        // carry a guaranteed prefix in every locale, so prefer the more
-        // direct fallback ("Source Editor") when the user is in English; for
-        // other locales the localised "switch to X" reads cleanly as a row
-        // label too. Conservative compromise: use the localised string when
-        // present (it always names the mode in the row's language), else the
-        // English fallback.
+        // Footer rows are a list, not a "switch to" action, so they show the
+        // bare mode name (editorModeName* keys). The cycling top-bar toggle is
+        // the one that wraps the name in "Switch to: {mode}".
         return t(LABEL_KEY_FOR_MODE[mode]) || FALLBACK_LABEL_FOR_MODE[mode];
     }
 
@@ -88,7 +83,10 @@ export function createModeMenu()
         root.setAttribute("role", "menu");
         root.hidden = true;
 
-        for (const mode of MODES)
+        // Easy Editor is build-gated: when disabled it never gets a row, so
+        // the footer menu stays in lockstep with the top-bar cycle toggle.
+        const visibleModes = MODES.filter((m) => m !== "easy" || isEasyEditorEnabled());
+        for (const mode of visibleModes)
         {
             const row = document.createElement("button");
             row.type = "button";

@@ -3,13 +3,28 @@
  * lezer-prose-ranges.js — extract prose-bearing ranges from the Lezer
  * tree of the active CM6 document.
  *
- * The Mangaplay grammar marks structural lines (page headings, panel
- * headings, character cues, scene headings, SFX, transitions, notes,
- * boneyard) with distinct node names so we can SKIP them during
- * spellcheck — typing `INT.` or `BOOM` is not a misspelling.
+ * This is the first filter in the spellcheck pipeline. It decides WHICH
+ * parts of the document reach the grammar checker (Harper) by walking
+ * the Lezer syntax tree and yielding only the node types that contain
+ * user-written prose.
  *
- * Only the prose-bearing nodes get yielded: `Action`, `Dialogue`,
- * `Parenthetical`, `Centered`, `Lyric`, `TitlePageEntry`.
+ * Adding / removing linted node types
+ * ------------------------------------
+ * Edit PROSE_NODE_NAMES below. Nodes NOT in this set are silently
+ * skipped — their text never reaches Harper. This is how structural
+ * screenplay elements (page headings, panel headings, character cues,
+ * scene slugs, SFX lines, transitions, notes, boneyard) are excluded
+ * from grammar checking. If the Lezer grammar adds a new structural
+ * node type, it is automatically excluded (safe default). If it adds
+ * a new prose-bearing node type, add it to the set or its text won't
+ * be checked.
+ *
+ * Leading-whitespace trimming
+ * ----------------------------
+ * Dialogue / Parenthetical nodes include the line's 4- or 8-space
+ * indent in their Lezer range. Without trimming, Harper sees leading
+ * whitespace and produces spurious "unusual spacing" lints. The walker
+ * strips leading spaces/tabs before yielding each range.
  */
 
 import { syntaxTree } from "@codemirror/language";

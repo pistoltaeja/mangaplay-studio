@@ -265,6 +265,9 @@ function buildDecorations(view)
     const selRanges = state.selection.ranges;
 
     /**
+     * Returns true when any selection range is strictly inside [from, to].
+     * Collapsed cursor: must be strictly between the boundaries (not touching).
+     * Non-empty selection: standard overlap (exclusive boundaries).
      * @param {number} from
      * @param {number} to
      * @returns {boolean}
@@ -273,10 +276,14 @@ function buildDecorations(view)
     {
         for (const r of selRanges)
         {
-            // Reveal when caret is INSIDE the run or touching either
-            // marker boundary. `r.from <= to && r.to >= from` covers
-            // both point cursors and non-empty selections.
-            if (r.from <= to && r.to >= from) return true;
+            if (r.empty)
+            {
+                if (r.from > from && r.from < to) return true;
+            }
+            else
+            {
+                if (r.from < to && r.to > from) return true;
+            }
         }
         return false;
     }
@@ -319,7 +326,7 @@ function buildDecorations(view)
             const innerTo = closeFrom;
             if (innerTo <= innerFrom) continue;
 
-            const revealMarkers = overlapsSelection(openFrom, closeTo);
+            const revealMarkers = overlapsSelection(openFrom, openTo) || overlapsSelection(closeFrom, closeTo);
 
             // Style the inner content. Bold-italic emits both marks so
             // CM6 stacks the classes on the same DOM span.

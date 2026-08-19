@@ -13,7 +13,7 @@
  *   enter(direction)           — animate the mascot on-screen from off-screen
  *   exit(direction)            — animate off-screen
  *   moveTo(x, y, opts)         — translate to a new position
- *   setPose(name)              — Phase 1 stub; sets data-pose attribute only
+ *   setPose(name)              — stub; sets data-pose attribute only
  *
  * All animations are single-flight — a second call while one is in-flight
  * awaits the first, then runs. The active animation is reflected on the
@@ -226,8 +226,8 @@ class MpsMascot extends HTMLElement
         }
         else if (pin.parentElement !== targetParent)
         {
-            // Migrate from an older parent (e.g. host from a prior Phase 2
-            // build) — remove + re-append so the new anchor takes effect.
+            // Migrate from an older parent — remove + re-append so the
+            // new anchor takes effect.
             pin.remove();
             targetParent.appendChild(pin);
         }
@@ -250,6 +250,20 @@ class MpsMascot extends HTMLElement
         }
         this.setAttribute("data-mascot-motion", this._motion);
         this.setAttribute("data-mascot-pose", this._pose);
+
+        // Debug: log computed position after mount for iOS viewport investigation.
+        // Uses console.warn so the JS→Rust forwarder captures it in Xcode console.
+        requestAnimationFrame(() =>
+        {
+            const rect = this.getBoundingClientRect();
+            const cs = getComputedStyle(this);
+            console.warn("[mascot:debug] id:", this.id,
+                "rect:", JSON.stringify({ x: rect.x, y: rect.y, w: rect.width, h: rect.height }),
+                "computed left:", cs.left, "top:", cs.top,
+                "viewport:", window.innerWidth + "x" + window.innerHeight,
+                "clientW:", document.documentElement.clientWidth,
+                "scrollW:", document.documentElement.scrollWidth);
+        });
     }
 
     _render()
@@ -310,9 +324,8 @@ class MpsMascot extends HTMLElement
     }
 
     /**
-     * Translate mascot to (x, y) in viewport units — Phase 1 stub, uses a
-     * CSS transition on transform. Later phases can swap to WAAPI for path
-     * animation.
+     * Translate mascot to (x, y) in viewport units. Uses a CSS transition
+     * on transform; can be upgraded to WAAPI for path animation later.
      * @param {number} x
      * @param {number} y
      * @param {{duration?: number, easing?: string}} [opts]
@@ -393,7 +406,7 @@ class MpsMascot extends HTMLElement
             container.addEventListener("animationend", done, { once: true });
             // Safety timeout — animationend rarely misses but tab-background
             // throttling can defer it. 1500ms covers the longest keyframe
-            // we ship in Phase 1 (800ms enter + slack).
+            // (800ms enter + slack).
             setTimeout(done, 1500);
         }));
         return this._chain;

@@ -1,5 +1,4 @@
-//! Integration tests for the Part 3c.i UUID-boundary command impls
-//! (TODO/uuid-file-registry.md).
+//! Integration tests for the UUID-boundary Tauri command impls.
 //!
 //! Focus: the PURE `*_impl` helpers behind each Tauri command. The Tauri
 //! wrappers themselves are thin lock+flush plumbing; the interesting
@@ -10,7 +9,7 @@
 //! the tests exercise the same mint path production uses — no hand-rolled
 //! registry entries diverge from what the scanner would produce.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
@@ -36,7 +35,7 @@ fn empty_registry_at(root: &Path) -> LoadedRegistry
     {
         project_uuid: Uuid::new_v4(),
         root_path: root.to_path_buf(),
-        entries: HashMap::new(),
+        entries: BTreeMap::new(),
         native_id_index: HashMap::new(),
         path_index: HashMap::new(),
         dirty: false,
@@ -558,7 +557,7 @@ fn list_art_filters_to_storyboard_subdir_only()
 }
 
 // ---------------------------------------------------------------------------
-// Folder cascade + prefix-collision coverage (Part 3c.i reviewer follow-ups)
+// Folder cascade + prefix-collision coverage (reviewer follow-ups)
 // ---------------------------------------------------------------------------
 
 #[test]

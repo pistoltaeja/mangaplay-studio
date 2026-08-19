@@ -1,15 +1,11 @@
 //! Platform-native ID readers.
 //!
-//! See [`TODO/uuid-file-registry.md`](../../../../TODO/uuid-file-registry.md)
-//! Part 3 — Command Migration for the resolver design that consumes these,
-//! and Part 6 — Mobile Seam for the trait boundary carved here.
-//!
 //! Each [`NativeIdBackend::read`] reads a stable OS-provided identity token
 //! from an **already-open** `File` handle. Reading from the handle (rather
 //! than the path) is TOCTOU-safe: the value corresponds to the actual inode
 //! we opened, even if a rename happens between path resolution and open.
 //!
-//! # Trait boundary (Part 6)
+//! # Trait boundary
 //!
 //! The desktop/mobile split was carved as [`NativeIdBackend`] with per-target
 //! zero-sized structs implementing it. [`ActiveBackend`] is a `type` alias
@@ -24,8 +20,7 @@
 //!   `dev:<st_dev>` placeholder `volume_uuid`. Proper APFS volume UUID needs
 //!   `statfs` FFI which is deferred.
 //! - Windows → [`ntfs::NtfsBackend`] → [`NativeId::Unknown`] placeholder. The
-//!   real `GetFileInformationByHandleEx(FileIdInfo)` path lands in a
-//!   follow-up sub-pass; see `TODO/uuid-registry-mobile.md`.
+//!   real `GetFileInformationByHandleEx(FileIdInfo)` path is deferred.
 //! - iOS → [`ios_bookmark::IosBookmarkBackend`] → [`NativeId::Unknown`]
 //!   placeholder. Real security-scoped bookmark reader lands via a Tauri
 //!   mobile plugin.
@@ -65,9 +60,8 @@ mod posix
 
     /// POSIX backend — reads `(st_dev, st_ino)` from the open handle.
     ///
-    /// The resolver treats tmpfs / overlayfs / NFS as untrusted for identity
-    /// (see Part 3 plan) — that decision is made at the resolver layer, not
-    /// here.
+    /// The resolver treats tmpfs / overlayfs / NFS as untrusted for identity —
+    /// that decision is made at the resolver layer, not here.
     #[derive(Default)]
     pub struct PosixBackend;
 
@@ -150,9 +144,8 @@ mod ntfs
     {
         fn read(&self, _f: &File) -> Result<NativeId, String>
         {
-            // TODO(Part 6 follow-up): implement via
-            // GetFileInformationByHandleEx(FileIdInfo) — needs a `windows-sys`
-            // Cargo dep. See TODO/uuid-registry-mobile.md for the follow-up.
+            // Deferred: implement via GetFileInformationByHandleEx(FileIdInfo)
+            // — needs a `windows-sys` Cargo dep.
             Ok(NativeId::Unknown)
         }
     }
@@ -182,7 +175,7 @@ mod ios_bookmark
     {
         fn read(&self, _f: &File) -> Result<NativeId, String>
         {
-            // TODO(uuid-registry-mobile): real security-scoped bookmark reader.
+            // Deferred: real security-scoped bookmark reader via Tauri mobile plugin.
             Ok(NativeId::Unknown)
         }
     }
@@ -212,7 +205,7 @@ mod saf
     {
         fn read(&self, _f: &File) -> Result<NativeId, String>
         {
-            // TODO(uuid-registry-mobile): real SAF-backed reader.
+            // Deferred: real SAF-backed reader via Tauri mobile plugin.
             Ok(NativeId::Unknown)
         }
     }

@@ -55,42 +55,32 @@ export function buildPublishWorkers(opts)
     // ── Preflight ───────────────────────────────────────────────────────
     async function preflightNetwork()
     {
-        console.warn("[mps:auth:TRACE] worker preflightNetwork() ENTRY");
         const r = await _preflightNetwork({});
-        console.warn("[mps:auth:TRACE] worker preflightNetwork() ←", r);
         return r;
     }
 
     async function preflightGoogle({ response })
     {
-        console.warn("[mps:auth:TRACE] worker preflightGoogle() ENTRY");
         const r = await _preflightGoogleAccess({ response });
-        console.warn("[mps:auth:TRACE] worker preflightGoogle() ←", r);
         return r;
     }
 
     async function preflightToken()
     {
-        console.warn("[mps:auth:TRACE] worker preflightToken() ENTRY → will call authClient.getAccessToken (silent)");
         const r = await _preflightToken({ authClient });
-        console.warn("[mps:auth:TRACE] worker preflightToken() ← token=", r && r.token ? ("len=" + r.token.length) : "null");
         return r;
     }
 
     async function preflightFile({ localPath })
     {
-        console.warn("[mps:auth:TRACE] worker preflightFile() ENTRY localPath=", localPath);
         const r = await _preflightFile({ localPath });
-        console.warn("[mps:auth:TRACE] worker preflightFile() ←", r);
         return r;
     }
 
     async function preflightDest({ token, folderId })
     {
-        console.warn("[mps:auth:TRACE] worker preflightDest() ENTRY folderId=", folderId, " token=", token ? ("len=" + token.length) : "null");
         await _preflightDestFolder({ driveClient: driveClientApi, token, folderId });
         const q = await _preflightQuota({ driveClient: driveClientApi, token });
-        console.warn("[mps:auth:TRACE] worker preflightDest() ← quota warning=", q && q.warning);
         return { ok: true, warning: q && q.warning };
     }
 
@@ -107,9 +97,7 @@ export function buildPublishWorkers(opts)
      */
     async function createDoc({ token, title })
     {
-        console.warn("[mps:auth:TRACE] worker createDoc() ENTRY title=", title, " token=", token ? ("len=" + token.length) : "null");
         const resp = await documentsCreate({ token, title });
-        console.warn("[mps:auth:TRACE] worker createDoc() ← documentId=", resp && resp.documentId);
         if (!resp || !resp.documentId) throw _err("DocsApiError", "create returned no documentId");
         const rootTabId = resp.tabs && resp.tabs[0] && resp.tabs[0].tabProperties
                 && resp.tabs[0].tabProperties.tabId
@@ -264,11 +252,6 @@ export function buildPublishWorkers(opts)
         const reason = `Locked by ${userName} in Mangaplay Studio`;
         const profile = getCurrentProfile();
         const lockedBySub = (profile && profile.sub) || "";
-        console.warn("[mps:auth:TRACE] worker acquireLock() writing to Drive: docId=", docId,
-            " lockToken(new)=", lockToken.slice(0, 8) + "…",
-            " lockedAt=", lockedAt,
-            " lockedBy(userName)=", userName,
-            " mpsLockedBySub=", lockedBySub ? (lockedBySub.slice(0, 6) + "…") : "(empty — no profile.sub!)");
 
         await filesUpdate({
             token,

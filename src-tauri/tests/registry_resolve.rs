@@ -1,11 +1,10 @@
-//! Integration tests for the UUID resolver primitives
-//! (TODO/uuid-file-registry.md — Part 3a).
+//! Integration tests for the UUID resolver primitives.
 //!
 //! Covers: native-ID reader on Linux, happy-path resolve, unknown/deleted
 //! errors, external-rename healing, low-level `locate_by_native_id`, and
 //! `FsErr` serde shape.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::PathBuf;
@@ -23,7 +22,7 @@ use uuid::Uuid;
 // ---------------------------------------------------------------------------
 
 /// Build an in-memory `LoadedRegistry` with the given entries.
-fn make_registry(root: PathBuf, entries: HashMap<Uuid, RegistryEntry>) -> LoadedRegistry
+fn make_registry(root: PathBuf, entries: BTreeMap<Uuid, RegistryEntry>) -> LoadedRegistry
 {
     let mut reg = LoadedRegistry
     {
@@ -101,7 +100,7 @@ fn read_native_id_returns_posix_on_linux()
 fn resolve_and_open_unknown_uuid_returns_fserr()
 {
     let td = TempDir::new().unwrap();
-    let mut reg = make_registry(td.path().to_path_buf(), HashMap::new());
+    let mut reg = make_registry(td.path().to_path_buf(), BTreeMap::new());
 
     let missing = Uuid::new_v4();
     let err = resolve_and_open(&mut reg, missing, false).expect_err("unknown uuid errors");
@@ -119,7 +118,7 @@ fn resolve_and_open_tombstoned_returns_deleted()
     let td = TempDir::new().unwrap();
     let uuid = Uuid::new_v4();
 
-    let mut entries = HashMap::new();
+    let mut entries = BTreeMap::new();
     let mut e = entry(NativeId::Unknown, "gone.md");
     e.tombstone = true;
     entries.insert(uuid, e);
@@ -141,7 +140,7 @@ fn resolve_and_open_happy_path()
     let native = seed_file(td.path(), "chapter-1/intro.md", b"content");
 
     let uuid = Uuid::new_v4();
-    let mut entries = HashMap::new();
+    let mut entries = BTreeMap::new();
     entries.insert(uuid, entry(native.clone(), "chapter-1/intro.md"));
     let mut reg = make_registry(td.path().to_path_buf(), entries);
     let rev_before = reg.entries[&uuid].rev;
@@ -162,7 +161,7 @@ fn resolve_and_open_heals_external_rename()
     let native = seed_file(td.path(), "chapter-1/intro.md", b"content");
 
     let uuid = Uuid::new_v4();
-    let mut entries = HashMap::new();
+    let mut entries = BTreeMap::new();
     entries.insert(uuid, entry(native.clone(), "chapter-1/intro.md"));
     let mut reg = make_registry(td.path().to_path_buf(), entries);
     let rev_before = reg.entries[&uuid].rev;
@@ -258,7 +257,7 @@ fn locate_by_native_id_missing_returns_none()
 // ---------------------------------------------------------------------------
 
 /// Lock the exact JSON payload shape of every `FsErr` variant. The JS side
-/// (Part 4) matches on these key names — a silent serde-attribute regression
+/// matches on these key names — a silent serde-attribute regression
 /// (e.g. dropping the per-field `#[serde(rename = "…")]` attrs on
 /// `Stale`/`StaleRev`) would land here and NOT at a runtime type error, so
 /// the test asserts each key explicitly.

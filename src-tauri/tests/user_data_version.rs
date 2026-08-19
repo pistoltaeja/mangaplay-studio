@@ -1,5 +1,4 @@
-//! Integration tests for the user-data schema-version gate (Phase 1-4 of
-//! the user-data-versioning plan). Covers:
+//! Integration tests for the user-data schema-version gate. Covers:
 //!
 //!   - `user_settings_load_impl` transient `_isFresh` flag
 //!     (set when the on-disk file did not exist; dropped after first save).
@@ -68,9 +67,8 @@ fn user_settings_load_impl_returns_is_fresh_true_for_missing_file()
 
     let v = user_settings_load_impl(&dir).expect("load ok");
 
-    // The Phase 1 fresh-detect contract: transient flag set when the
-    // load path saw no file before merge. Boot reads this via
-    // isFreshUserBoot() in JS.
+    // Fresh-detect contract: transient flag set when the load path saw no
+    // file before merge. Boot reads this via isFreshUserBoot() in JS.
     assert_eq!(
         v["_isFresh"], serde_json::Value::Bool(true),
         "_isFresh must be true when user-settings.json did not exist"

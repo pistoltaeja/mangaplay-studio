@@ -5,8 +5,7 @@
  *
  * We don't use the Google Picker API because Tauri's custom protocol
  * (`mpsdev://` / `tauri://`) isn't allow-listable as a Picker origin —
- * see the §"Why native, not Google Picker" rationale in
- * TODO/mangaplay-studio-google-docs-sync.md.
+ * (Tauri's custom protocol isn't allow-listable as a Picker origin).
  *
  * Behaviour:
  *   - Two roots: "My Drive" (folderId='root', auto-expanded) and

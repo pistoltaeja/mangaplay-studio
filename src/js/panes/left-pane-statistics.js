@@ -82,16 +82,44 @@ function buildStatsFor(script, fmt)
 
 /**
  * Mount the Statistics subview.
+ *
+ * Default (no args): drives the desktop left pane — queries the static
+ * `#subview-statistics .statistics-content` / `.statistics-disabled` children
+ * that already exist in index.html.
+ *
+ * With `opts.container`: creates its own `.statistics-content` +
+ * `.statistics-disabled` children inside the given host (used by the mobile
+ * explorer popup, which supplies a fresh container per mount). Everything the
+ * instance subscribes to is torn down by the returned `destroy()`.
+ *
+ * @param {{ container?: HTMLElement }} [opts]
  * @returns {{ destroy: () => void, getStats: () => StatsSummary|null }}
  */
-export function mountStatistics()
+export function mountStatistics(opts = {})
 {
-    const contentEl = /** @type {HTMLElement|null} */ (
-        document.querySelector("#subview-statistics .statistics-content")
-    );
-    const disabledEl = /** @type {HTMLElement|null} */ (
-        document.querySelector("#subview-statistics .statistics-disabled")
-    );
+    /** @type {HTMLElement|null} */
+    let contentEl;
+    /** @type {HTMLElement|null} */
+    let disabledEl;
+
+    if (opts.container)
+    {
+        contentEl = document.createElement("div");
+        contentEl.className = "statistics-content mps-scrollbar";
+        disabledEl = document.createElement("div");
+        disabledEl.className = "statistics-disabled";
+        disabledEl.hidden = true;
+        opts.container.replaceChildren(contentEl, disabledEl);
+    }
+    else
+    {
+        contentEl = /** @type {HTMLElement|null} */ (
+            document.querySelector("#subview-statistics .statistics-content")
+        );
+        disabledEl = /** @type {HTMLElement|null} */ (
+            document.querySelector("#subview-statistics .statistics-disabled")
+        );
+    }
     if (!contentEl || !disabledEl)
     {
         return { destroy: () => {}, getStats: () => null };

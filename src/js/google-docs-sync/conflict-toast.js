@@ -3,8 +3,7 @@
  * conflict-toast.js — top-anchored "Someone else edited X in Google Docs"
  * toast with the Keep mine / Keep theirs / Open both buttons.
  *
- * Per TODO/mangaplay-studio-google-docs-sync.md §6 "Conflict — plain-language UX".
- * Renders once at a time (singleton); calling `showConflictToast` again
+ * Conflict — plain-language UX. Renders once at a time (singleton); calling `showConflictToast` again
  * dismisses the previous toast before opening a new one. Auto-dismisses on
  * action click; manual dismiss via the "×" close button.
  *

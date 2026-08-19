@@ -1,9 +1,8 @@
 // @ts-check
 /**
- * push-pull.js — round-trip workers for Google Docs sync (Phase 4).
+ * push-pull.js — round-trip workers for Google Docs sync.
  *
- * Per TODO/mangaplay-studio-google-docs-sync.md §6 ("Round-Trip (Pull)") +
- * "Conflict — plain-language UX". Two operations:
+ * Two operations:
  *
  *   push({ token, docId, format, localSourceText, expectedRevisionId, ... })
  *     Force local → remote. If the doc has drifted since our cached
@@ -49,14 +48,15 @@ async function _tauriWriteText(path, contents)
 }
 
 /**
- * Render an ISO-8601 stamp safe to embed in a filename — drops colons and
- * milliseconds so Windows is happy too.
+ * Render an ISO-8601 stamp safe to embed in a filename. Replaces colons and
+ * dots with hyphens for Windows compatibility. Millisecond digits are retained
+ * (matches the iOS ObjC format used by MPSConflictSidecar).
  * @param {Date} [d]
  */
 function _stampForFilename(d)
 {
     const date = d || new Date();
-    return date.toISOString().replace(/[:.]/g, "-").replace(/-\d{3}Z$/, "Z");
+    return date.toISOString().replace(/[:.]/g, "-");
 }
 
 /**
@@ -199,11 +199,6 @@ function _splitPath(localPath)
  */
 export async function push(args)
 {
-    console.warn("[mps:auth:TRACE] push-pull.push() ENTRY docId=", args.docId,
-        " hasOwnLock=", args.hasOwnLock, " format=", args.format,
-        " expectedRevisionId=", args.expectedRevisionId,
-        " rootTabId=", args.rootTabId, " screenplayTabId=", args.screenplayTabId,
-        " localSourceLen=", (args.localSourceText || "").length);
     if (!args || !args.token) throw _err("DocsApiError", "push: token required");
     if (!args.docId)          throw _err("DocsApiError", "push: docId required");
     if (!args.localPath)      throw _err("DocsApiError", "push: localPath required");
@@ -220,9 +215,6 @@ export async function push(args)
         fields: "headRevisionId,appProperties"
     });
     const headRev = meta && meta.headRevisionId ? String(meta.headRevisionId) : null;
-    console.warn("[mps:auth:TRACE] push-pull.push() filesGet returned headRev=", headRev,
-        " expectedRevisionId=", args.expectedRevisionId,
-        " → drift?=", !!(headRev && args.expectedRevisionId && headRev !== args.expectedRevisionId));
 
     // 2. If remote drifted, back it up to a sidecar BEFORE we clobber it.
     // NOTE: when this sidecar is written but the push then throws (e.g.
@@ -231,11 +223,8 @@ export async function push(args)
     let conflictSidecarPath = null;
     if (headRev && args.expectedRevisionId && headRev !== args.expectedRevisionId)
     {
-        console.warn("[mps:auth:TRACE] push-pull.push() → REMOTE DRIFT DETECTED (remote head=" + headRev +
-            " ≠ expected=" + args.expectedRevisionId + ") — will write .remote.conflict sidecar then clobber remote");
         if (!args.rootTabId)
         {
-            console.warn("[mps:auth:TRACE] push-pull.push() → MissingTabIdInCache (no rootTabId)");
             throw _err(
                 "MissingTabIdInCache",
                 "This doc was published before tab-id tracking landed — please re-publish to enable sync.");
@@ -276,24 +265,13 @@ export async function push(args)
     // re-apply failure is logged but never rethrown (the success path has
     // already moved on; the heartbeat will resync lock state).
     const didLift = !!args.hasOwnLock;
-    console.warn("[mps:auth:TRACE] push-pull.push() didLift=", didLift, " (hasOwnLock=", args.hasOwnLock, ")");
     if (didLift)
     {
-        try
-        {
-            await liftRestriction({
-                token: args.token,
-                docId: args.docId,
-                driveClient: { filesUpdate: driveApi.filesUpdate }
-            });
-            console.warn("[mps:auth:TRACE] push-pull.push() liftRestriction() succeeded");
-        }
-        catch (e)
-        {
-            console.warn("[mps:auth:TRACE] push-pull.push() liftRestriction() THREW name=" +
-                (e && e.name) + " message=" + (e && e.message) + " status=" + (e && e.status));
-            throw e;
-        }
+        await liftRestriction({
+            token: args.token,
+            docId: args.docId,
+            driveClient: { filesUpdate: driveApi.filesUpdate }
+        });
     }
     try
     {
@@ -480,13 +458,8 @@ export async function push(args)
                     userName: args.userName || "",
                     driveClient: { filesUpdate: driveApi.filesUpdate }
                 });
-                console.warn("[mps:auth:TRACE] push-pull.push() finally: applyRestriction (reapply) succeeded");
             }
-            catch (e)
-            {
-                console.warn("[mps:auth:TRACE] push-pull.push() finally: applyRestriction (reapply) FAILED (non-fatal) name=" +
-                    (e && e.name) + " message=" + (e && e.message));
-            }
+            catch (_) { /* best-effort re-lock */ }
         }
     }
 
@@ -497,8 +470,6 @@ export async function push(args)
         fields: "headRevisionId"
     });
     const newRevisionId = after && after.headRevisionId ? String(after.headRevisionId) : null;
-    console.warn("[mps:auth:TRACE] push-pull.push() ← newRevisionId=", newRevisionId,
-        " conflictSidecarPath=", conflictSidecarPath);
     return { newRevisionId, conflictSidecarPath };
 }
 

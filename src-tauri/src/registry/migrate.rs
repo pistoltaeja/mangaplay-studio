@@ -6,8 +6,7 @@
 //! re-keys any registry entry whose UUID differs from the artMap's UUID
 //! for the same relative path.
 //!
-//! See [`TODO/uuid-file-registry.md`](../../../../TODO/uuid-file-registry.md)
-//! Part 5 for the migration design.
+//! See `migrate_legacy_slides_cache()` and `project_open` for where this runs.
 
 use uuid::Uuid;
 

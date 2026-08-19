@@ -455,11 +455,48 @@ export async function writeBytes(path, bytes)
     return _invokeFs("app_write_bytes", { path, bytes: arr });
 }
 
+/**
+ * Resolve the on-disk path of a folder-scoped `.mangaart` at
+ * `<project>/_mangaplaystudio/storyboard/folders/<folderUuid>.mangaart`.
+ *
+ * Mirrors the file-scoped `mangaart_resolve_by_uuid` (which project.js
+ * invokes directly). The Rust command ensures the `folders/` subdirectory
+ * exists on disk before returning, so callers can immediately write to the
+ * returned path.
+ *
+ * Returns the resolved path even when the file has not been scaffolded yet;
+ * `null` only when the storyboard root cannot be created.
+ *
+ * @param {string} projectPath  Absolute project root.
+ * @param {string} folderUuid   Registry UUID of the folder entry.
+ * @returns {Promise<string|null>}
+ */
+export async function mangaartResolveByFolderUuid(projectPath, folderUuid)
+{
+    return _invokeFs("mangaart_resolve_by_folder_uuid", { projectPath, folderUuid });
+}
+
+/**
+ * Look up the Google Slides link for `scriptRelPath`. When `folderUuid` is
+ * non-null the folder-scoped link is preferred; otherwise the file-scoped
+ * entry is returned.
+ *
+ * Returns `null` when no link exists (no error, no thrown). Rust errors
+ * (validation, project.json read failure) surface as thrown strings so
+ * callers keep their existing try/catch shapes.
+ *
+ * @param {{projectPath: string, scriptRelPath: string, folderUuid?: string|null}} args
+ * @returns {Promise<any>}
+ */
+export async function slidesLinkGet({ projectPath, scriptRelPath, folderUuid = null })
+{
+    return _invokeFs("slides_link_get", { projectPath, scriptRelPath, folderUuid });
+}
+
 // ── UUID-aware registry adapter layer ──────────────────────────────────────
 //
-// New surface for the UUID file registry (TODO/uuid-file-registry.md, Part 4a).
-// These call the Rust `registry_*` commands. The legacy path-based helpers
-// above still exist and will be migrated over in Parts 4b/4c/4d.
+// UUID-aware registry adapter layer — calls the Rust `registry_*` commands.
+// The legacy path-based helpers above still exist and will be migrated over.
 //
 // Callers use `uuid` as the identity key. `relPath` in TreeEntryDto is a
 // display hint only — never round-trip it back to Rust.
@@ -489,15 +526,14 @@ export async function writeBytes(path, bytes)
  * @property {string | null} newName          - New basename (only on `renamed`).
  * @property {string | null} newParentUuid    - New parent UUID (only on `moved`).
  *
- * Emitted by Rust's `registry-fs-changed` event (see TODO/uuid-file-registry.md
- * Part 3c.ii). The raw wire payload uses kebab-case keys; this typedef
- * describes the CAMELCASE shape after `subscribeRegistryFsChanged` normalises.
+ * Emitted by Rust's `registry-fs-changed` event. The raw wire payload uses
+ * kebab-case keys; this typedef describes the CAMELCASE shape after
+ * `subscribeRegistryFsChanged` normalises.
  */
 
 /**
  * Error thrown by any `registry*` adapter helper when Rust returns a
- * `fs-err:...` string. The `kind` field is one of the taxonomy variants
- * declared in Part 3 of TODO/uuid-file-registry.md:
+ * `fs-err:...` string. The `kind` field is one of:
  *   "unknown-uuid" | "deleted" | "stale" | "stale-rev"
  *   | "permission-denied" | "no-project-open" | "io" | "internal"
  */
@@ -586,24 +622,6 @@ export async function registryListTree()
 }
 
 /**
- * List script-kind entries (mangaplay / fountain / superscript / text).
- * @returns {Promise<Array<TreeEntryDto>>}
- */
-export async function registryListScripts()
-{
-    return invokeRegistry("registry_list_scripts");
-}
-
-/**
- * List `.mangaart` entries.
- * @returns {Promise<Array<TreeEntryDto>>}
- */
-export async function registryListArt()
-{
-    return invokeRegistry("registry_list_art");
-}
-
-/**
  * Read a file by UUID.
  *
  * Throws FsError with kind="io", payload.message="is-a-folder" if uuid
@@ -618,42 +636,6 @@ export async function registryReadFile(uuid)
 }
 
 // ── Writes ─────────────────────────────────────────────────────────────────
-
-/**
- * Write raw bytes to an existing UUID. `expectedRev=0` disables the
- * optimistic-concurrency check; any positive value must match the registry's
- * current rev or Rust rejects with `fs-err:{kind:"stale-rev",...}`.
- *
- * Throws FsError with kind="io", payload.message="is-a-folder" if uuid
- * resolves to a folder entry.
- *
- * @param {string} uuid
- * @param {Uint8Array|number[]} bytes
- * @param {number} [expectedRev=0]
- * @returns {Promise<{ rev: number }>}
- */
-export async function registryWriteBytes(uuid, bytes, expectedRev = 0)
-{
-    const arr = bytes instanceof Uint8Array ? Array.from(bytes) : bytes;
-    return invokeRegistry("registry_write_bytes", { uuid, bytes: arr, expectedRev });
-}
-
-/**
- * Atomic write: temp file + rename, same semantics as
- * `atomic_write_project_file`. Contents are UTF-8 text.
- *
- * Throws FsError with kind="io", payload.message="is-a-folder" if uuid
- * resolves to a folder entry.
- *
- * @param {string} uuid
- * @param {string} contents
- * @param {number} [expectedRev=0]
- * @returns {Promise<{ rev: number }>}
- */
-export async function registryAtomicWrite(uuid, contents, expectedRev = 0)
-{
-    return invokeRegistry("registry_atomic_write", { uuid, contents, expectedRev });
-}
 
 // ── Mutations ──────────────────────────────────────────────────────────────
 

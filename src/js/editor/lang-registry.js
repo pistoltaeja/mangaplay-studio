@@ -18,9 +18,12 @@ import { editorPageFold } from "./editor-page-fold.js";
 import { editorFoldPersistence } from "./editor-fold-persistence.js";
 import { editorLineIndent } from "./editor-line-indent.js";
 import { editorPanelTagStyle } from "./editor-panel-tag-style.js";
+import { editorBracketMatch } from "./editor-bracket-match.js";
 import { editorPageRegion } from "./editor-page-region.js";
 import { editorMetaRegion } from "./editor-meta-region.js";
 import { editorInlineEmphasis } from "./editor-inline-emphasis.js";
+import { editorStylePreview } from "./editor-style-preview.js";
+import { editorStyleTags } from "./editor-style-tags.js";
 import { getSpellcheckConfig } from "../spellcheck/spellcheck-state.js";
 // spellcheck-linter.js / harper-linter.js / harper.js are deliberately NOT
 // imported here — combinedLinter() and lazySpellcheckLinter() both
@@ -62,39 +65,86 @@ export function formatForFilename(name)
  * that highlighting is approximately correct. A native SuperScript Lezer
  * grammar can replace this later without breaking the routing.
  *
+ * Thin delegator to `buildEditorExtensions(format, "hot")`. Behaviour is
+ * byte-identical to the pre-refactor implementation.
+ *
  * @param {EditorFormat} format
  * @returns {import("@codemirror/state").Extension[]}
  */
 export function languageExtensionsFor(format)
 {
+    return buildEditorExtensions(format, "hot");
+}
+
+/**
+ * Return the CM6 extension array for `format` at a given `role`.
+ *
+ * `"hot"` returns the full interactive set (grammar + highlight + linter +
+ * snippets + typing-autos + all decoration/fold/region plugins). Byte-
+ * identical to the previous `languageExtensionsFor(format)` output.
+ *
+ * `"warm"` returns the presentation-only subset: grammar, highlighting,
+ * page-fold, meta-region, page-region, panel-tag-style, inline-emphasis,
+ * line-indent view plugin, fold persistence. Drops linter, snippets, and
+ * typing-autos — interactive extensions that need focus to fire.
+ *
+ * The aggregate view wraps the full extension list in a CM6 Compartment so
+ * hot ↔ warm transitions can swap via `compartment.reconfigure(...)`
+ * without destroying the EditorView. Single-file mode does not use
+ * compartments — it calls this with role="hot" once at build time.
+ *
+ * Extension order is preserved across roles for CM6 precedence stability.
+ *
+ * @param {EditorFormat} format
+ * @param {"hot" | "warm"} [role]
+ * @returns {import("@codemirror/state").Extension[]}
+ */
+export function buildEditorExtensions(format, role = "hot")
+{
     if (format === "general-text" || format === "superscript-bin")
     {
         return [];
     }
+    const isHot = role === "hot";
     if (format === "fountain")
     {
-        return [
+        /** @type {import("@codemirror/state").Extension[]} */
+        const out = [
             fountain(),
-            mangaplayHighlighting(),
-            lazySpellcheckLinter(getSpellcheckConfig),
-            ...editorInlineEmphasis()
+            mangaplayHighlighting()
         ];
+        if (isHot)
+        {
+            out.push(lazySpellcheckLinter(getSpellcheckConfig));
+        }
+        out.push(...editorInlineEmphasis());
+        out.push(...editorStylePreview());
+        out.push(...editorStyleTags());
+        return out;
     }
     // mangaplay + superscript share the Mangaplay grammar + highlight today.
-    return [
+    /** @type {import("@codemirror/state").Extension[]} */
+    const out = [
         mangaplay(),
-        mangaplayHighlighting(),
-        editorSnippets(),
-        combinedLinter(getSpellcheckConfig, format),
-        ...editorTypingAutos(format),
-        ...editorPageFold(),
-        editorFoldPersistence(),
-        ...editorLineIndent(),
-        ...editorPanelTagStyle(),
-        ...editorPageRegion(),
-        ...editorMetaRegion(),
-        ...editorInlineEmphasis()
+        mangaplayHighlighting()
     ];
+    if (isHot)
+    {
+        out.push(editorSnippets());
+        out.push(combinedLinter(getSpellcheckConfig, format));
+        out.push(...editorTypingAutos(format));
+    }
+    out.push(...editorPageFold());
+    out.push(editorFoldPersistence());
+    out.push(...editorLineIndent());
+    out.push(...editorPanelTagStyle());
+    out.push(...editorBracketMatch());
+    out.push(...editorPageRegion());
+    out.push(...editorMetaRegion());
+    out.push(...editorInlineEmphasis());
+    out.push(...editorStylePreview());
+    out.push(...editorStyleTags());
+    return out;
 }
 
 /**

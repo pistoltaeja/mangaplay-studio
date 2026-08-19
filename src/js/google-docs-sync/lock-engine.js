@@ -2,7 +2,7 @@
 /**
  * lock-engine.js — Drive `contentRestrictions` + appProperties lock helpers.
  *
- * Per TODO/mangaplay-studio-google-docs-sync.md §5. Three primitives:
+ * Three primitives:
  *
  *   lock({ token, docId, userName, clientId, lockedBySub })
  *     1. Mint a fresh lockToken (UUIDv4).
@@ -76,48 +76,28 @@ export function evaluateLockState({ appProperties, ourLockToken, ourSub, nowMs }
     const lockedAt = props.mpsLockedAt || "";
     const lockedBy = props.mpsLockedBy || "";
     const lockedBySub = props.mpsLockedBySub || "";
-    console.warn("[mps:auth:TRACE] evaluateLockState() ENTRY",
-        {
-            hasLockToken: !!lockToken,
-            lockedAt,
-            lockedBy,
-            hasLockedBySub: !!lockedBySub,
-            ourSubMatchesLockedBySub: !!(ourSub && lockedBySub && lockedBySub === ourSub),
-            ourLockTokenMatchesLockToken: !!(ourLockToken && lockToken === ourLockToken),
-            hasOurSub: !!ourSub,
-            hasOurLockToken: !!ourLockToken
-        });
 
     if (!lockToken)
     {
-        console.warn("[mps:auth:TRACE] evaluateLockState() → unlocked (no mpsLockToken on file)");
         return "unlocked";
     }
 
     const ts = lockedAt ? Date.parse(lockedAt) : NaN;
     const now = typeof nowMs === "number" ? nowMs : Date.now();
     const ageMs = Number.isFinite(ts) ? (now - ts) : NaN;
-    console.warn("[mps:auth:TRACE] evaluateLockState() lock age check ageMs=" + ageMs +
-        " STALE_LOCK_MS=" + STALE_LOCK_MS + " (10min)");
     if (!Number.isFinite(ts) || (now - ts) > STALE_LOCK_MS)
     {
-        console.warn("[mps:auth:TRACE] evaluateLockState() → STALE (ageMs=" + ageMs +
-            " > 10min, or lockedAt was unparseable). Note: stale wins over locked-by-me — even your OWN lock, if older than 10min, shows the force-take dialog.");
         return "stale";
     }
 
     if (ourSub && lockedBySub && lockedBySub === ourSub)
     {
-        console.warn("[mps:auth:TRACE] evaluateLockState() → locked-by-me (ourSub matches mpsLockedBySub)");
         return "locked-by-me";
     }
     if (ourLockToken && lockToken === ourLockToken)
     {
-        console.warn("[mps:auth:TRACE] evaluateLockState() → locked-by-me (ourLockToken matches mpsLockToken)");
         return "locked-by-me";
     }
-    console.warn("[mps:auth:TRACE] evaluateLockState() → LOCKED-BY-OTHER (neither ourSub nor ourLockToken matches). lockedBy=" +
-        lockedBy + " lockedBySub-prefix=" + (lockedBySub ? lockedBySub.slice(0, 6) + "…" : "(empty)"));
     return "locked-by-other";
 }
 

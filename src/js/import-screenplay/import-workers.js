@@ -35,6 +35,18 @@ export async function pickFile(filters)
 }
 
 /**
+ * Open a native multi-select Open-File dialog. Returns the chosen absolute
+ * paths, or null if the user cancelled.
+ * @param {Array<[string, string[]]>} filters — e.g. [["Fountain", ["fountain"]]]
+ * @returns {Promise<string[]|null>}
+ */
+export async function pickFiles(filters)
+{
+    const result = await invoke("app_open_files_dialog", { filters });
+    return /** @type {string[]|null} */ (result);
+}
+
+/**
  * Read a file as UTF-8 text. Thin wrapper around app_read_file_bytes.
  * @param {string} path
  * @returns {Promise<string>}
@@ -216,7 +228,7 @@ export function applyToEditor(fountainText)
 {
     // editor-slot-manager.js publishes the active EditorView on
     // window.__mpsActiveEditorView every slot switch — this is the
-    // sanctioned public accessor (see mps-mobile-tabbar.js:39).
+    // sanctioned public accessor.
     const view = /** @type {any} */ (window).__mpsActiveEditorView;
     console.log("[import] applyToEditor: view found?", !!view,
         "doc len:", view?.state?.doc?.length);

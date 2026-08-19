@@ -1,12 +1,14 @@
 // @ts-check
 /**
- * spellcheck-state.js — single source of truth for the runtime spellcheck
- * configuration read by the CM6 linter. Updated by settings-modal
- * handlers (toggle + language dropdown) and by the boot-time seeding
- * step in `user-settings.js`.
+ * spellcheck-state.js — runtime spellcheck configuration read by the
+ * CM6 linter on every lint pass.
  *
- * Kept deliberately tiny: a module-level object, three accessors. The
- * linter calls `getSpellcheckConfig()` once per lint run.
+ * Updated by the settings modal (toggle + language dropdown) and by
+ * boot-time seeding in user-settings.js. The linter calls
+ * getSpellcheckConfig() once per pass to decide which tier to run.
+ *
+ * This module is intentionally tiny: a module-level object, three
+ * accessors. No Harper imports, no CM6 imports — pure state.
  */
 
 import { resolveTier } from "./spellcheck-tier.js";

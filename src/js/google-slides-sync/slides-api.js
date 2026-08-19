@@ -217,7 +217,7 @@ export async function getPresentationForRefresh(id, token)
  *   objects (e.g. `{ deleteText: { objectId, textRange: { type: "ALL" } } }`,
  *   `{ insertText: { objectId, text, insertionIndex: 0 } }`).
  * @param {string} token
- * @param {{ signal?: AbortSignal }} [opts]
+ * @param {{ signal?: AbortSignal, fetchImpl?: typeof fetch }} [opts]
  * @returns {Promise<{ presentationId: string, replies: Array<Record<string, unknown>> }>}
  * @throws {Error & { kind: "auth" | "not-found" | "no-access" | "network" | "http" }}
  */
@@ -225,6 +225,7 @@ export async function batchUpdatePresentation(presentationId, requests, token, o
 {
     const url = `${SLIDES_API_BASE}/${encodeURIComponent(presentationId)}:batchUpdate`;
     const body = JSON.stringify({ requests });
+    const fetchImpl = (opts && opts.fetchImpl) || globalThis.fetch;
 
     // Compose our timeout signal with any caller-supplied AbortSignal so
     // the caller can cancel independently.
@@ -254,7 +255,7 @@ export async function batchUpdatePresentation(presentationId, requests, token, o
     let response;
     try
     {
-        response = await fetch(url, {
+        response = await fetchImpl(url, {
             method: "POST",
             headers: {
                 "Authorization": `Bearer ${token}`,
@@ -294,6 +295,256 @@ export async function batchUpdatePresentation(presentationId, requests, token, o
     };
 }
 
+// ── Drive REST helpers (used by the JS upload transport) ─────────────────
+//
+// These three helpers implement the Drive-side surface needed to push PNG
+// bytes into Google Slides via the JS upload transport in
+// `slides-upload-transport.js`. Kept here so the low-level HTTP shape is
+// unit-testable in isolation with the same mock-fetch pattern used by
+// `getPresentation` / `batchUpdatePresentation`.
+//
+// See also `src-tauri/src/commands/slides_upload.rs`, whose docstring
+// records that the Rust-side upload path is intentionally deferred; the
+// JS transport is the canonical implementation.
+
+/** Drive upload / metadata / permission endpoints. */
+const DRIVE_UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
+const DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files";
+
+/**
+ * Build the multipart/related body for a Drive multipart upload.
+ *
+ * Two-part payload: JSON metadata (`Content-Type: application/json; charset=UTF-8`)
+ * followed by the raw PNG bytes (`Content-Type: image/png`). Boundary is a
+ * 32-char hex string.
+ *
+ * Exported for unit tests; not part of the module's public surface.
+ *
+ * @param {Uint8Array} bytes
+ * @param {string} filename
+ * @returns {{ boundary: string, body: Blob }}
+ */
+export function _buildDriveMultipartBody(bytes, filename)
+{
+    // 32-char hex boundary is unambiguous against PNG magic bytes and JSON.
+    let boundary = "";
+    for (let i = 0; i < 4; i++)
+    {
+        boundary += Math.random().toString(16).slice(2, 10);
+    }
+    boundary = `mps_${boundary}`;
+
+    const metadata = JSON.stringify({ name: filename, mimeType: "image/png" });
+    const encoder = new TextEncoder();
+
+    const header = encoder.encode(
+        `--${boundary}\r\n`
+        + "Content-Type: application/json; charset=UTF-8\r\n\r\n"
+        + `${metadata}\r\n`
+        + `--${boundary}\r\n`
+        + "Content-Type: image/png\r\n"
+        + "Content-Transfer-Encoding: binary\r\n\r\n",
+    );
+    const footer = encoder.encode(`\r\n--${boundary}--`);
+
+    // Blob composes without an intermediate contiguous buffer.
+    const body = new Blob([header, bytes, footer], {
+        type: `multipart/related; boundary=${boundary}`,
+    });
+
+    return { boundary, body };
+}
+
+/**
+ * Backoff schedule (ms) reused for Drive upload + permission retries.
+ * Same shape as `getPresentation`'s policy: retry only on network / 5xx / 429.
+ */
+const DRIVE_RETRY_BACKOFF_MS = [500, 1000, 2000];
+
+/**
+ * Whether a Drive error should trigger a retry attempt.
+ *
+ * Retry on:
+ *   - `network` (fetch itself threw)
+ *   - `http` (non-2xx that wasn't 401/403/404, i.e. 5xx or 429)
+ *
+ * 429 lands as `http` per the `getPresentation` classifier — the retry
+ * policy already treats it correctly.
+ *
+ * @param {unknown} e
+ * @returns {boolean}
+ */
+function _isDriveRetryable(e)
+{
+    if (!e || typeof e !== "object") return false;
+    const kind = /** @type {{ kind?: string }} */ (e).kind;
+    return kind === "network" || kind === "http";
+}
+
+/**
+ * Upload a PNG to the user's Google Drive using multipart upload.
+ *
+ * Retry policy: up to 3 attempts (500ms / 1s / 2s backoff) on network /
+ * 5xx / 429. 401 / 403 / 404 surface immediately with the corresponding
+ * `.kind` so the error classifier can route them.
+ *
+ * @param {Uint8Array} bytes
+ * @param {string} filename
+ * @param {string} token
+ * @param {{ signal?: AbortSignal, fetchImpl?: typeof fetch }} [opts]
+ * @returns {Promise<{ id: string }>}
+ * @throws {Error & { kind: "auth" | "not-found" | "no-access" | "network" | "http" }}
+ */
+export async function driveUploadPng(bytes, filename, token, opts)
+{
+    const fetchImpl = (opts && opts.fetchImpl) || globalThis.fetch;
+    const signal = opts && opts.signal ? opts.signal : undefined;
+
+    /** @type {unknown} */
+    let lastErr;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++)
+    {
+        // Build a fresh body per attempt — the Blob is single-consumption
+        // in some fetch implementations after abort.
+        const { body } = _buildDriveMultipartBody(bytes, filename);
+
+        let response;
+        try
+        {
+            response = await fetchImpl(DRIVE_UPLOAD_URL, {
+                method: "POST",
+                headers: {
+                    "Authorization": `Bearer ${token}`,
+                    // Content-Type is set by the Blob (includes the boundary).
+                },
+                body,
+                signal,
+            });
+        }
+        catch (e)
+        {
+            lastErr = makeKindError(
+                `network: ${e instanceof Error ? e.message : String(e)}`,
+                "network",
+            );
+            if (!_isDriveRetryable(lastErr) || attempt >= MAX_ATTEMPTS) throw lastErr;
+            await sleep(DRIVE_RETRY_BACKOFF_MS[attempt - 1]);
+            continue;
+        }
+
+        if (response.status === 401) throw makeKindError("http-401", "auth");
+        if (response.status === 403) throw makeKindError("http-403", "no-access");
+        if (response.status === 404) throw makeKindError("http-404", "not-found");
+
+        if (response.status >= 200 && response.status < 300)
+        {
+            const payload = /** @type {any} */ (await response.json());
+            const id = payload && typeof payload.id === "string" ? payload.id : "";
+            if (!id) throw makeKindError("drive-upload: missing id", "http");
+            return { id };
+        }
+
+        // 5xx / 429 / other non-2xx → retry class.
+        lastErr = makeKindError(`http-${response.status}`, "http");
+        if (!_isDriveRetryable(lastErr) || attempt >= MAX_ATTEMPTS) throw lastErr;
+        await sleep(DRIVE_RETRY_BACKOFF_MS[attempt - 1]);
+    }
+    // Unreachable — loop either returns or throws.
+    throw lastErr;
+}
+
+/**
+ * Set a Drive file's permissions so anyone can read it.
+ *
+ * Required so the Slides API can fetch
+ * `https://drive.google.com/uc?id=<id>&export=download` server-side when
+ * resolving `createImage.url` / `replaceImage.url`. Same retry policy as
+ * `driveUploadPng`.
+ *
+ * @param {string} fileId
+ * @param {string} token
+ * @param {{ signal?: AbortSignal, fetchImpl?: typeof fetch }} [opts]
+ * @returns {Promise<void>}
+ * @throws {Error & { kind: "auth" | "not-found" | "no-access" | "network" | "http" }}
+ */
+export async function drivePermissionAnyoneReader(fileId, token, opts)
+{
+    const fetchImpl = (opts && opts.fetchImpl) || globalThis.fetch;
+    const signal = opts && opts.signal ? opts.signal : undefined;
+    const url = `${DRIVE_FILES_URL}/${encodeURIComponent(fileId)}/permissions`;
+    const body = JSON.stringify({ role: "reader", type: "anyone" });
+
+    /** @type {unknown} */
+    let lastErr;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++)
+    {
+        let response;
+        try
+        {
+            response = await fetchImpl(url, {
+                method: "POST",
+                headers: {
+                    "Authorization": `Bearer ${token}`,
+                    "Content-Type":  "application/json",
+                },
+                body,
+                signal,
+            });
+        }
+        catch (e)
+        {
+            lastErr = makeKindError(
+                `network: ${e instanceof Error ? e.message : String(e)}`,
+                "network",
+            );
+            if (!_isDriveRetryable(lastErr) || attempt >= MAX_ATTEMPTS) throw lastErr;
+            await sleep(DRIVE_RETRY_BACKOFF_MS[attempt - 1]);
+            continue;
+        }
+
+        if (response.status === 401) throw makeKindError("http-401", "auth");
+        if (response.status === 403) throw makeKindError("http-403", "no-access");
+        if (response.status === 404) throw makeKindError("http-404", "not-found");
+        if (response.status >= 200 && response.status < 300) return;
+
+        lastErr = makeKindError(`http-${response.status}`, "http");
+        if (!_isDriveRetryable(lastErr) || attempt >= MAX_ATTEMPTS) throw lastErr;
+        await sleep(DRIVE_RETRY_BACKOFF_MS[attempt - 1]);
+    }
+    throw lastErr;
+}
+
+/**
+ * Delete a Drive file. Best-effort — NO retries. Callers use this only to
+ * sweep the temp PNGs uploaded during the batchUpdate step; a leaked file
+ * is ugly but not user-facing.
+ *
+ * Returns `{ ok: true }` on 2xx / 404 (already-gone counts as success), or
+ * `{ ok: false, status }` on any other status. Never throws for HTTP —
+ * only for fetch-level failures (network / abort).
+ *
+ * @param {string} fileId
+ * @param {string} token
+ * @param {{ signal?: AbortSignal, fetchImpl?: typeof fetch }} [opts]
+ * @returns {Promise<{ ok: boolean, status?: number }>}
+ */
+export async function driveDelete(fileId, token, opts)
+{
+    const fetchImpl = (opts && opts.fetchImpl) || globalThis.fetch;
+    const signal = opts && opts.signal ? opts.signal : undefined;
+    const url = `${DRIVE_FILES_URL}/${encodeURIComponent(fileId)}`;
+
+    const response = await fetchImpl(url, {
+        method: "DELETE",
+        headers: { "Authorization": `Bearer ${token}` },
+        signal,
+    });
+
+    if (response.status === 404) return { ok: true, status: 404 };
+    if (response.status >= 200 && response.status < 300) return { ok: true, status: response.status };
+    return { ok: false, status: response.status };
+}
+
 /**
  * Whether a `refreshedAt` timestamp is older than `maxAgeMs`.
  *
@@ -311,4 +562,38 @@ export async function batchUpdatePresentation(presentationId, requests, token, o
 export function isPresentationStale(refreshedAt, maxAgeMs = DEFAULT_MAX_AGE_MS)
 {
     return Date.now() - refreshedAt > maxAgeMs;
+}
+
+/**
+ * Fetch the `headRevisionId` of a Google Slides presentation via the
+ * Drive `files.get` endpoint. Much cheaper than `presentations.get` —
+ * the response is ~80 bytes vs potentially megabytes for the full deck.
+ *
+ * Best-effort, single attempt, 10s timeout. Returns `null` on any
+ * failure (network, auth, 404) — the caller uses this for a background
+ * sync-status check and degrades silently when the API is unreachable.
+ *
+ * @param {string} presentationId — the Slides presentation ID (also a Drive file ID)
+ * @param {string} token — OAuth access token
+ * @returns {Promise<string | null>}
+ */
+export async function getHeadRevisionId(presentationId, token)
+{
+    const url = `${DRIVE_FILES_URL}/${encodeURIComponent(presentationId)}?fields=headRevisionId`;
+    try
+    {
+        const response = await fetch(url, {
+            headers: { Authorization: `Bearer ${token}` },
+            signal: AbortSignal.timeout(10_000),
+        });
+        if (!response.ok) return null;
+        const data = /** @type {any} */ (await response.json());
+        return data && typeof data.headRevisionId === "string"
+            ? data.headRevisionId
+            : null;
+    }
+    catch (_)
+    {
+        return null;
+    }
 }

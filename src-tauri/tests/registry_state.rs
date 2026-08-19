@@ -1,11 +1,10 @@
-//! Integration tests for `ProjectRegistryState`
-//! (TODO/uuid-file-registry.md — Part 2).
+//! Integration tests for `ProjectRegistryState`.
 //!
 //! Covers: fresh-project synthesis on `NotFound`, index population on load,
 //! flush semantics (dirty vs clean), replace-on-second-load, and the
 //! `no-project-open` error path.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
 
 use app_lib::{
@@ -55,7 +54,7 @@ struct SeedFixture
 }
 
 /// Build a two-entry registry and persist it to `<root>/_mangaplaystudio/registry.json`
-/// via the Part 1 `save_atomic` API. Returns a [`SeedFixture`] describing
+/// via the `save_atomic` API. Returns a [`SeedFixture`] describing
 /// exactly what was written.
 /// `seed_prefix` disambiguates entries between fixtures used in the same test
 /// so we can assert a second load truly replaced the first.
@@ -78,7 +77,7 @@ fn seed_registry_on_disk_with_prefix(
     let path_a = format!("{}/chapter-1/intro.mangaplay.md", seed_prefix);
     let path_b = format!("{}/chapter-2", seed_prefix);
 
-    let mut entries: HashMap<String, RegistryEntry> = HashMap::new();
+    let mut entries: BTreeMap<String, RegistryEntry> = BTreeMap::new();
     entries.insert(
         a.to_string(),
         RegistryEntry

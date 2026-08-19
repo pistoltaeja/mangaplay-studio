@@ -23,8 +23,11 @@ pub mod registry;
 pub mod script_map;
 pub mod setup;
 pub mod slides_links;
+#[cfg(desktop)]
+pub mod storyboard_uri;
 
 pub mod user_data;
+pub mod util;
 pub mod validate_basename;
 
 // Re-exports so integration tests (which link `app_lib` as a sibling crate)
@@ -40,8 +43,8 @@ pub use art_map::{
     read_all_scripts,
     resolve_art_path,
 };
-pub use boot::{UxModeState, resolve_ux_mode, resolve_ux_mode_with_source};
-pub use commands::app_info::{app_remove_recent_impl, app_update_recent_impl};
+pub use boot::{UxModeState, resolve_ux_mode_with_source};
+pub use commands::app_info::{app_delete_project_impl, app_remove_recent_impl, app_update_recent_impl};
 pub use commands::auth::{auth_callback_page_html, auth_success_page_html};
 pub use commands::auto_flatten::flatten_project_layout_impl;
 pub use commands::registry_cmds::{
@@ -74,9 +77,10 @@ pub use commands::file_ops::trash::{
     force_delete_impl,
 };
 pub use commands::mangaart::{
-    mangaart_erase_impl, mangaart_resolve_by_folder_uuid_impl,
-    mangaart_resolve_by_uuid_impl, mangaart_resolve_path_impl,
-    mangaart_scaffold_by_uuid_impl, mangaart_scaffold_impl,
+    mangaart_erase_impl, mangaart_load_by_uuid_impl, mangaart_load_impl,
+    mangaart_resolve_by_folder_uuid_impl, mangaart_resolve_by_uuid_impl,
+    mangaart_resolve_path_impl, mangaart_scaffold_by_uuid_impl,
+    mangaart_scaffold_impl, mangaart_sweep_empty_impl,
 };
 pub use commands::script_map::{scriptmap_get_or_mint_impl, ScriptMapMintResult};
 pub use commands::project::{
@@ -134,6 +138,7 @@ pub(crate) use user_data::SETTINGS_WRITE_LOCK;
 pub use user_data::paths::{resolve_user_data_dir, resolve_user_data_dir_for_exe};
 pub use user_data::settings::{
     apply_last_project_path_guard,
+    drop_project_session_impl,
     user_settings_load_impl,
     user_settings_save_impl,
 };
@@ -188,7 +193,11 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_os::init());
+        .plugin(tauri_plugin_os::init())
+        .plugin(tauri_plugin_mps_firebase::init())
+        .plugin(tauri_plugin_mps_admob::init())
+        .plugin(tauri_plugin_mps_ios_webview::init())
+        .plugin(tauri_plugin_iap::init());
     // tauri-plugin-http — desktop-only. Bypasses WebView CORS/CSP for the
     // Slides CDN image fetch (see slides-prepare.js::commitSlidesSync).
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -211,6 +220,17 @@ pub fn run() {
     // tests that want a controlled root.
     #[cfg(feature = "disk-frontend")]
     let builder = builder.register_uri_scheme_protocol("mpsdev", crate::boot::dev_uri::disk_frontend_handler);
+
+    // `mps-storyboard://` — custom scheme owned by Rust. Streams cached
+    // Slides PNGs from `<projectRoot>/_mangaplaystudio/storyboard/...`
+    // after resolving projectId → projectRoot via the in-process registry.
+    // Desktop-only — uses tokio::fs which is not available on mobile.
+    // See src/storyboard_uri/ for the parser, security model, and handler.
+    #[cfg(desktop)]
+    let builder = builder.register_asynchronous_uri_scheme_protocol(
+        "mps-storyboard",
+        crate::storyboard_uri::scheme::handle,
+    );
 
     // Updater plugin is gated behind the `updater` Cargo feature.
     // Loading it with the current "PLACEHOLDER" pubkey would panic at first
@@ -369,41 +389,29 @@ pub fn run() {
 
             Ok(())
         })
+        // Grouped by subsystem for readability. `generate_handler!` order
+        // is irrelevant to dispatch — regrouping is cosmetic only.
         .invoke_handler(tauri::generate_handler![
+            // ── Lifecycle / boot ─────────────────────────────────────────
             crate::commands::lifecycle::shell_ready,
             crate::commands::lifecycle::shell_composited,
             crate::commands::console_capture::app_log_message,
-            crate::commands::project_mutations::app_move_folder,
-            crate::commands::app_info::app_platform,
-            crate::commands::app_info::app_recent,
-            crate::commands::app_info::app_remove_recent,
-            crate::commands::app_info::app_update_recent,
-            crate::commands::app_info::app_version_info,
-            crate::commands::project_mutations::app_rename_folder,
-            crate::commands::project_mutations::app_rename_project,
-            crate::commands::reveal::app_reveal_in_explorer,
-            crate::commands::script_map::scriptmap_get_or_mint,
-            crate::commands::file_ops::crud::app_save_file_dialog,
-            crate::commands::file_ops::crud::app_open_file_dialog,
-            crate::commands::file_ops::crud::app_read_file_bytes,
-            crate::commands::settings::app_settings_get,
-            crate::commands::settings::app_settings_set,
-            crate::commands::slides_cache::slides_deck_stat,
-            crate::commands::slides_cache::slides_deck_write,
-            crate::commands::slides_cache::slides_deck_gc,
-            crate::commands::slides_link::slides_link_get,
-            crate::commands::slides_link::slides_link_save,
-            crate::commands::slides_link::slides_link_drop,
-            crate::commands::slides_lock::slides_publish_lock_acquire,
-            crate::commands::slides_lock::slides_publish_lock_release,
-            crate::commands::slides_lock::slides_publish_lock_heartbeat,
-            crate::commands::slides_upload::slides_upload_images,
             crate::commands::auto_resume::app_should_auto_resume,
             crate::commands::onboarding::app_should_force_onboarding,
-            crate::commands::file_ops::crud::app_write_bytes,
-            crate::commands::project::atomic_write_project_file,
-            crate::commands::project::app_internal_remove_project_file,
-            crate::commands::project::app_internal_remove_empty_project_dir,
+            crate::commands::window_theme::set_window_theme,
+            crate::commands::reveal::app_reveal_in_explorer,
+            crate::commands::test_driver::test_eval_result,
+            // ── App info / recent ────────────────────────────────────────
+            crate::commands::app_info::app_platform,
+            crate::commands::app_info::app_version_info,
+            crate::commands::app_info::app_recent,
+            crate::commands::app_info::app_update_recent,
+            crate::commands::app_info::app_remove_recent,
+            crate::commands::app_info::app_delete_project,
+            // ── Settings ─────────────────────────────────────────────────
+            crate::commands::settings::app_settings_get,
+            crate::commands::settings::app_settings_set,
+            // ── Auth ─────────────────────────────────────────────────────
             crate::commands::auth::auth_abort_loopback,
             crate::commands::auth::auth_listen_loopback,
             crate::commands::auth::auth_open_browser,
@@ -411,26 +419,45 @@ pub fn run() {
             crate::commands::auth::auth_token_store_clear,
             crate::commands::auth::auth_token_store_get,
             crate::commands::auth::auth_token_store_set,
+            // ── Picker ───────────────────────────────────────────────────
+            crate::commands::picker::picker_open,
+            // ── User data ────────────────────────────────────────────────
+            crate::user_data::settings::path_exists,
+            crate::user_data::settings::user_data_dir,
+            crate::user_data::settings::user_settings_load,
+            crate::user_data::settings::user_settings_save,
+            crate::user_data::version::user_data_apply_rung,
+            crate::user_data::version::user_data_ensure_version,
+            crate::user_data::version::user_data_record_failure,
+            crate::user_data::version::user_data_skip_rung,
+            // ── Slides (R1) ──────────────────────────────────────────────
+            crate::commands::slides_cache::slides_deck_stat,
+            crate::commands::slides_cache::slides_deck_write,
+            crate::commands::slides_cache::slides_deck_gc,
+            crate::commands::slides_cache::slides_deck_delete,
+            crate::commands::slides_image_fetch::slides_image_fetch,
+            crate::commands::slides_link::slides_link_get,
+            crate::commands::slides_link::slides_link_save,
+            crate::commands::slides_link::slides_link_drop,
+            crate::commands::slides_link::slides_link_drop_scoped,
+            crate::commands::slides_lock::slides_publish_lock_acquire,
+            crate::commands::slides_lock::slides_publish_lock_release,
+            crate::commands::slides_lock::slides_publish_lock_heartbeat,
+            crate::commands::slides_upload::slides_upload_images,
+            crate::commands::storyboard_import::storyboard_import_local,
+            crate::commands::storyboard_import::storyboard_list_png_files,
+            crate::commands::publish_log::publish_log_append,
+            crate::commands::publish_log::publish_log_load,
+            // ── Registry / file ops (R2) ─────────────────────────────────
+            crate::commands::file_ops::crud::app_save_file_dialog,
+            crate::commands::file_ops::crud::app_open_file_dialog,
+            crate::commands::file_ops::crud::app_open_files_dialog,
+            crate::commands::file_ops::crud::app_read_file_bytes,
+            crate::commands::file_ops::crud::app_write_bytes,
             crate::fs_watch::fs_watch_add_subdir,
             crate::fs_watch::fs_watch_remove_subdir,
             crate::fs_watch::fs_watch_start,
             crate::fs_watch::fs_watch_stop,
-            crate::commands::project::list_project_art,
-            crate::commands::project::list_project_scripts,
-            crate::commands::mangaart::mangaart_resolve_path,
-            crate::commands::mangaart::mangaart_resolve_by_uuid,
-            crate::commands::mangaart::mangaart_resolve_by_folder_uuid,
-            crate::commands::mangaart::mangaart_scaffold,
-            crate::commands::mangaart::mangaart_scaffold_by_uuid,
-            crate::commands::mangaart::mangaart_erase,
-            crate::commands::picker::picker_open,
-            crate::user_data::settings::path_exists,
-            crate::commands::project::project_create_new,
-            crate::commands::project::project_open,
-            crate::commands::project::project_pick_folder,
-            crate::commands::publish_log::publish_log_append,
-            crate::commands::publish_log::publish_log_load,
-            crate::commands::project::read_project_file,
             crate::commands::registry_cmds::registry_list_tree,
             crate::commands::registry_cmds::registry_read_file,
             crate::commands::registry_cmds::registry_list_scripts,
@@ -443,14 +470,33 @@ pub fn run() {
             crate::commands::registry_cmds::registry_delete,
             crate::commands::registry_cmds::registry_delete_force,
             crate::commands::registry_cmds::registry_copy,
-            crate::commands::test_driver::test_eval_result,
-            crate::user_data::version::user_data_apply_rung,
-            crate::user_data::settings::user_data_dir,
-            crate::user_data::version::user_data_ensure_version,
-            crate::user_data::version::user_data_record_failure,
-            crate::user_data::version::user_data_skip_rung,
-            crate::user_data::settings::user_settings_load,
-            crate::user_data::settings::user_settings_save,
+            // ── Project / mangaart (R3) ──────────────────────────────────
+            crate::commands::project::project_create_new,
+            crate::commands::project::project_open,
+            crate::commands::project::project_pick_folder,
+            crate::commands::project::read_project_file,
+            crate::commands::project::atomic_write_project_file,
+            crate::commands::project::app_internal_remove_project_file,
+            crate::commands::project::app_internal_remove_empty_project_dir,
+            crate::commands::project::list_project_art,
+            crate::commands::project::list_project_scripts,
+            crate::commands::project_mutations::app_move_folder,
+            crate::commands::project_mutations::app_rename_folder,
+            crate::commands::project_mutations::app_rename_project,
+            crate::commands::script_map::scriptmap_get_or_mint,
+            crate::commands::mangaart::mangaart_resolve_path,
+            crate::commands::mangaart::mangaart_resolve_by_uuid,
+            crate::commands::mangaart::mangaart_resolve_by_folder_uuid,
+            crate::commands::mangaart::mangaart_scaffold,
+            crate::commands::mangaart::mangaart_scaffold_by_uuid,
+            crate::commands::mangaart::mangaart_load,
+            crate::commands::mangaart::mangaart_load_by_uuid,
+            crate::commands::mangaart::mangaart_sweep_empty,
+            crate::commands::mangaart::mangaart_erase,
+            // ── System fonts ──────────────────────────────────────────────────
+            // Mobile stubs return an error string; fontdb links on desktop only.
+            crate::commands::fonts::fonts_list_families,
+            crate::commands::fonts::fonts_resolve_family,
         ])
         // No on_window_event close handler — the JS side handles the
         // CloseRequested cycle via getCurrentWindow().onCloseRequested(),

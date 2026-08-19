@@ -99,7 +99,7 @@ async function runStep(step, ctx)
             // Two-phase wait:
             //   1) First card-selected → mount the button.
             //   2) card-button-clicked → resolve with the chosen id.
-            // Selection changes after phase 1 keep the button mounted
+            // Selection changes after step 1 keep the button mounted
             // (no re-anim) and update the internal selection tracked
             // by the tray.
             const buttonLabel = String(step.buttonLabel || "");

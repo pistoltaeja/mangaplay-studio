@@ -4,18 +4,22 @@
  *
  * Project folder layout (current):
  *   <project>/
- *     _mangaplaystudio/                — reserved app-managed root
+ *     _mangaplaystudio/                — reserved app-managed root (TEAM tier — checked into SVN)
  *       project.json                   — id + shared displayName + artMap
- *       meta.json                      — viewMode, lastOpened, etc.
+ *       registry.json + .bak           — UUID↔path registry
+ *       meta.json                      — savedAt + folderTypes (slice-of-life keys moved to user-settings)
  *       storyboard/
  *         page-NNN.json                — per-page drawings
  *         <uuid>.mangaart              — script-associated drawing (root scripts)
  *         <script-rel-dir>/<uuid>.mangaart — mirrored hierarchy for nested scripts
- *       settings/
- *         session.json                 — current page, viewport, tab state
- *         fold-state.json              — editor fold ranges
  *     Untitled.mangaplay.md, ...       — user scripts at the root (recursive)
  *     <user folders>/                  — user-created folders at the root (recursive)
+ *
+ * Per-user "slice-of-life" state (open tabs, cursor positions, view mode,
+ * expanded folders, canvas heights) lives OUT-of-tree in the OS user-settings
+ * store under `projectSessions[<project.json.id>]`. See loadSession /
+ * saveSession below. Legacy on-disk `_mangaplaystudio/settings/session.json`
+ * is migrated once on project open and then deleted.
  *
  * The previous four-sibling layout (`project.json`/`meta.json`/`storyboard/`/`mangaplay_settings/`
  * at the project root) is NOT supported — projects from older builds will not open.
@@ -25,103 +29,23 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { isTauri } from "../util/index.js";
 import { debounce } from "../util/index.js";
-import { registryListTree } from "../adapters/tauri-storage.js";
+import { registryListTree, mangaartResolveByFolderUuid } from "../adapters/tauri-storage.js";
 
-/**
- * In-memory file system for the browser stubs. Map<absPath, contents>.
- * Folders are tracked by being a prefix of file paths (no explicit folder
- * entries). The Rust contract this models is a strict subset — see the
- * comment in the `invoke()` switch below for the explicit non-modelled list.
- * @type {Map<string, string>}
- */
-const _fakeFs = new Map();
+import {
+    dispatchFakeInvoke,
+    _resetFakeFsForTest,
+    _resetFakeArtMapForTest,
+    _resetFakeScriptMapForTest,
+} from "./fake-fs.js";
+import { loadSpellcheckStore } from "../spellcheck/spellcheck-store.js";
 
-/**
- * In-memory analogue of `project.json`'s artMap.scripts section. Keyed by
- * `${projectPath}::${scriptFile}` (`::` chosen as delimiter — neither side
- * contains it on the platforms we care about). Value records the durable
- * UUID + the on-disk art path so `mangaart_resolve_path` can answer without
- * recomputing.
- * @type {Map<string, {uuid: string, artPath: string}>}
- */
-const _fakeArtMap = new Map();
-
-/**
- * Browser/test stub for the Rust `scriptmap_get_or_mint` command. Keyed by
- * `${projectPath}::${scriptRelPath}`. Mints stable UUIDs on first ask,
- * returns the same UUID on subsequent asks — matches the Rust contract.
- * @type {Map<string, {uuid: string}>}
- */
-const _fakeScriptMap = new Map();
-
-function _fakeArtMapKey(projectPath, scriptFile)
-{
-    return `${projectPath}::${scriptFile}`;
-}
-
-/**
- * Mirror the Rust `resolve_art_path` shape: strip the script's basename and
- * place the art file under
- * `<projectPath>/_mangaplaystudio/storyboard/<mirrored-dir>/<uuid>.mangaart`.
- * Root-level scripts collapse to
- * `<projectPath>/_mangaplaystudio/storyboard/<uuid>.mangaart`.
- *
- * Mirrors the Rust nested layout — the storyboard tree lives inside the
- * `_mangaplaystudio/` reserved root, not at the project root.
- */
-function _fakeArtMapComputePath(projectPath, scriptFile, uuid)
-{
-    const slash = scriptFile.lastIndexOf("/");
-    const mirroredDir = slash < 0 ? "" : scriptFile.slice(0, slash);
-    return mirroredDir
-        ? `${projectPath}/_mangaplaystudio/storyboard/${mirroredDir}/${uuid}.mangaart`
-        : `${projectPath}/_mangaplaystudio/storyboard/${uuid}.mangaart`;
-}
-
-function _fakeArtMapMintUuid()
-{
-    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function")
-    {
-        return crypto.randomUUID();
-    }
-    return "00000000-0000-4000-8000-000000000000";
-}
-
-/**
- * Test helper. Clears the in-memory FS so each test starts clean.
- * Not exported from the bundle index — tests import the module directly.
- */
-export function _resetFakeFsForTest()
-{
-    _fakeFs.clear();
-}
-
-/**
- * Test helper. Clears the in-memory artMap so each test starts with a
- * fresh script→uuid map. Separate from `_resetFakeFsForTest` because the
- * production `clearMangaartCache` only drops the in-memory cache; it does
- * NOT wipe project.json on disk. Tests that need a true cold start call
- * this alongside `clearMangaartCache`.
- */
-export function _resetFakeArtMapForTest()
-{
-    _fakeArtMap.clear();
-}
-
-/**
- * Test helper. Clears the fake scriptMap so each test starts with no
- * minted UUIDs. Separate from `_resetFakeArtMapForTest` so tests that care
- * about legacy artMap pull-forward can seed artMap without leaking the
- * pulled-forward scriptMap entry from a prior test.
- */
-export function _resetFakeScriptMapForTest()
-{
-    _fakeScriptMap.clear();
-}
+// Re-export the fake-fs test helpers so existing importers
+// (tests/*.test.js) keep resolving them from project.js.
+export { _resetFakeFsForTest, _resetFakeArtMapForTest, _resetFakeScriptMapForTest };
 
 /**
  * Test helper. Direct passthrough to the private `invoke` dispatcher so
- * tests can exercise FS commands (`app_create_file`, etc.) that don't have
+ * tests can exercise FS commands (`slides_link_get`, etc.) that don't have
  * dedicated public wrappers. Only used by tests/fakefs.test.js.
  * @param {string} cmd
  * @param {any} [args]
@@ -136,197 +60,89 @@ async function invoke(cmd, args) {
     if (isTauri()) {
         return tauriInvoke(cmd, args);
     }
-    // Browser stubs for tests and dev — names must match Tauri command names exactly.
-    //
-    // _fakeFs intentionally does NOT model:
-    //   - Case-folding (names are treated case-sensitively)
-    //   - Cross-device EXDEV (everything lives in one map)
-    //   - File locking / sharing violations
-    //   - Symlinks
-    //   - Trash directories — `app_delete_file` is hard-delete in the stub
-    //   - `trash-unavailable` / `access-denied` error variants — happy path
-    //     plus `not-found` / `target-exists` are modelled; other classes are
-    //     only reachable against the real .exe via the CDP harness.
-    switch (cmd) {
-        case "project_open":
-            return {
-                status: "ok",
-                project: {
-                    script: "",
-                    scriptFile: "",
-                    drawings: {},
-                    meta: { viewMode: "dual", lastSoloMode: "solo-storyboard", lastOpened: new Date().toISOString() },
-                    id: "00000000-0000-4000-8000-000000000000",
-                    displayName: null,
-                },
-            };
-        case "atomic_write_project_file":
-            console.log("[stub] atomic write:", args?.path);
-            if (args?.path) _fakeFs.set(args.path, args.contents ?? "");
-            return null;
-        case "read_project_file":
-            return args?.path && _fakeFs.has(args.path) ? _fakeFs.get(args.path) : "";
-        case "list_project_art":
-            return [];
-        case "list_project_scripts":
-        {
-            // Walk in-memory FS for entries under `<dir>/` whose basename
-            // ends in `.mangaplay.md` or `.fountain.md`. Returns
-            // forward-slash-joined paths relative to `<dir>`.
-            const dir = args?.dir;
-            if (!dir) return [];
-            const prefix = `${dir}/`;
-            const out = [];
-            for (const p of _fakeFs.keys())
-            {
-                if (!p.startsWith(prefix)) continue;
-                const rel = p.slice(prefix.length);
-                if (rel.startsWith(".")) continue;
-                if (rel.endsWith(".mangaplay.md") || rel.endsWith(".fountain.md"))
-                {
-                    out.push(rel);
-                }
-            }
-            return out;
-        }
-        case "app_recent":
-            return [];
-        case "app_platform":
-            return { os: navigator.platform || "browser", appDataDir: "", version: "0.0.0" };
-        case "app_update_recent":
-            return null;
-        case "app_remove_recent":
-        case "app_rename_project":
-        case "app_rename_folder":
-        case "app_move_folder":
-        case "app_reveal_in_explorer":
-            return null;
-        case "app_should_auto_resume":
-            return false;
-        case "project_pick_folder":
-            return null; // browser cannot show OS folder dialog
-        case "project_create_new":
-            return `/tmp/${args?.name || "new-project"}`;
-        case "mangaart_scaffold":
-        {
-            const projectPath = args?.projectPath || "";
-            const scriptFile = args?.scriptFile || "Untitled.mangaplay.md";
-            const key = _fakeArtMapKey(projectPath, scriptFile);
-            // Idempotent: re-use the stored UUID + path on repeat scaffold,
-            // matching the Rust contract.
-            let entry = _fakeArtMap.get(key);
-            if (!entry)
-            {
-                const uuid = _fakeArtMapMintUuid();
-                const artPath = _fakeArtMapComputePath(projectPath, scriptFile, uuid);
-                entry = { uuid, artPath };
-                _fakeArtMap.set(key, entry);
-            }
-            const body = {
-                format: "mangaart:v1",
-                uuid: entry.uuid,
-                name: stripMdSuffix(scriptFile),
-                scriptFile,
-                createdAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
-                pages: []
-            };
-            // Seed the in-memory FS so a subsequent read_project_file at the
-            // resolved path returns the scaffold body (parity with Rust which
-            // atomically writes the scaffold to disk).
-            _fakeFs.set(entry.artPath, JSON.stringify(body, null, 2));
-            return body;
-        }
-        case "mangaart_resolve_path":
-        {
-            const projectPath = args?.projectPath || "";
-            const scriptFile = args?.scriptFile || "";
-            const entry = _fakeArtMap.get(_fakeArtMapKey(projectPath, scriptFile));
-            return entry ? entry.artPath : null;
-        }
-        case "mangaart_scaffold_by_uuid":
-        {
-            const projectPath = args?.projectPath || "";
-            const uuid = args?.uuid || "";
-            const displayName = args?.displayName || uuid;
-            const artPath = `${projectPath}/_mangaplaystudio/storyboard/${uuid}.mangaart`;
-            const existing = _fakeFs.get(artPath);
-            if (existing)
-            {
-                try { return JSON.parse(existing); } catch { /* fall through to rewrite */ }
-            }
-            const body = {
-                format: "mangaart:v1",
-                uuid,
-                name: displayName,
-                scriptFile: displayName,
-                createdAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
-                pages: []
-            };
-            _fakeFs.set(artPath, JSON.stringify(body, null, 2));
-            return body;
-        }
-        case "mangaart_resolve_by_uuid":
-        {
-            const projectPath = args?.projectPath || "";
-            const uuid = args?.uuid || "";
-            const artPath = `${projectPath}/_mangaplaystudio/storyboard/${uuid}.mangaart`;
-            return _fakeFs.has(artPath) ? artPath : null;
-        }
-        case "mangaart_erase":
-        {
-            const projectPath = args?.projectPath || "";
-            const uuid = args?.uuid || "";
-            // Drop every fake artMap entry pointing at this uuid.
-            for (const [key, entry] of _fakeArtMap.entries())
-            {
-                if (entry && entry.uuid === uuid && key.startsWith(`${projectPath}::`))
-                {
-                    _fakeFs.delete(entry.artPath);
-                    _fakeArtMap.delete(key);
-                }
-            }
-            // Also nuke the flat UUID-first art file if present.
-            const flat = `${projectPath}/_mangaplaystudio/storyboard/${uuid}.mangaart`;
-            _fakeFs.delete(flat);
-            return null;
-        }
-        case "scriptmap_get_or_mint":
-        {
-            const projectPath = args?.projectPath || "";
-            const scriptRelPath = args?.scriptRelPath || "";
-            // Fake-fs stores the project.json body in projectJsonCache (the
-            // module-level Map below). We can't access it here because of
-            // module ordering, so the fake holds its own per-project store
-            // keyed by projectPath::scriptRelPath. Mints are stable across
-            // repeated calls for the same key — matches the Rust contract.
-            const key = `${projectPath}::${scriptRelPath}`;
-            let entry = _fakeScriptMap.get(key);
-            const minted = !entry;
-            if (!entry)
-            {
-                entry = { uuid: _fakeArtMapMintUuid() };
-                _fakeScriptMap.set(key, entry);
-            }
-            // Build a tiny project_json shape the JS-side cache replacement
-            // can ingest. Real Rust returns the full body; the fake returns
-            // just the scriptMap subtree so JS reads do the right thing.
-            // Merge with whatever was already in the JS cache so other
-            // top-level fields (id, artMap, googleDocsSync) survive.
-            const existing = projectJsonCache.get(projectPath) || {};
-            const mergedScriptMap = Object.assign({}, existing.scriptMap || {});
-            mergedScriptMap[scriptRelPath] = { uuid: entry.uuid };
-            const projectJson = Object.assign({}, existing, { scriptMap: mergedScriptMap });
-            return { uuid: entry.uuid, minted, projectJson };
-        }
-        default:
-            return null;
-    }
+    // Browser/test stubs — delegated to fake-fs.js. `projectJsonCache` +
+    // `stripMdSuffix` are passed through so the `scriptmap_get_or_mint`
+    // stub can merge into the very same cache production reads mutate.
+    return dispatchFakeInvoke(cmd, args, { stripMdSuffix, projectJsonCache });
 }
 
-/** @type {object | null} */
-let mangaartCache = null;
+/**
+ * Per-artifact mangaart entry.
+ *
+ * @typedef MangaartCacheEntry
+ * @property {object} art          The mangaart JSON blob (pages, meta, etc.).
+ * @property {string} projectPath  Absolute project path this entry belongs to.
+ * @property {string | null} resolvedPath  Absolute on-disk `.mangaart` path (null when never resolved).
+ * @property {boolean} dirty       True if in-memory state is ahead of disk.
+ * @property {number} updatedAt    `Date.now()` of last mutation.
+ */
+
+/**
+ * Keyed cache of mangaart entries. Keys are namespaced strings:
+ *   `"file:<script-uuid>"`   — per-file storyboards.
+ *   `"folder:<folder-uuid>"` — per-folder storyboards (aggregate view).
+ *
+ * Grows with the number of files a user opens in a session. TODO(phase2):
+ * aggregate-view can call `clearMangaartCacheEntry(key)` on close for LRU
+ * bookkeeping — file counts per project are low today, so no cap yet.
+ *
+ * @type {Map<string, MangaartCacheEntry>}
+ */
+const mangaartCache = new Map();
+
+/**
+ * Key of the most recently loaded/mutated entry — the "active" artifact
+ * for the purposes of the legacy `getMangaartCache()` /
+ * `updateMangaartPage()` / path-based `saveMangaart()` wrappers. Set by
+ * every `loadMangaart*` / `updateMangaartPage` / `saveMangaart*` call;
+ * cleared when the whole cache clears.
+ *
+ * @type {string | null}
+ */
+let mangaartActiveKey = null;
+
+/**
+ * Build a cache key for a file-scoped mangaart entry.
+ * @param {string} uuid
+ * @returns {string}
+ */
+function fileKey(uuid)
+{
+    return "file:" + uuid;
+}
+
+/**
+ * Build a cache key for a folder-scoped mangaart entry.
+ * @param {string} uuid
+ * @returns {string}
+ */
+function folderKey(uuid)
+{
+    return "folder:" + uuid;
+}
+
+/**
+ * Store `art` under `key`, creating the entry when it doesn't exist yet.
+ * Sets `mangaartActiveKey` so subsequent legacy wrappers see this entry.
+ * @param {string} key
+ * @param {object} art
+ * @param {string} projectPath
+ * @param {string | null} resolvedPath
+ * @returns {MangaartCacheEntry}
+ */
+function putMangaartEntry(key, art, projectPath, resolvedPath)
+{
+    const entry = {
+        art,
+        projectPath,
+        resolvedPath,
+        dirty: false,
+        updatedAt: Date.now(),
+    };
+    mangaartCache.set(key, entry);
+    mangaartActiveKey = key;
+    return entry;
+}
 
 /**
  * Strip a trailing `.md` (case-insensitive) from a filename.
@@ -346,7 +162,7 @@ function stripMdSuffix(name)
  * `{ status: "ok", project: {...} }`; any other shape is treated as a bug.
  *
  * @param {string} projectPath — absolute path to the project folder
- * @returns {Promise<{path: string, name: string, script: string, scriptPath: string | null, scriptBasename: string, drawings: Record<string, object>, meta: object}>}
+ * @returns {Promise<{path: string, id: string | null, name: string, script: string, scriptPath: string | null, scriptBasename: string, drawings: Record<string, object>, meta: object}>}
  */
 export async function openProject(projectPath) {
     const result = await invoke("project_open", { path: projectPath });
@@ -365,15 +181,30 @@ export async function openProject(projectPath) {
     // is already a forward-slash-joined relative path from the Rust walker.
     const scriptPath = scriptFile ? `${projectPath}/${scriptFile}` : null;
     const scriptBasename = scriptFile || "Untitled.mangaplay.md";
+    const id = typeof project.id === "string" && project.id.length > 0 ? project.id : null;
+
+    // Run the one-shot user-session migration BEFORE returning. Idempotent —
+    // no-op on projects that have already migrated (legacy session.json
+    // absent + meta.json already slim).
+    if (id)
+    {
+        try { await migrateProjectSessionFromDisk(projectPath, id, project.meta || {}); }
+        catch (e) { console.warn("[session] migrate failed:", e); }
+    }
+
+    try { await loadSpellcheckStore(projectPath); }
+    catch (e) { console.warn("[spellcheck] store load failed:", e); }
 
     return {
         path: projectPath,
+        id,
         name,
         script: project.script || "",
         scriptPath,
         scriptBasename,
         drawings: project.drawings || {},
         meta: project.meta || {},
+        locked: project.locked === true,
     };
 }
 
@@ -422,16 +253,23 @@ async function resolveArtPath(projectPath, scriptBasename)
 }
 
 /**
- * Load (or scaffold) the project's `.mangaart` file into the module cache.
- * Path is resolved via the project.json artMap (mangaart_resolve_path).
- * Falls through to mangaart_scaffold when no mapping exists OR when the
- * mapped file is missing/unreadable (crash-after-map-write recovery).
+ * Load-only variant of the project's `.mangaart` file into the module cache.
+ * Returns an in-memory empty scaffold when nothing is on disk — does NOT
+ * create the `.mangaart` file. The physical file only lands on first save
+ * (see {@link saveMangaartByUuid}). UUID minting into scriptMap still
+ * happens on load so save has a stable target.
  * @param {string} projectPath
  * @param {string} scriptBasename — e.g. "Untitled.mangaplay.md"
  * @returns {Promise<object>}
  */
 export async function loadMangaart(projectPath, scriptBasename)
 {
+    // Legacy path-based load. Callers today: open-and-mount-project.js,
+    // explorer.js, project-switcher.js — all fallback paths for the boot
+    // window before the active file's UUID has resolved. There's no UUID
+    // available here, so the entry is keyed by scriptBasename under a
+    // synthetic namespace so it doesn't collide with `file:<uuid>` keys.
+    const key = "path:" + scriptBasename;
     const path = await resolveArtPath(projectPath, scriptBasename);
     if (path)
     {
@@ -440,17 +278,19 @@ export async function loadMangaart(projectPath, scriptBasename)
             const contents = await invoke("read_project_file", { path });
             if (contents)
             {
-                mangaartCache = JSON.parse(contents);
-                return mangaartCache;
+                const art = JSON.parse(contents);
+                putMangaartEntry(key, art, projectPath, path);
+                return art;
             }
         }
         catch (err)
         {
-            // fall through to scaffold (recovery path)
+            // fall through to load-only (returns in-memory scaffold when no file)
         }
     }
-    mangaartCache = await invoke("mangaart_scaffold", { projectPath, scriptFile: scriptBasename });
-    return mangaartCache;
+    const loaded = await invoke("mangaart_load", { projectPath, scriptFile: scriptBasename });
+    putMangaartEntry(key, loaded, projectPath, path);
+    return loaded;
 }
 
 /**
@@ -465,8 +305,11 @@ export async function loadMangaart(projectPath, scriptBasename)
  */
 export async function saveMangaart(projectPath, scriptBasename)
 {
-    if (mangaartCache === null) return;
-    mangaartCache.updatedAt = new Date().toISOString();
+    const key = "path:" + scriptBasename;
+    const entry = mangaartCache.get(key);
+    if (!entry) return;
+    entry.art.updatedAt = new Date().toISOString();
+    entry.updatedAt = Date.now();
     const path = await resolveArtPath(projectPath, scriptBasename);
     if (!path)
     {
@@ -477,16 +320,22 @@ export async function saveMangaart(projectPath, scriptBasename)
         );
         return;
     }
+    entry.resolvedPath = path;
     await invoke("atomic_write_project_file", {
         path,
-        contents: JSON.stringify(mangaartCache, null, 2),
+        contents: JSON.stringify(entry.art, null, 2),
     });
+    entry.dirty = false;
 }
 
 /**
  * UUID-first mangaart load. Address the .mangaart file by the script's
  * registry UUID rather than by its project-relative path. Rename/move can't
  * desynchronise the mapping because the UUID never changes.
+ *
+ * Load-only: returns an in-memory empty scaffold when nothing is on disk —
+ * does NOT create the `.mangaart` file. The physical file only lands on
+ * first save via {@link saveMangaartByUuid}.
  *
  * @param {string} projectPath
  * @param {string} uuid       — script's registry UUID
@@ -495,6 +344,19 @@ export async function saveMangaart(projectPath, scriptBasename)
  */
 export async function loadMangaartByUuid(projectPath, uuid, displayName)
 {
+    const key = fileKey(uuid);
+    // Reuse the cached entry when we've already loaded this file this
+    // session. Phase-1 behaviour change vs. the old scalar: switching
+    // files no longer forces a re-read from disk because entries survive
+    // per-key. Correct because every write path also goes through the
+    // Map. TODO(phase2): aggregate view can call clearMangaartCacheEntry
+    // for LRU trim on file-close.
+    const cached = mangaartCache.get(key);
+    if (cached && cached.projectPath === projectPath)
+    {
+        mangaartActiveKey = key;
+        return cached.art;
+    }
     const path = await invoke("mangaart_resolve_by_uuid", { projectPath, uuid });
     if (path)
     {
@@ -503,21 +365,23 @@ export async function loadMangaartByUuid(projectPath, uuid, displayName)
             const contents = await invoke("read_project_file", { path });
             if (contents)
             {
-                mangaartCache = JSON.parse(contents);
-                return mangaartCache;
+                const art = JSON.parse(contents);
+                putMangaartEntry(key, art, projectPath, path);
+                return art;
             }
         }
         catch (_err)
         {
-            // fall through to scaffold (crash-after-write recovery)
+            // fall through to load-only (returns in-memory scaffold when no file)
         }
     }
-    mangaartCache = await invoke("mangaart_scaffold_by_uuid", {
+    const loaded = await invoke("mangaart_load_by_uuid", {
         projectPath,
         uuid,
         displayName: displayName ?? null,
     });
-    return mangaartCache;
+    putMangaartEntry(key, loaded, projectPath, path);
+    return loaded;
 }
 
 /**
@@ -530,8 +394,11 @@ export async function loadMangaartByUuid(projectPath, uuid, displayName)
  */
 export async function saveMangaartByUuid(projectPath, uuid)
 {
-    if (mangaartCache === null) return;
-    mangaartCache.updatedAt = new Date().toISOString();
+    const key = fileKey(uuid);
+    const entry = mangaartCache.get(key);
+    if (!entry) return;
+    entry.art.updatedAt = new Date().toISOString();
+    entry.updatedAt = Date.now();
     const path = await invoke("mangaart_resolve_by_uuid", { projectPath, uuid });
     if (!path)
     {
@@ -549,10 +416,12 @@ export async function saveMangaartByUuid(projectPath, uuid)
         console.warn("saveMangaartByUuid: could not resolve path for", uuid);
         return;
     }
+    entry.resolvedPath = resolved;
     await invoke("atomic_write_project_file", {
         path: resolved,
-        contents: JSON.stringify(mangaartCache, null, 2),
+        contents: JSON.stringify(entry.art, null, 2),
     });
+    entry.dirty = false;
 }
 
 /**
@@ -563,17 +432,22 @@ export async function saveMangaartByUuid(projectPath, uuid)
  */
 export function updateMangaartPage(pageIndex, drawing)
 {
-    if (mangaartCache === null) return;
-    if (!Array.isArray(mangaartCache.pages)) mangaartCache.pages = [];
-    const existing = mangaartCache.pages.find((p) => p.index === pageIndex);
+    if (!mangaartActiveKey) return;
+    const entry = mangaartCache.get(mangaartActiveKey);
+    if (!entry) return;
+    const art = entry.art;
+    if (!Array.isArray(art.pages)) art.pages = [];
+    const existing = art.pages.find((p) => p.index === pageIndex);
     if (existing)
     {
         existing.drawing = drawing;
     }
     else
     {
-        mangaartCache.pages.push({ index: pageIndex, drawing, preview: null });
+        art.pages.push({ index: pageIndex, drawing, preview: null });
     }
+    entry.dirty = true;
+    entry.updatedAt = Date.now();
 }
 
 /**
@@ -582,7 +456,21 @@ export function updateMangaartPage(pageIndex, drawing)
  */
 export function clearMangaartCache()
 {
-    mangaartCache = null;
+    mangaartCache.clear();
+    mangaartActiveKey = null;
+}
+
+/**
+ * Drop a single mangaart cache entry by its namespaced key
+ * (`"file:<uuid>"` or `"folder:<uuid>"`). Used by aggregate-view LRU trim
+ * and by folder revert-to-default. No-op when the key is absent.
+ * @param {string} key
+ * @returns {void}
+ */
+export function clearMangaartCacheEntry(key)
+{
+    mangaartCache.delete(key);
+    if (mangaartActiveKey === key) mangaartActiveKey = null;
 }
 
 /**
@@ -600,18 +488,128 @@ export async function eraseMangaart(projectPath, uuid)
 }
 
 /**
- * Read-only access to the in-memory .mangaart cache for the active project.
- * Returns null when no project is open.
+ * Read-only access to the in-memory .mangaart cache entry for the most
+ * recently loaded/mutated artifact (the "active" one). Returns the raw
+ * `art` JSON blob so external callers see the same shape they saw before
+ * the scalar→Map refactor.
+ *
+ * @deprecated Prefer {@link getMangaartCacheByKey} — capturing the entry
+ * by explicit key at schedule time eliminates the race window where a
+ * scheduled save reads the wrong entry after the user switches files
+ * during the debounce window.
  * @returns {object | null}
  */
 export function getMangaartCache()
 {
-    return mangaartCache;
+    if (!mangaartActiveKey) return null;
+    const entry = mangaartCache.get(mangaartActiveKey);
+    return entry ? entry.art : null;
+}
+
+/**
+ * Look up a cached mangaart entry by its namespaced key
+ * (`"file:<uuid>"` or `"folder:<uuid>"`). Returns null when the key is
+ * absent. The returned `art` reference is live — mutations propagate.
+ * @param {string} key
+ * @returns {MangaartCacheEntry | null}
+ */
+export function getMangaartCacheByKey(key)
+{
+    return mangaartCache.get(key) || null;
+}
+
+/**
+ * Load (or scaffold) a folder-scoped mangaart artifact into the cache
+ * under `"folder:<uuid>"`. Mirror of {@link loadMangaartByUuid}.
+ * No caller yet — used by the aggregate view when wired in.
+ *
+ * @param {string} projectPath
+ * @param {string} folderUuid
+ * @param {string} [displayName] — unused today; kept for signature parity.
+ * @returns {Promise<object | null>}
+ */
+// eslint-disable-next-line no-unused-vars
+export async function loadMangaartForFolder(projectPath, folderUuid, displayName)
+{
+    const key = folderKey(folderUuid);
+    const cached = mangaartCache.get(key);
+    if (cached && cached.projectPath === projectPath)
+    {
+        mangaartActiveKey = key;
+        return cached.art;
+    }
+    const path = await mangaartResolveByFolderUuid(projectPath, folderUuid);
+    if (!path)
+    {
+        console.warn("loadMangaartForFolder: resolver returned null for", folderUuid);
+        return null;
+    }
+    try
+    {
+        const contents = await invoke("read_project_file", { path });
+        if (contents)
+        {
+            const art = JSON.parse(contents);
+            putMangaartEntry(key, art, projectPath, path);
+            return art;
+        }
+    }
+    catch (_err)
+    {
+        // File may not exist yet — folder-level mangaart is created on
+        // first draw. Seed an empty entry so subsequent updateMangaartPage
+        // + saveMangaartForFolder land in a well-formed shape.
+    }
+    const seeded = { pages: [], updatedAt: new Date().toISOString() };
+    putMangaartEntry(key, seeded, projectPath, path);
+    return seeded;
+}
+
+/**
+ * Persist a folder-scoped mangaart entry. Mirror of {@link saveMangaartByUuid}.
+ * No caller yet — used by the aggregate view when wired in.
+ *
+ * @param {string} projectPath
+ * @param {string} folderUuid
+ * @returns {Promise<void>}
+ */
+export async function saveMangaartForFolder(projectPath, folderUuid)
+{
+    const key = folderKey(folderUuid);
+    const entry = mangaartCache.get(key);
+    if (!entry) return;
+    entry.art.updatedAt = new Date().toISOString();
+    entry.updatedAt = Date.now();
+    const path = entry.resolvedPath
+        || (await mangaartResolveByFolderUuid(projectPath, folderUuid));
+    if (!path)
+    {
+        console.warn("saveMangaartForFolder: could not resolve path for", folderUuid);
+        return;
+    }
+    entry.resolvedPath = path;
+    await invoke("atomic_write_project_file", {
+        path,
+        contents: JSON.stringify(entry.art, null, 2),
+    });
+    entry.dirty = false;
 }
 
 /**
  * Save meta.json for the project. Path mirrors the Rust nested layout:
  * `<projectPath>/_mangaplaystudio/meta.json`.
+ *
+ * Team tier only. Persistent slice-of-life state (`viewMode`, `lastSoloMode`,
+ * `expandedFolders`, `aggregateHeights`, `heightsCacheGeneration`,
+ * `lastOpened`) lives in the OS user-settings tier under
+ * `projectSessions[uuid]` — those keys are stripped here defensively in
+ * case a stale in-memory meta reference still carries them across the
+ * migration boundary.
+ *
+ * Sparse-field rule: `folderTypes` is only written when non-empty. An empty
+ * `{}` is stripped from the serialised body so meta.json diffs stay quiet
+ * for projects that never opted into folder-typing.
+ *
  * @param {string} projectPath
  * @param {object} meta
  * @returns {Promise<void>}
@@ -622,31 +620,56 @@ export async function saveMeta(projectPath, meta) {
         ...meta,
         savedAt: new Date().toISOString(),
     };
+    // Slice-of-life keys live in per-user projectSessions[uuid] now — strip
+    // them defensively in case a stale in-memory meta reference still carries
+    // them across the migration boundary.
+    delete payload.viewMode;
+    delete payload.lastSoloMode;
+    delete payload.expandedFolders;
+    delete payload.aggregateHeights;
+    delete payload.heightsCacheGeneration;
+    delete payload.lastOpened;
+    // folderTypes: sparse — drop empty maps so meta.json stays clean.
+    if (payload.folderTypes && typeof payload.folderTypes === "object"
+        && Object.keys(payload.folderTypes).length === 0)
+    {
+        delete payload.folderTypes;
+    }
     await invoke("atomic_write_project_file", {
         path: metaPath,
         contents: JSON.stringify(payload, null, 2),
     });
 }
 
-// ── session.json ─────────────────────────────────────────────────────────
+// ── Folder types ─────────────────────────────────────────────────────────
+// Extracted to folder-types.js (getFolderType / setFolderType). Re-exported
+// so the shell + explorer importers keep resolving them from project.js.
+export { getFolderType, setFolderType } from "./folder-types.js";
+
+
+// ── session (per-user, keyed by project UUID) ────────────────────────────
 //
-// Per-project state that should survive a file-swap but not a project close.
-// Lives at `<projectPath>/_mangaplaystudio/settings/session.json`. Schema v1:
+// Per-project state that survives a file-swap. Lives inside the OS
+// user-settings.json under `projectSessions[<project.json.id>]`, NOT in the
+// project's `_mangaplaystudio/` folder. Renaming/moving the project folder
+// preserves this state because the UUID never changes; two SVN checkouts
+// of the same project on the same machine intentionally share it.
+//
+// Shape (all fields optional; missing keys treated as defaults):
 //   {
-//       "version": 1,
-//       "lastPageIndex": { "<scriptBasename>": <number>, ... }
+//       lastPageIndex: { "<scriptBasename>": <number>, ... },
+//       openTabs:     [ { id, path, fileUuid } ],
+//       activeTabId:  string | null,
+//       aggregateSession: { folderUuid, focusedFileUuid, scrollTop } | absent,
+//       viewMode, lastSoloMode, expandedFolders, aggregateHeights,
+//       heightsCacheGeneration, lastOpened
 //   }
-// Keys are the file basename WITH the `.mangaplay.md` suffix stripped to
-// match how mangaart files are named (one session entry per storyboard).
 // Errors are swallowed — session state is best-effort, never blocking.
 
-/** @type {Map<string, object>} */
+/** @type {Map<string, string>} projectPath → project UUID. */
+const projectUuidCache = new Map();
+/** @type {Map<string, object>} projectPath → parsed session entry (cached in memory for spam-write coalescing). */
 const sessionCache = new Map();
-
-function sessionPath(projectPath)
-{
-    return `${projectPath}/_mangaplaystudio/settings/session.json`;
-}
 
 function sessionKey(scriptBasename)
 {
@@ -654,24 +677,58 @@ function sessionKey(scriptBasename)
 }
 
 /**
- * Load (or initialise) session.json for a project. Cached per projectPath.
+ * Resolve the project's UUID (`project.json.id`) from an absolute path.
+ * Cached per projectPath because the UUID is stable for the lifetime of
+ * the folder. Returns `null` when the file is missing or malformed —
+ * callers treat null as "session state unavailable, no-op".
  * @param {string} projectPath
- * @returns {Promise<{ version: number, lastPageIndex: Record<string, number>, openTabs?: Array<{ id: string, path: string|null }>, activeTabId?: string|null }>}
+ * @returns {Promise<string | null>}
+ */
+export async function resolveProjectUuid(projectPath)
+{
+    if (!projectPath) return null;
+    if (projectUuidCache.has(projectPath))
+    {
+        return /** @type {string} */ (projectUuidCache.get(projectPath));
+    }
+    try
+    {
+        const pj = await loadProjectJson(projectPath);
+        const id = typeof pj.id === "string" && pj.id.length > 0 ? pj.id : null;
+        if (id) projectUuidCache.set(projectPath, id);
+        return id;
+    }
+    catch (_)
+    {
+        return null;
+    }
+}
+
+/**
+ * Load (or initialise) the per-project session entry from user-settings.
+ * Cached per projectPath. Returns validated shape — the same coerced keys
+ * as the legacy on-disk session.json for source-level continuity, plus the
+ * moved-from-meta keys (`viewMode`, `lastSoloMode`, `expandedFolders`,
+ * `aggregateHeights`, `heightsCacheGeneration`, `lastOpened`).
+ *
+ * @param {string} projectPath
+ * @returns {Promise<{ version: number, lastPageIndex: Record<string, number>, openTabs: Array<{ id: string, path: string|null, fileUuid: string|null }>, activeTabId: string|null, [k: string]: any }>}
  */
 export async function loadSession(projectPath)
 {
     if (sessionCache.has(projectPath)) return sessionCache.get(projectPath);
-    /** @type {{ version: number, lastPageIndex: Record<string, number>, openTabs: Array<{ id: string, path: string|null }>, activeTabId: string|null }} */
+    /** @type {{ version: number, lastPageIndex: Record<string, number>, openTabs: Array<{ id: string, path: string|null, fileUuid: string|null }>, activeTabId: string|null, [k: string]: any }} */
     let parsed = { version: 1, lastPageIndex: {}, openTabs: [], activeTabId: null };
     try
     {
-        const raw = await invoke("read_project_file", { path: sessionPath(projectPath) });
-        if (raw)
+        const uuid = await resolveProjectUuid(projectPath);
+        if (uuid)
         {
-            const data = JSON.parse(raw);
+            const { getProjectSession } = await import("./user-settings.js");
+            const data = getProjectSession(uuid);
             if (data && typeof data === "object")
             {
-                parsed = {
+                const validated = {
                     version: 1,
                     lastPageIndex: (data.lastPageIndex && typeof data.lastPageIndex === "object")
                         ? data.lastPageIndex
@@ -679,19 +736,21 @@ export async function loadSession(projectPath)
                     openTabs: Array.isArray(data.openTabs) ? data.openTabs : [],
                     activeTabId: (typeof data.activeTabId === "string") ? data.activeTabId : null
                 };
+                parsed = { ...data, ...validated };
             }
         }
     }
     catch
     {
-        // File missing or unreadable — start from the default.
+        // Missing UUID or user-settings unavailable — start from the default.
     }
     sessionCache.set(projectPath, parsed);
     return parsed;
 }
 
 /**
- * Write the in-memory session.json back to disk. Idempotent; safe to spam.
+ * Write the in-memory session entry back to user-settings. Idempotent;
+ * safe to spam. No-op if the project UUID cannot be resolved.
  * @param {string} projectPath
  */
 export async function saveSession(projectPath)
@@ -700,15 +759,149 @@ export async function saveSession(projectPath)
     if (!data) return;
     try
     {
-        await invoke("atomic_write_project_file", {
-            path: sessionPath(projectPath),
-            contents: JSON.stringify(data, null, 2)
-        });
+        const uuid = await resolveProjectUuid(projectPath);
+        if (!uuid) return;
+        const { saveProjectSession } = await import("./user-settings.js");
+        // saveSession owns lastPageIndex + openTabs + activeTabId only.
+        // Other slice-of-life keys (expandedFolders, aggregateHeights,
+        // heightsCacheGeneration, storyboardDisplay) are written directly
+        // by their owners via saveProjectSession. Writing the whole
+        // sessionCache back would clobber those fields with stale values
+        // (sessionCache is populated once on project open and never
+        // reconciled with direct writes) — see the bug where collapsing
+        // folders + opening a root file re-expanded them because the
+        // stale expandedFolders snapshot got flushed by setLastPageIndex.
+        const patch = /** @type {Record<string, any>} */ ({});
+        if (data.lastPageIndex && typeof data.lastPageIndex === "object")
+        {
+            patch.lastPageIndex = data.lastPageIndex;
+        }
+        if (Array.isArray(data.openTabs)) patch.openTabs = data.openTabs;
+        if (typeof data.activeTabId === "string" || data.activeTabId === null)
+        {
+            patch.activeTabId = data.activeTabId;
+        }
+        await saveProjectSession(uuid, patch);
     }
     catch (err)
     {
         console.warn("[session] save failed:", err);
     }
+}
+
+/**
+ * One-shot migration on project open. Copies legacy
+ * `_mangaplaystudio/settings/session.json` + slice-of-life keys from
+ * `_mangaplaystudio/meta.json` into user-settings' `projectSessions[uuid]`,
+ * then slims meta.json + deletes the legacy session file / settings dir.
+ * Idempotent — no-op when both inputs are already empty.
+ *
+ * @param {string} projectPath
+ * @param {string} projectUuid
+ * @param {Record<string, any>} metaFromRust  — meta.json content as returned by project_open
+ * @returns {Promise<void>}
+ */
+async function migrateProjectSessionFromDisk(projectPath, projectUuid, metaFromRust)
+{
+    const legacySessionPath = `${projectPath}/_mangaplaystudio/settings/session.json`;
+    const legacyDirPath = `${projectPath}/_mangaplaystudio/settings`;
+    const metaPath = `${projectPath}/_mangaplaystudio/meta.json`;
+
+    // ── Read legacy session.json (may be absent). ──
+    /** @type {Record<string, any>} */
+    let legacySession = {};
+    try
+    {
+        const raw = await invoke("read_project_file", { path: legacySessionPath });
+        if (raw)
+        {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === "object") legacySession = parsed;
+        }
+    }
+    catch (_) { /* absent — expected after migration */ }
+
+    // ── Extract slice-of-life keys from meta. ──
+    const SLICE_KEYS = [
+        "viewMode", "lastSoloMode", "expandedFolders",
+        "aggregateHeights", "heightsCacheGeneration", "lastOpened",
+    ];
+    /** @type {Record<string, any>} */
+    const metaSlice = {};
+    if (metaFromRust && typeof metaFromRust === "object")
+    {
+        for (const k of SLICE_KEYS)
+        {
+            if (Object.prototype.hasOwnProperty.call(metaFromRust, k))
+            {
+                metaSlice[k] = metaFromRust[k];
+            }
+        }
+    }
+
+    const hasLegacySession = Object.keys(legacySession).length > 0;
+    const hasMetaSlice = Object.keys(metaSlice).length > 0;
+
+    // ── Fast-exit when there's nothing to migrate. ──
+    if (!hasLegacySession && !hasMetaSlice) return;
+
+    // ── Merge into projectSessions[uuid]. ──
+    const payload = { ...legacySession, ...metaSlice };
+    // Drop the legacy `version` key — user-settings tier doesn't need it.
+    delete payload.version;
+
+    try
+    {
+        const userSettings = await import("./user-settings.js");
+        // Migration runs during project open, which itself may fire before
+        // boot has awaited loadUserSettings() in headless / test paths.
+        // Skip silently — the next open after loadUserSettings will retry.
+        try { userSettings.getUserSetting("format"); }
+        catch (_) { return; }
+        await userSettings.saveProjectSession(projectUuid, payload);
+    }
+    catch (e)
+    {
+        console.warn("[session] saveProjectSession during migration failed:", e);
+        return;
+    }
+
+    // ── Slim meta.json: strip slice-of-life keys, keep team keys. ──
+    if (hasMetaSlice && metaFromRust && typeof metaFromRust === "object")
+    {
+        /** @type {Record<string, any>} */
+        const slim = {};
+        if (typeof metaFromRust.savedAt === "string") slim.savedAt = metaFromRust.savedAt;
+        if (metaFromRust.folderTypes && typeof metaFromRust.folderTypes === "object"
+            && Object.keys(metaFromRust.folderTypes).length > 0)
+        {
+            slim.folderTypes = metaFromRust.folderTypes;
+        }
+        slim.savedAt = new Date().toISOString();
+        try
+        {
+            await invoke("atomic_write_project_file", {
+                path: metaPath,
+                contents: JSON.stringify(slim, null, 2),
+            });
+            // Mutate the caller's meta reference so callers reading
+            // `state.currentProject.meta` don't see stale slice-of-life keys.
+            for (const k of SLICE_KEYS)
+            {
+                delete /** @type {any} */ (metaFromRust)[k];
+            }
+        }
+        catch (e)
+        {
+            console.warn("[session] meta slim write failed:", e);
+        }
+    }
+
+    // ── Delete legacy session.json + settings/ dir (best-effort). ──
+    try { await invoke("app_internal_remove_project_file", { path: legacySessionPath }); }
+    catch (_) { /* already gone / not a file */ }
+    try { await invoke("app_internal_remove_empty_project_dir", { path: legacyDirPath }); }
+    catch (_) { /* dir may still contain fold-state.json etc. — leave it */ }
 }
 
 /**
@@ -783,6 +976,68 @@ export async function setTabSnapshot(projectPath, snap)
     await saveSession(projectPath);
 }
 
+// ── aggregateSession ──────────────────────────────────────────────────────
+//
+// The aggregate view persists a small tuple to session.json so restore
+// can re-mount the same folder + focused file + scroll position across
+// close/reopen. Sparse: `null` while no aggregate is mounted so single-
+// file sessions never see the key at all. `historySnapshots` is NOT
+// persisted — undo across a close/reopen is scoped to the single-file
+// behaviour we already have, which is "empty history on reopen."
+//
+// Shape: { folderUuid, focusedFileUuid, scrollTop } | null.
+
+/**
+ * Read the persisted aggregate session for a project, or null when absent
+ * / malformed. loadSession's spread preserves the on-disk value even when
+ * this reader isn't called — the reader is here so consumers get a
+ * validated, coerced object shape.
+ * @param {string} projectPath
+ * @returns {Promise<{ folderUuid: string, focusedFileUuid: string, scrollTop: number } | null>}
+ */
+export async function getAggregateSession(projectPath)
+{
+    const data = await loadSession(projectPath);
+    const raw = /** @type {any} */ (data).aggregateSession;
+    if (!raw || typeof raw !== "object") return null;
+    if (typeof raw.folderUuid !== "string" || raw.folderUuid.length === 0) return null;
+    if (typeof raw.focusedFileUuid !== "string" || raw.focusedFileUuid.length === 0) return null;
+    const st = Number(raw.scrollTop);
+    return {
+        folderUuid: raw.folderUuid,
+        focusedFileUuid: raw.focusedFileUuid,
+        scrollTop: Number.isFinite(st) ? st : 0,
+    };
+}
+
+/**
+ * Write the aggregate session for a project. Pass `null` to CLEAR the
+ * entry (rather than write `null` — the loader treats absent/null the
+ * same on read, but the writer strips it so meta diffs stay quiet).
+ *
+ * @param {string} projectPath
+ * @param {{ folderUuid: string, focusedFileUuid: string, scrollTop: number } | null} session
+ */
+export async function setAggregateSession(projectPath, session)
+{
+    const data = await loadSession(projectPath);
+    /** @type {any} */
+    const d = data;
+    if (session === null || session === undefined)
+    {
+        delete d.aggregateSession;
+    }
+    else
+    {
+        d.aggregateSession = {
+            folderUuid: String(session.folderUuid),
+            focusedFileUuid: String(session.focusedFileUuid),
+            scrollTop: Number.isFinite(session.scrollTop) ? Number(session.scrollTop) : 0,
+        };
+    }
+    await saveSession(projectPath);
+}
+
 /**
  * Drop the cached session for a project — call when a project closes so
  * the next openProject reloads from disk.
@@ -802,8 +1057,6 @@ export function clearSessionCache(projectPath)
  *
  * Boot MUST NOT fail on migration errors: everything is wrapped in a
  * try/catch and downgraded to `console.warn`.
- *
- * See TODO/uuid-file-registry.md Part 5.
  *
  * @param {string} projectPath
  * @returns {Promise<void>}
@@ -944,6 +1197,12 @@ export async function listProjectTree(projectPath) {
  */
 const projectJsonCache = new Map();
 
+// Shared with google-docs-sync-store.js (extracted sibling). The store must
+// mutate the SAME cache instance + reach the SAME invoke dispatcher this
+// module owns, so both are re-exported under `_`-prefixed internal names.
+export { projectJsonCache as _projectJsonCache };
+export const _invokeForSyncStore = invoke;
+
 /**
  * Path to `<projectPath>/_mangaplaystudio/project.json`. Mirrors the Rust
  * `project_json_path` helper in lib.rs.
@@ -960,7 +1219,7 @@ function projectJsonPath(projectPath)
  * @param {string} projectPath
  * @returns {Promise<Record<string, any>>}
  */
-async function loadProjectJson(projectPath)
+export async function loadProjectJson(projectPath)
 {
     if (projectJsonCache.has(projectPath))
     {
@@ -989,7 +1248,7 @@ async function loadProjectJson(projectPath)
  * Persist the in-memory project.json cache via atomic write. Idempotent.
  * @param {string} projectPath
  */
-async function saveProjectJson(projectPath)
+export async function saveProjectJson(projectPath)
 {
     const data = projectJsonCache.get(projectPath);
     if (!data) return;
@@ -1021,262 +1280,18 @@ async function saveProjectJson(projectPath)
  * @property {"mangaplay"|"fountain"|"text"} format
  */
 
-/**
- * UUID v4 shape — 8-4-4-4-12 hex with version nibble '4' at position 14.
- * Used to distinguish UUID-keyed entries from legacy relpath-keyed entries
- * in `googleDocsSync`.
- * @param {string} s
- */
-function isUuidV4Shape(s)
-{
-    return typeof s === "string"
-        && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
-}
+// ── googleDocsSync store ─────────────────────────────────────────────────
+// The googleDocsSync map read/write helpers live in google-docs-sync-store.js
+// (a sibling that imports loadProjectJson/saveProjectJson back from here).
+// Re-exported so external importers still resolve them from project.js.
+export {
+    getOrMintScriptUuid,
+    getSyncEntry,
+    setSyncEntry,
+    removeSyncEntry,
+    migrateLegacySyncEntries,
+} from "./google-docs-sync-store.js";
 
-/**
- * Mint (or fetch) the durable UUID for a script. Calls Rust under the
- * per-project mutex, then replaces the JS-side project.json cache with the
- * returned body so subsequent reads see the new state without a re-read.
- *
- * @param {string} projectPath
- * @param {string} scriptRelPath  — forward-slash path relative to project root
- * @returns {Promise<string|null>}  resolved UUID, or `null` when inputs are blank
- */
-export async function getOrMintScriptUuid(projectPath, scriptRelPath)
-{
-    if (!projectPath || !scriptRelPath) return null;
-    try
-    {
-        const result = await invoke("scriptmap_get_or_mint",
-            { projectPath, scriptRelPath });
-        if (!result || typeof result.uuid !== "string") return null;
-        if (result.projectJson && typeof result.projectJson === "object")
-        {
-            // Rust is authoritative — replace the cache wholesale.
-            projectJsonCache.set(projectPath, result.projectJson);
-        }
-        return result.uuid;
-    }
-    catch (err)
-    {
-        console.warn("[scriptmap] get_or_mint failed:", err);
-        return null;
-    }
-}
-
-/**
- * Read a sync entry for a script. Resolves relpath → UUID via scriptMap
- * (does NOT mint — a never-published script must not gain a UUID just
- * because the UI checked its sync state). Falls back to the legacy
- * relpath-keyed entry when no UUID-keyed entry exists; the boot-time
- * migration pass `migrateLegacySyncEntries` cleans up legacy keys.
- *
- * @param {string} projectPath
- * @param {string} scriptRelPath  — forward-slash path relative to project root
- * @returns {Promise<GoogleDocsSyncEntry | null>}
- */
-export async function getSyncEntry(projectPath, scriptRelPath)
-{
-    if (!projectPath || !scriptRelPath) return null;
-    const pj = await loadProjectJson(projectPath);
-    const map = pj.googleDocsSync;
-    if (!map || typeof map !== "object") return null;
-
-    const scriptMap = (pj.scriptMap && typeof pj.scriptMap === "object")
-        ? pj.scriptMap : null;
-    const uuid = scriptMap && scriptMap[scriptRelPath] && scriptMap[scriptRelPath].uuid;
-    if (uuid && map[uuid] && typeof map[uuid] === "object")
-    {
-        return /** @type {GoogleDocsSyncEntry} */ (map[uuid]);
-    }
-    // Legacy fallback — pre-migration entries keyed by relpath.
-    const legacy = map[scriptRelPath];
-    return legacy && typeof legacy === "object"
-        ? /** @type {GoogleDocsSyncEntry} */ (legacy) : null;
-}
-
-/**
- * Upsert a sync entry, keyed by the script's UUID. Mints a UUID on first
- * call (via Rust under the per-project lock). Persists project.json.
- *
- * Merge semantics: the incoming `entry` is shallow-merged over the prior
- * entry, so writers that only carry a subset of fields (e.g. the sync
- * state machine writing `lastKnownRevisionId` after a push) don't drop
- * long-lived fields (`rootTabId`/`screenplayTabId`) written by other
- * callers. Use `removeSyncEntry` for intentional field-drops.
- * @param {string} projectPath
- * @param {string} scriptRelPath
- * @param {GoogleDocsSyncEntry} entry
- */
-export async function setSyncEntry(projectPath, scriptRelPath, entry)
-{
-    if (!projectPath || !scriptRelPath || !entry) return;
-    const uuid = await getOrMintScriptUuid(projectPath, scriptRelPath);
-    if (!uuid) return;
-    const pj = await loadProjectJson(projectPath);
-    const map = (pj.googleDocsSync && typeof pj.googleDocsSync === "object")
-        ? pj.googleDocsSync
-        : (pj.googleDocsSync = {});
-    const prior = (map[uuid] && typeof map[uuid] === "object") ? map[uuid] : null;
-    map[uuid] = prior ? Object.assign({}, prior, entry) : entry;
-    // Defensive: if a legacy relpath-keyed entry coexists, drop it so the
-    // gear-icon lookup doesn't see two entries pointing at the same script.
-    if (scriptRelPath !== uuid && map[scriptRelPath])
-    {
-        delete map[scriptRelPath];
-    }
-    await saveProjectJson(projectPath);
-}
-
-/**
- * Remove a sync entry. Drops both UUID-keyed and legacy relpath-keyed
- * entries when present. Does NOT remove the underlying scriptMap entry —
- * other features (storyboard art, future caches) may still need the UUID.
- * @param {string} projectPath
- * @param {string} scriptRelPath
- */
-export async function removeSyncEntry(projectPath, scriptRelPath)
-{
-    if (!projectPath || !scriptRelPath) return;
-    const pj = await loadProjectJson(projectPath);
-    const map = pj.googleDocsSync;
-    if (!map || typeof map !== "object") return;
-
-    let mutated = false;
-    const scriptMap = (pj.scriptMap && typeof pj.scriptMap === "object")
-        ? pj.scriptMap : null;
-    const uuid = scriptMap && scriptMap[scriptRelPath] && scriptMap[scriptRelPath].uuid;
-    if (uuid && uuid in map) { delete map[uuid]; mutated = true; }
-    if (scriptRelPath in map) { delete map[scriptRelPath]; mutated = true; }
-    if (mutated) await saveProjectJson(projectPath);
-}
-
-/**
- * One-shot migration of legacy relpath-keyed `googleDocsSync` entries to
- * UUID keys. Run once at project open, BEFORE any `SyncStateMachine`
- * boots, so the gear-icon lookup at activation sees clean state.
- *
- * For each non-UUID key in `googleDocsSync`:
- *   1. If the relpath maps to a known scriptMap entry → mint/get UUID,
- *      move the entry under the UUID key, delete the legacy key.
- *   2. If the relpath is a bare basename, search the project's scriptMap
- *      for a unique basename match — if exactly one matches, treat as (1).
- *   3. Ambiguous or unresolvable → move to `googleDocsSyncOrphans` with a
- *      `reason` field. Never deleted; the user can re-link later.
- *
- * @param {string} projectPath
- * @returns {Promise<{migrated: number, orphaned: number}>}
- */
-export async function migrateLegacySyncEntries(projectPath)
-{
-    if (!projectPath) return { migrated: 0, orphaned: 0 };
-    const pj = await loadProjectJson(projectPath);
-    const map = pj.googleDocsSync;
-    if (!map || typeof map !== "object") return { migrated: 0, orphaned: 0 };
-
-    const scriptMap = (pj.scriptMap && typeof pj.scriptMap === "object")
-        ? pj.scriptMap : {};
-    const artMapScripts = (pj.artMap && pj.artMap.scripts && typeof pj.artMap.scripts === "object")
-        ? pj.artMap.scripts : {};
-
-    // Build a basename → [relpath...] index across BOTH scriptMap and the
-    // legacy artMap so basename-unique-match resolves correctly even when
-    // scriptMap hasn't been populated yet for that script.
-    /** @type {Map<string, string[]>} */
-    const basenameIndex = new Map();
-    const considerRelPath = (rel) => {
-        const idx = rel.lastIndexOf("/");
-        const base = idx < 0 ? rel : rel.slice(idx + 1);
-        const list = basenameIndex.get(base) || [];
-        if (!list.includes(rel)) list.push(rel);
-        basenameIndex.set(base, list);
-    };
-    for (const rel of Object.keys(scriptMap)) considerRelPath(rel);
-    for (const rel of Object.keys(artMapScripts)) considerRelPath(rel);
-
-    let migrated = 0;
-    let orphaned = 0;
-    const orphans = (pj.googleDocsSyncOrphans && typeof pj.googleDocsSyncOrphans === "object")
-        ? pj.googleDocsSyncOrphans
-        : null;
-
-    const ensureOrphans = () => {
-        if (!pj.googleDocsSyncOrphans || typeof pj.googleDocsSyncOrphans !== "object")
-        {
-            pj.googleDocsSyncOrphans = {};
-        }
-        return pj.googleDocsSyncOrphans;
-    };
-
-    for (const key of Object.keys(map))
-    {
-        if (isUuidV4Shape(key)) continue;
-        const entry = map[key];
-        if (!entry || typeof entry !== "object") continue;
-
-        // Resolve the legacy key to a real script relpath.
-        /** @type {string|null} */
-        let resolvedRel = null;
-        if (key in scriptMap || key in artMapScripts)
-        {
-            resolvedRel = key;
-        }
-        else if (!key.includes("/"))
-        {
-            const candidates = basenameIndex.get(key) || [];
-            if (candidates.length === 1) resolvedRel = candidates[0];
-            else if (candidates.length > 1)
-            {
-                ensureOrphans()[key] = Object.assign({}, entry,
-                    { reason: "ambiguous-basename", candidates });
-                delete map[key];
-                orphaned++;
-                continue;
-            }
-        }
-
-        if (!resolvedRel)
-        {
-            ensureOrphans()[key] = Object.assign({}, entry,
-                { reason: "no-matching-script" });
-            delete map[key];
-            orphaned++;
-            continue;
-        }
-
-        const uuid = await getOrMintScriptUuid(projectPath, resolvedRel);
-        if (!uuid)
-        {
-            ensureOrphans()[key] = Object.assign({}, entry,
-                { reason: "mint-failed", resolvedRel });
-            delete map[key];
-            orphaned++;
-            continue;
-        }
-        // getOrMintScriptUuid replaced our cached pj with the Rust body —
-        // re-grab the live cache reference so subsequent mutations land
-        // on the right object.
-        const live = await loadProjectJson(projectPath);
-        const liveMap = live.googleDocsSync || (live.googleDocsSync = {});
-        liveMap[uuid] = entry;
-        if (key !== uuid) delete liveMap[key];
-        migrated++;
-    }
-
-    if (migrated > 0 || orphaned > 0)
-    {
-        await saveProjectJson(projectPath);
-        console.info(
-            `[scriptmap:migrate] ${projectPath} — migrated ${migrated}, orphaned ${orphaned}`,
-        );
-        if (orphans)
-        {
-            // Was already non-empty before this run — surface to the user
-            // eventually via the Settings panel. v1: console-only.
-        }
-    }
-    return { migrated, orphaned };
-}
 
 /** Test-only — reset the in-memory project.json cache. */
 export function _resetProjectJsonCacheForTest()
@@ -1331,6 +1346,17 @@ export async function removeRecent(projectPath) {
     return invoke("app_remove_recent", { projectPath });
 }
 
+/**
+ * Delete a project: move the folder to Trash (or hard-delete on mobile),
+ * scrub the recent-projects list, and drop the project's session state.
+ * @param {string} projectPath
+ * @returns {Promise<void>}
+ */
+export async function deleteProject(projectPath)
+{
+    return invoke("app_delete_project", { projectPath });
+}
+
 /** @returns {Promise<boolean>} */
 export async function shouldAutoResume() {
     try { return !!(await invoke("app_should_auto_resume")); }
@@ -1350,6 +1376,18 @@ export async function shouldForceOnboarding() {
  */
 export async function renameProject(projectPath, displayName, scope) {
     return invoke("app_rename_project", { projectPath, displayName, scope });
+}
+
+/**
+ * Rename a project's local display name (per-machine displayNameOverride in
+ * recent.json). Pass `displayName: null` to clear the override.
+ * @param {string} projectPath
+ * @param {string|null} displayName
+ * @returns {Promise<void>}
+ */
+export async function renameProjectLocal(projectPath, displayName)
+{
+    return invoke("app_rename_project", { projectPath, displayName, scope: "local" });
 }
 
 /**
@@ -1389,8 +1427,19 @@ export async function pickProjectFolder() {
  * Create a new project inside the given parent folder, returning its full path.
  * @param {string} parentPath
  * @param {string} name
+ * @param {boolean} [asSubFolder=true] — when false, use parentPath itself as the project root
+ * @param {{ displayName?: string, description?: string, locked?: boolean }} [opts]
  * @returns {Promise<string>}
  */
-export async function createNewProject(parentPath, name) {
-    return invoke("project_create_new", { path: parentPath, name });
+export async function createNewProject(parentPath, name, asSubFolder = true, opts = {})
+{
+    return invoke("project_create_new",
+    {
+        path: parentPath,
+        name,
+        asSubFolder,
+        displayName: opts.displayName,
+        description: opts.description,
+        locked: opts.locked,
+    });
 }

@@ -18,6 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::commands::project::app_dir;
+use crate::commands::slides_validation::{validate_opaque, validate_slug};
 
 /// One lease record — serialised as JSON. `acquired_at` / `expires_at` are
 /// unix-millis timestamps.
@@ -49,25 +50,12 @@ pub struct LockResult
 
 fn validate_presentation_id(id: &str) -> Result<(), String>
 {
-    if id.is_empty()
-        || id.len() > 200
-        || id.contains('/')
-        || id.contains('\\')
-        || id.contains("..")
-        || id.contains('\0')
-    {
-        return Err("bad-presentation-id".into());
-    }
-    Ok(())
+    validate_slug(id, "bad-presentation-id", 200)
 }
 
 fn validate_holder_id(id: &str) -> Result<(), String>
 {
-    if id.is_empty() || id.len() > 200 || id.contains('\0')
-    {
-        return Err("bad-holder-id".into());
-    }
-    Ok(())
+    validate_opaque(id, "bad-holder-id", 200)
 }
 
 fn lock_dir(project_dir: &Path) -> PathBuf
@@ -228,6 +216,11 @@ pub async fn slides_publish_lock_release(
     release_impl(&project_path, &presentation_id, &holder_id)
 }
 
+/// Registered but currently unused from bundled JS — the publish flow
+/// relies on TTL expiry (5-minute default per this module) for lease
+/// reclaim, so no periodic heartbeat is needed today. Left wired so a
+/// long-running publish can be upgraded to periodic heartbeats without a
+/// Rust release.
 #[tauri::command]
 pub async fn slides_publish_lock_heartbeat(
     project_path: String,
@@ -242,108 +235,5 @@ pub async fn slides_publish_lock_heartbeat(
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests
-{
-    use super::*;
-    use tempfile::TempDir;
-
-    fn make_project() -> TempDir
-    {
-        let td = TempDir::new().unwrap();
-        std::fs::create_dir_all(app_dir(td.path())).unwrap();
-        td
-    }
-
-    #[test]
-    fn acquire_then_release()
-    {
-        let td = make_project();
-        let pp = td.path().to_str().unwrap();
-        let r = acquire_impl(pp, "PRES1", "holder-A", 60_000).unwrap();
-        assert!(r.ok);
-        let released = release_impl(pp, "PRES1", "holder-A").unwrap();
-        assert!(released);
-    }
-
-    #[test]
-    fn contested_acquire_returns_held_by()
-    {
-        let td = make_project();
-        let pp = td.path().to_str().unwrap();
-        let _ = acquire_impl(pp, "PRES1", "holder-A", 60_000).unwrap();
-        let r = acquire_impl(pp, "PRES1", "holder-B", 60_000).unwrap();
-        assert!(!r.ok);
-        assert_eq!(r.held_by.as_ref().unwrap().holder_id, "holder-A");
-        assert!(r.expires_in_ms.unwrap() > 0);
-    }
-
-    #[test]
-    fn same_holder_reacquire_succeeds()
-    {
-        let td = make_project();
-        let pp = td.path().to_str().unwrap();
-        let _ = acquire_impl(pp, "PRES1", "holder-A", 60_000).unwrap();
-        // Re-acquire from same holder → allowed (refresh).
-        let r = acquire_impl(pp, "PRES1", "holder-A", 60_000).unwrap();
-        assert!(r.ok);
-    }
-
-    #[test]
-    fn expired_lease_can_be_taken_over()
-    {
-        let td = make_project();
-        let pp = td.path().to_str().unwrap();
-        // ttl=0 → expires_at == acquired_at → contested check `> now` fails.
-        let _ = acquire_impl(pp, "PRES1", "holder-A", 0).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let r = acquire_impl(pp, "PRES1", "holder-B", 60_000).unwrap();
-        assert!(r.ok);
-    }
-
-    #[test]
-    fn release_wrong_holder_is_noop()
-    {
-        let td = make_project();
-        let pp = td.path().to_str().unwrap();
-        let _ = acquire_impl(pp, "PRES1", "holder-A", 60_000).unwrap();
-        let ok = release_impl(pp, "PRES1", "holder-B").unwrap();
-        assert!(!ok, "wrong holder must not free the live lease");
-        // Lease still present.
-        assert!(read_lease(td.path(), "PRES1").is_some());
-    }
-
-    #[test]
-    fn heartbeat_extends_ttl()
-    {
-        let td = make_project();
-        let pp = td.path().to_str().unwrap();
-        let _ = acquire_impl(pp, "PRES1", "holder-A", 100).unwrap();
-        let first = read_lease(td.path(), "PRES1").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        let ok = heartbeat_impl(pp, "PRES1", "holder-A", 60_000).unwrap();
-        assert!(ok);
-        let after = read_lease(td.path(), "PRES1").unwrap();
-        assert!(after.expires_at > first.expires_at);
-    }
-
-    #[test]
-    fn heartbeat_wrong_holder_returns_false()
-    {
-        let td = make_project();
-        let pp = td.path().to_str().unwrap();
-        let _ = acquire_impl(pp, "PRES1", "holder-A", 60_000).unwrap();
-        let ok = heartbeat_impl(pp, "PRES1", "holder-B", 60_000).unwrap();
-        assert!(!ok);
-    }
-
-    #[test]
-    fn bad_presentation_id_rejected()
-    {
-        let td = make_project();
-        let pp = td.path().to_str().unwrap();
-        let e = acquire_impl(pp, "", "h", 100).unwrap_err();
-        assert_eq!(e, "bad-presentation-id");
-        let e = acquire_impl(pp, "../evil", "h", 100).unwrap_err();
-        assert_eq!(e, "bad-presentation-id");
-    }
-}
+#[path = "slides_lock_tests.rs"]
+mod tests;

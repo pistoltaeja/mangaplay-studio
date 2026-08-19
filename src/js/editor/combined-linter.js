@@ -1,15 +1,40 @@
 // @ts-check
 /**
- * combined-linter.js — single CM6 linter() source that merges parser
- * diagnostics (sync) with spellcheck diagnostics (async, racing a 300ms
- * budget). Replaces the previous two-linter wiring which was vulnerable to
- * `batchResults` dropping the parser source when spellcheck's async
- * callback hung.
+ * combined-linter.js — wires parser diagnostics (sync) and spellcheck
+ * diagnostics (async) as two separate CM6 linter() extensions.
+ *
+ * Why two extensions instead of one?
+ * -----------------------------------
+ * Parser warnings (sequential pages, panel tag typos, cue case) are
+ * synchronous and cheap. Harper (spelling + grammar) is async — it
+ * round-trips to a WASM Web Worker and can take 100–400 ms on first
+ * fire. If both lived in a single linter source, a slow Harper pass
+ * would delay parser diagnostics, and CM6's `set=false` guard could
+ * suppress re-fire until the next docChanged — resulting in up to 40%
+ * of boots showing no diagnostics at all. Splitting them means parser
+ * diagnostics surface immediately on every keystroke while spell
+ * results arrive when the worker is ready.
+ *
+ * Adding a new diagnostic source
+ * --------------------------------
+ * - New PARSER warnings (sync): add to editor-linter.js / editor-checks.js.
+ * - New SPELL filters (suppress false positives): add to
+ *   spellcheck-linter.js's lint loop — see that file's header.
+ * - New EXTERNAL linter: add a third linter() extension in
+ *   combinedLinter() and return it alongside parserExt + spellExt.
+ *
+ * Hover tooltip
+ * -------------
+ * offsetLintHover re-implements the CM6 lint hover popup with
+ * offset: { x: 0, y: 0 } so it sits flush above the squiggle.
+ * The native lint tooltip is hidden via CSS.
  */
 
 import { linter, forEachDiagnostic } from "@codemirror/lint";
-import { hoverTooltip, closeHoverTooltips } from "@codemirror/view";
+import { hoverTooltip, closeHoverTooltips, EditorView } from "@codemirror/view";
 import { runParserLinter } from "./editor-linter.js";
+import { showSpellMiniTooltip } from "./spell-mini-tooltip.js";
+import { spellAutocorrect } from "./spell-autocorrect.js";
 
 // spellcheck-linter.js + harper-linter.js + harper.js (~1.5 MB combined)
 // are pulled in via dynamic import inside the spell lint callback so the
@@ -112,6 +137,11 @@ const offsetLintHover = hoverTooltip((view, pos, side) =>
     const hits = [];
     forEachDiagnostic(view.state, (d, from, to) =>
     {
+        // Spell-suggestion diagnostics are handled by the left-click mini-
+        // tooltip (showSpellMiniTooltip). Skip them here so the hover popup
+        // doesn't compete. Parser / style / grammar lints keep their hover.
+        if (/** @type {any} */ (d).mpsSpellSuggestion) return;
+
         if (pos >= from && pos <= to &&
             (from === to || ((pos > from || side > 0) && (pos < to || side < 0))))
         {
@@ -194,6 +224,45 @@ const offsetLintHover = hoverTooltip((view, pos, side) =>
 }, { hoverTime: 300, hideOnChange: true });
 
 /**
+ * Left-click handler: when a plain left-click lands inside a
+ * mpsSpellSuggestion diagnostic, show the spell mini-tooltip.
+ * Does NOT preventDefault — the caret still moves normally.
+ */
+const spellClickHandler = EditorView.domEventHandlers(
+{
+    mousedown(e, view)
+    {
+        // Plain left-click only; ignore right-click, middle, modifier combos.
+        if (e.button !== 0 || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return false;
+
+        const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+        if (pos == null) return false;
+
+        /** @type {{ d: import("@codemirror/lint").Diagnostic, from: number, to: number } | null} */
+        let hit = null;
+        forEachDiagnostic(view.state, (d, from, to) =>
+        {
+            if (hit) return;
+            if (
+                /** @type {any} */ (d).mpsSpellSuggestion &&
+                d.actions && d.actions.length > 0 &&
+                pos >= from && pos <= to
+            )
+            {
+                hit = { d, from, to };
+            }
+        });
+
+        if (hit)
+        {
+            showSpellMiniTooltip(view, hit);
+            // Return false = don't preventDefault; caret placement proceeds.
+        }
+        return false;
+    },
+});
+
+/**
  * @param {() => { tier: string, dialect?: any, hunspellId?: string }} getCfg
  * @param {string} [format] - Document format hint passed to runParserLinter.
  * @returns {import("@codemirror/state").Extension}
@@ -214,7 +283,7 @@ export function combinedLinter(getCfg, format = "mangaplay")
         { delay: 250, hoverTime: 300 });
     const spellExt = buildSpellExt(getCfg, 250);
 
-    return [parserExt, spellExt, offsetLintHover];
+    return [parserExt, spellExt, offsetLintHover, spellClickHandler, spellAutocorrect()];
 }
 
 /**
@@ -247,5 +316,5 @@ function buildSpellExt(getCfg, delay)
  */
 export function lazySpellcheckLinter(getCfg)
 {
-    return buildSpellExt(getCfg, 400);
+    return [buildSpellExt(getCfg, 400), spellClickHandler, spellAutocorrect()];
 }

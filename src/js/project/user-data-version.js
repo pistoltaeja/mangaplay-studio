@@ -17,7 +17,7 @@
  *
  * Boot order: app.js calls `await ensureUserDataVersion()` AFTER
  * `loadUserSettings()` and BEFORE the SDK init block (initIap /
- * initAnalytics / initAccount). Phase 4 wires it in.
+ * initAnalytics / initAccount).
  *
  * Outside Tauri (jsdom tests) `loadAppVersionInfo` returns a stub so
  * imports don't blow up. The other functions still exercise their pure

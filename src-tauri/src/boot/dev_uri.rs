@@ -9,8 +9,13 @@
 ///
 /// `FRONTEND_ROOT` resolution:
 ///   1. `MPS_FRONTEND_DIR` env var if set (used by CDP smoke tests).
-///   2. `<exe parent>/../../frontend/` (matches build:windows-dev layout).
-///   3. `<exe parent>/frontend/` (matches build:windows release layout copy).
+///   2. `<exe parent>/../../frontend-<uxMode>/` (matches build:windows-dev layout).
+///   3. `<exe parent>/frontend-<uxMode>/` (matches build:windows release layout copy).
+///
+/// The per-variant `frontend-<uxMode>/` directory name is baked into the
+/// binary at build time from `MPS_BUILD_UX_MODE` (see build.rs). Prevents a
+/// mobile-baked bundle on disk from being served to a standalone .exe when
+/// both variants share the same target/exe location during iteration.
 pub fn disk_frontend_handler<R: tauri::Runtime>(
     _ctx: tauri::UriSchemeContext<'_, R>,
     request: tauri::http::Request<Vec<u8>>,
@@ -39,6 +44,15 @@ pub fn disk_frontend_handler<R: tauri::Runtime>(
         path = "index.html".to_string();
     }
 
+    // Per-UX-mode frontend dir name baked at compile time (see build.rs).
+    // Falls back to "standalone" when the env wasn't set at build time
+    // (matches parseUxMode() default in scripts/build-app.js).
+    let ux_mode = option_env!("MPS_BUILD_UX_MODE").unwrap_or("");
+    let frontend_dir_name: String = match ux_mode {
+        "mobile" | "tablet" | "standalone" => format!("frontend-{}", ux_mode),
+        _ => "frontend-standalone".to_string(),
+    };
+
     let frontend_root: std::path::PathBuf = (|| {
         if let Ok(env_dir) = std::env::var("MPS_FRONTEND_DIR") {
             if !env_dir.is_empty() {
@@ -49,24 +63,24 @@ pub fn disk_frontend_handler<R: tauri::Runtime>(
         if let Some(exe_dir) = exe.as_ref().and_then(|p| p.parent()) {
             // Candidate layouts, tried in order:
             //   A. build:windows-dev cargo output:
-            //      build/mangaplay-studio/target/x86_64-pc-windows-msvc/debug/exe
-            //      → ../../../frontend  (build/mangaplay-studio/frontend/)
+            //      build/mangaplay-studio/target-<mode>/x86_64-pc-windows-msvc/debug/exe
+            //      → ../../../frontend-<mode>  (build/mangaplay-studio/frontend-<mode>/)
             //   B. final dev exe copy:
-            //      build/mangaplay-studio/target/MangaplayStudioDev.exe
-            //      → ../frontend  (build/mangaplay-studio/frontend/)
+            //      build/mangaplay-studio/target-<mode>/MangaplayStudioDev.exe
+            //      → ../frontend-<mode>  (build/mangaplay-studio/frontend-<mode>/)
             //   C. exe-sibling frontend (release-style copy):
-            //      <exe-dir>/frontend
+            //      <exe-dir>/frontend-<mode>
             for candidate in &[
-                exe_dir.join("..").join("..").join("..").join("frontend"),
-                exe_dir.join("..").join("frontend"),
-                exe_dir.join("frontend"),
+                exe_dir.join("..").join("..").join("..").join(&frontend_dir_name),
+                exe_dir.join("..").join(&frontend_dir_name),
+                exe_dir.join(&frontend_dir_name),
             ] {
                 if candidate.is_dir() {
                     return candidate.clone();
                 }
             }
         }
-        std::path::PathBuf::from("frontend")
+        std::path::PathBuf::from(&frontend_dir_name)
     })();
 
     // Canonical-path containment (defence in depth — no `..` traversal).
@@ -115,28 +129,7 @@ pub fn disk_frontend_handler<R: tauri::Runtime>(
         .unwrap()
 }
 
-/// Percent-decode a URL path. Only `%XX` hex escapes are consumed — malformed
-/// escapes are passed through as-is so a bad request 404s on the disk lookup
-/// instead of surfacing as an unrelated parse error.
-fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hi = (bytes[i + 1] as char).to_digit(16);
-            let lo = (bytes[i + 2] as char).to_digit(16);
-            if let (Some(h), Some(l)) = (hi, lo) {
-                out.push((h * 16 + l) as u8);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
+use crate::util::percent::percent_decode;
 
 fn guess_content_type(path: &std::path::Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()) {

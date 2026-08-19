@@ -81,7 +81,7 @@ mps-picker-shell .pkr-shell[data-phase="opening"]
     padding: 4px;
     box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
     z-index: 9000;
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     user-select: none;
 }
 
@@ -144,6 +144,82 @@ mps-picker-shell .pkr-shell[data-phase="opening"]
     margin: 4px 6px;
 }
 
+/* Non-interactive section header inside a context menu. */
+.ctx-menu-header
+{
+    padding: 4px 10px 2px;
+    font-size: 0.75em;
+    color: var(--row-badge, #9a9a9a);
+    pointer-events: none;
+    user-select: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Spell-check mini-tooltip — matches the green grammar lint card in style.
+ * Red left-border stripe signals spelling severity; pill button mirrors
+ * .cm-diagnosticAction from app-tabs-cta.css. */
+.spell-mini-tooltip
+{
+    position: fixed;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    padding: 4px;
+    background: var(--cm-mp-tooltip-bg, #ffffff);
+    color: var(--cm-mp-tooltip-fg, #1a1a1a);
+    border: 1px solid var(--cm-mp-tooltip-border, #d0d4dc);
+    border-left: 3px solid var(--accent-red, #d33);
+    border-radius: 6px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+    z-index: 8900;
+    font-size: var(--mps-font-size-sm);
+    user-select: none;
+    white-space: nowrap;
+}
+
+/* The primary fix button — green action pill matching .cm-diagnosticAction. */
+.spell-mini-fix
+{
+    background: #8BC34A;
+    color: #ffffff;
+    border: none;
+    padding: 2px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1;
+    transition: background-color 90ms ease;
+}
+
+.spell-mini-fix:hover
+{
+    background: #7CB342;
+}
+
+/* ✕ and ⋮ icon buttons. */
+.spell-mini-btn
+{
+    background: transparent;
+    border: none;
+    padding: 2px 6px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: var(--mps-font-size-sm);
+    color: var(--mps-text-secondary, #6c6c70);
+    line-height: 1;
+}
+
+.spell-mini-btn:hover
+{
+    background: var(--btn-hover-bg, #e8eaee);
+    color: var(--cm-mp-tooltip-fg, #1a1a1a);
+}
+
 /* Right pane — brand + actions card */
 
 mps-picker-shell .pkr-mascot
@@ -181,7 +257,7 @@ mps-picker-shell .pkr-brand
 mps-picker-shell .pkr-version
 {
     color: #777;
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     margin-bottom: 28px;
 }
 
@@ -214,7 +290,7 @@ mps-picker-shell .pkr-row-label
 mps-picker-shell .pkr-row-title
 {
     color: #fff;
-    font-size: 14px;
+    font-size: var(--mps-font-size-md);
     font-weight: 500;
     user-select: none;
     -webkit-user-select: none;
@@ -223,7 +299,7 @@ mps-picker-shell .pkr-row-title
 mps-picker-shell .pkr-row-help
 {
     color: #888;
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     margin-top: 2px;
     user-select: none;
     -webkit-user-select: none;
@@ -240,7 +316,7 @@ mps-picker-shell .pkr-btn
 {
     padding: 8px 18px;
     border-radius: 6px;
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     font-weight: 600;
     font-family: inherit;
     cursor: pointer;
@@ -347,7 +423,6 @@ mps-picker-shell .pkr-right
     flex-direction: column;
     align-items: center;
     justify-content: flex-start;
-    overflow-y: auto;
     -webkit-app-region: no-drag;
 }
 
@@ -396,7 +471,7 @@ mps-picker-shell .pkr-create-back
     color: #b5b5bd;
     cursor: pointer;
     font-family: inherit;
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     padding: 4px 6px;
     border-radius: 4px;
     transition: background 120ms ease, color 120ms ease;
@@ -411,7 +486,7 @@ mps-picker-shell .pkr-create-back:hover
 
 mps-picker-shell .pkr-create-back-arrow
 {
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     line-height: 1;
 }
 
@@ -429,7 +504,7 @@ mps-picker-shell .pkr-create-input
     color: #fff;
     border-radius: 6px;
     padding: 8px 10px;
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     font-family: inherit;
     outline: none;
     transition: border-color 120ms ease;
@@ -443,7 +518,7 @@ mps-picker-shell .pkr-create-input:focus
 mps-picker-shell .pkr-create-error
 {
     color: #c46a6a;
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     min-height: 14px;
 }
 
@@ -458,7 +533,7 @@ mps-picker-shell .pkr-create-location-row
 mps-picker-shell .pkr-create-parent-readout
 {
     color: #b5b5bd;
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     word-break: break-all;
     flex: 1;
     min-width: 0;
@@ -467,7 +542,7 @@ mps-picker-shell .pkr-create-parent-readout
 mps-picker-shell .pkr-create-readout-row
 {
     color: #b5b5bd;
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     word-break: break-all;
     visibility: hidden;
     opacity: 0;
@@ -498,6 +573,25 @@ mps-picker-shell .pkr-create-actions
     display: flex;
     justify-content: flex-end;
     margin-top: 6px;
+}
+
+mps-picker-shell .pkr-create-toggle-row
+{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+mps-picker-shell .pkr-create-toggle-row .pkr-row-label
+{
+    flex: 1;
+    min-width: 0;
+}
+
+mps-picker-shell .pkr-create-toggle-row .mps-toggle
+{
+    flex-shrink: 0;
 }
 
 /* Opening card removed — owned by <mps-splash> now (see mps-splash.css). */
@@ -534,10 +628,18 @@ mps-picker-shell .pkr-modal-title
     margin-bottom: 12px;
 }
 
+mps-picker-shell .pkr-modal-body-text
+{
+    color: #c8c8ce;
+    font-size: var(--mps-font-size-base);
+    line-height: 1.5;
+    margin: 0 0 14px;
+}
+
 mps-picker-shell .pkr-modal-label
 {
     display: block;
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     color: #aaa;
     margin-bottom: 4px;
 }
@@ -551,7 +653,7 @@ mps-picker-shell .pkr-modal-input
     border: 1px solid #313139;
     border-radius: 6px;
     font-family: inherit;
-    font-size: 14px;
+    font-size: var(--mps-font-size-md);
     margin-bottom: 14px;
 }
 
@@ -575,7 +677,7 @@ mps-picker-shell .pkr-modal-radio
     align-items: flex-start;
     gap: 8px;
     color: #e8e8ea;
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     cursor: pointer;
 }
 
@@ -588,7 +690,7 @@ mps-picker-shell .pkr-modal-radio small
 mps-picker-shell .pkr-modal-note
 {
     color: #c4a76a;
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     margin: 6px 0 14px;
     padding: 8px 10px;
     border-left: 2px solid #c4a76a;

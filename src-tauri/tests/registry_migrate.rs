@@ -1,5 +1,5 @@
 //! Integration tests for `fold_artmap_into_registry`
-//! (TODO/uuid-file-registry.md — Part 5).
+//! (artMap → registry UUID re-alignment on first project open).
 //!
 //! Covers the four documented behaviours of the artMap fold:
 //!  1. realign — registry entry's UUID differs from artMap → re-key it.
@@ -7,7 +7,7 @@
 //!  3. aligned — artMap UUID already matches → no-op, no rev bump.
 //!  4. invalid — artMap value isn't a UUID string → skip.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
 use app_lib::{
@@ -41,7 +41,7 @@ fn seed_registry_with_one_file(
     native_id: NativeId,
 ) -> LoadedRegistry
 {
-    let mut entries = HashMap::new();
+    let mut entries = BTreeMap::new();
     entries.insert(
         uuid,
         RegistryEntry

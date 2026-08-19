@@ -51,7 +51,7 @@ pub fn update_recent_path_impl(
         }
     }
     let tmp = recent_path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(&recent).unwrap())
+    std::fs::write(&tmp, serde_json::to_string_pretty(&recent).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &recent_path).map_err(|e| e.to_string())?;
     Ok(())
@@ -100,7 +100,7 @@ pub fn update_recent_field_impl(
         }
     }
     let tmp = recent_path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(&recent).unwrap())
+    std::fs::write(&tmp, serde_json::to_string_pretty(&recent).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &recent_path).map_err(|e| e.to_string())?;
     Ok(())

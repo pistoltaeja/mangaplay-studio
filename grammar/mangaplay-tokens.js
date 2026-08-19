@@ -1295,21 +1295,7 @@ var ForcedActionTok = 18;
 var blank = 40;
 
 // grammar/mangaplay-tokens.js
-function isUpper(c) {
-  return c >= 65 && c <= 90;
-}
-function isLower(c) {
-  return c >= 97 && c <= 122;
-}
-function isLetter(c) {
-  return isUpper(c) || isLower(c);
-}
-function isDigit(c) {
-  return c >= 48 && c <= 57;
-}
-function isSpace(c) {
-  return c === 32 || c === 9;
-}
+import { isUpper, isLower, isLetter, isDigit, isSpace } from "./char-classes.js";
 var lineTokens = new ExternalTokenizer((input) => {
   if (input.next < 0)
     return;
@@ -1331,7 +1317,7 @@ var lineTokens = new ExternalTokenizer((input) => {
   const ch0 = input.peek(0);
   const ch1 = input.peek(1);
   const ch2 = input.peek(2);
-  if (ch0 === 91 && ch1 === 91) {
+  if (ch0 === 91 && ch1 === 91 && ch2 !== 126) {   // '[[ ' but not '[[~'
     input.acceptToken(NoteTok, len);
     return;
   }
@@ -1340,7 +1326,15 @@ var lineTokens = new ExternalTokenizer((input) => {
     return;
   }
   if (ch0 === 62) {
-    input.acceptToken(CenteredTok, len);
+    // Trailing `<` (ignoring whitespace) → centered; otherwise forced transition.
+    let last = lineLen - 1;
+    while (last > 0 && isSpace(input.peek(last)))
+      last--;
+    if (input.peek(last) === 60) {
+      input.acceptToken(CenteredTok, len);
+      return;
+    }
+    input.acceptToken(TransitionTok, len);
     return;
   }
   if (ch0 === 35) {

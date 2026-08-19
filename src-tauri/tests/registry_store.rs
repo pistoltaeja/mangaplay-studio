@@ -1,11 +1,10 @@
-//! Integration tests for the UUID file registry store
-//! (TODO/uuid-file-registry.md — Part 1).
+//! Integration tests for the UUID file registry store.
 //!
 //! Covers: round-trip save/load, missing-file NotFound, tmp-file cleanup,
 //! .bak rotation, corrupt-primary recovery, both-corrupt failure, and
 //! per-variant serde tag stability for `NativeId`.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -49,7 +48,7 @@ fn sample_ntfs_id() -> NativeId
 
 fn sample_registry() -> RegistryFile
 {
-    let mut entries: HashMap<String, RegistryEntry> = HashMap::new();
+    let mut entries: BTreeMap<String, RegistryEntry> = BTreeMap::new();
 
     let a = fixed_uuid("entry-a");
     entries.insert(

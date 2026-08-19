@@ -17,6 +17,9 @@
 
 import defaultManifest from "../../default-skins/default/skin.json";
 import nightManifest from "../../default-skins/night/skin.json";
+import oragepadManifest from "../../default-skins/oragepad/skin.json";
+import cyberpunkManifest from "../../default-skins/cyberpunk/skin.json";
+import academiaManifest from "../../default-skins/academia/skin.json";
 
 /**
  * @typedef {Object} SkinManifest
@@ -26,6 +29,7 @@ import nightManifest from "../../default-skins/night/skin.json";
  * @property {string} version
  * @property {"light"|"dark"} baseVariant
  * @property {string} cssFile
+ * @property {string} [mainMascotFile]
  * @property {string} mascotHeadFile
  * @property {string} mascotBodyFile
  * @property {string} splashFile
@@ -98,7 +102,7 @@ export function validateManifest(m)
     }
     // Path-traversal guard + forbidden extensions.
     const FORBIDDEN = /\.(js|html|wasm)$/i;
-    for (const key of ["cssFile", "mascotHeadFile", "mascotBodyFile", "splashFile", "splashFile2x"])
+    for (const key of ["cssFile", "mainMascotFile", "mascotHeadFile", "mascotBodyFile", "splashFile", "splashFile2x"])
     {
         const v = m[key];
         if (typeof v !== "string" || v.length === 0) continue;
@@ -115,7 +119,7 @@ export function validateManifest(m)
     {
         errs.push("cssFile must end in .css");
     }
-    for (const key of ["mascotHeadFile", "mascotBodyFile", "splashFile", "splashFile2x"])
+    for (const key of ["mainMascotFile", "mascotHeadFile", "mascotBodyFile", "splashFile", "splashFile2x"])
     {
         const v = m[key];
         if (typeof v !== "string" || v.length === 0) continue;
@@ -210,8 +214,8 @@ function skinAssetUrl(entry, key)
 
 /**
  * Apply the named skin. Sets `<html data-skin>`, toggles the
- * `.skin-default` class (parity with the website's `.theme-light`
- * prefers-color-scheme guard), swaps `<link id="active-skin">`, and
+ * `.skin-default` class (matches the website's prefers-color-scheme
+ * guard), swaps `<link id="active-skin">`, and
  * rewrites every registered mascot/splash <img>.
  * @param {string} id
  */
@@ -222,11 +226,10 @@ export function applySkin(id)
     const html = document.documentElement;
     html.setAttribute("data-skin", target);
     // Toggle .skin-default on <html> so the website's
-    // @media (prefers-color-scheme: dark) { :root:not(.theme-light) { ... } }
+    // @media (prefers-color-scheme: dark) { :root:not(.skin-default) { ... } }
     // guard defers to the app's explicit skin choice. Without this,
     // macOS system dark mode overrides the Default skin's CSS variables.
-    // Kept named `skin-default` (not `theme-light`) so the CSS surface
-    // matches the new naming scheme.
+    // Named `.skin-default` to match the skin naming convention.
     html.classList.toggle("skin-default", target === "default");
 
     // <link> href swap.
@@ -242,6 +245,7 @@ export function applySkin(id)
 
     // Mascot / splash swap on every registered <img>.
     pruneSkinnedImages();
+    const mainMascotUrl = skinAssetUrl(entry, "mainMascotFile");
     const mascotHeadUrl = skinAssetUrl(entry, "mascotHeadFile");
     const mascotBodyUrl = skinAssetUrl(entry, "mascotBodyFile");
     const splashUrl = skinAssetUrl(entry, "splashFile");
@@ -249,7 +253,12 @@ export function applySkin(id)
     for (const img of skinnedImages)
     {
         const kind = img.dataset.skinnedKind;
-        if (kind === "mascotHead" && mascotHeadUrl)
+        if (kind === "mainMascot" && mainMascotUrl)
+        {
+            if (img.getAttribute("src") !== mainMascotUrl) img.setAttribute("src", mainMascotUrl);
+            if (img.hasAttribute("srcset")) img.removeAttribute("srcset");
+        }
+        else if (kind === "mascotHead" && mascotHeadUrl)
         {
             if (img.getAttribute("src") !== mascotHeadUrl) img.setAttribute("src", mascotHeadUrl);
             if (img.hasAttribute("srcset")) img.removeAttribute("srcset");
@@ -269,6 +278,34 @@ export function applySkin(id)
             }
         }
     }
+
+    // Notify observers (currently the aggregate view's height-cache
+    // generation bumper) that the skin changed. CM6 line-height + gutter
+    // metrics vary per skin so cached placeholder heights are stale until
+    // the next mount re-measures. Pre-body invocations (early boot) are
+    // suppressed because no listener can attach before DOM ready anyway.
+    if (typeof window !== "undefined" && document.body)
+    {
+        try
+        {
+            window.dispatchEvent(new CustomEvent("mps:skin-change", {
+                detail: { id: target }
+            }));
+        }
+        catch (_) { /* non-fatal */ }
+    }
+
+    // macOS: sync the native title-bar chrome to the skin's baseVariant
+    // so the traffic-light bar matches the editor surface.
+    try
+    {
+        const variant = entry.manifest.baseVariant || "light";
+        import("@tauri-apps/api/core").then(({ invoke }) =>
+        {
+            invoke("set_window_theme", { variant }).catch(() => {});
+        }).catch(() => {});
+    }
+    catch (_) { /* non-fatal — website / non-Tauri context */ }
 }
 
 /** Current active skin id (reads `<html data-skin>` — falls back to default). */
@@ -281,3 +318,11 @@ export function getCurrentSkinId()
 // validateManifest runs on both so drift is caught in-tree.
 registerSkin(/** @type {SkinManifest} */ (defaultManifest));
 registerSkin(/** @type {SkinManifest} */ (nightManifest));
+// Premium skins resolve from their own id-folder (default baseUrl). Each folder
+// is self-contained: its own <id>.css palette plus the default-named mascot/
+// splash PNGs (copied in). Registering against the "default/" folder was the
+// old stub — it 404'd every premium <id>.css (they don't live in default/),
+// leaving the window unstyled ("transparent") when selected.
+registerSkin(/** @type {SkinManifest} */ (oragepadManifest));
+registerSkin(/** @type {SkinManifest} */ (cyberpunkManifest));
+registerSkin(/** @type {SkinManifest} */ (academiaManifest));

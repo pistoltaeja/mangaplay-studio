@@ -16,6 +16,7 @@
 
 import { icon } from "../panes/icons.js";
 import { t, subscribe as subscribeI18n } from "../adapters/tauri-i18n.js";
+import { isMobileLike } from "../boot/ux-mode.js";
 
 class MpsFindWidget extends HTMLElement
 {
@@ -54,6 +55,7 @@ class MpsFindWidget extends HTMLElement
         const nextLbl = t("mangaplay-studio.menu.editor.findWidget.next") || "Next match";
         const prevLbl = t("mangaplay-studio.menu.editor.findWidget.prev") || "Previous match";
         const closeLbl = t("mangaplay-studio.menu.editor.findWidget.close") || "Close";
+        const side = isMobileLike() ? "bottom" : "left";
         if (this._input)
         {
             this._input.placeholder = placeholder;
@@ -62,17 +64,20 @@ class MpsFindWidget extends HTMLElement
         if (this._nextBtn)
         {
             this._nextBtn.setAttribute("aria-label", nextLbl);
-            this._nextBtn.title = nextLbl;
+            this._nextBtn.setAttribute("data-tooltip", nextLbl);
+            this._nextBtn.setAttribute("data-tooltip-side", side);
         }
         if (this._prevBtn)
         {
             this._prevBtn.setAttribute("aria-label", prevLbl);
-            this._prevBtn.title = prevLbl;
+            this._prevBtn.setAttribute("data-tooltip", prevLbl);
+            this._prevBtn.setAttribute("data-tooltip-side", side);
         }
         if (this._closeBtn)
         {
             this._closeBtn.setAttribute("aria-label", closeLbl);
-            this._closeBtn.title = closeLbl;
+            this._closeBtn.setAttribute("data-tooltip", closeLbl);
+            this._closeBtn.setAttribute("data-tooltip-side", side);
         }
     }
 
@@ -82,6 +87,7 @@ class MpsFindWidget extends HTMLElement
         const nextLbl = t("mangaplay-studio.menu.editor.findWidget.next") || "Next match";
         const prevLbl = t("mangaplay-studio.menu.editor.findWidget.prev") || "Previous match";
         const closeLbl = t("mangaplay-studio.menu.editor.findWidget.close") || "Close";
+        const side = isMobileLike() ? "bottom" : "left";
 
         this.innerHTML = `
             <div class="find-frame">
@@ -90,13 +96,13 @@ class MpsFindWidget extends HTMLElement
                        aria-label="${placeholder}" spellcheck="false" autocomplete="off" />
                 <span class="find-count" aria-live="polite"></span>
             </div>
-            <button class="find-btn find-prev" type="button" aria-label="${prevLbl}" title="${prevLbl}">
+            <button class="find-btn find-prev" type="button" aria-label="${prevLbl}" data-tooltip="${prevLbl}" data-tooltip-side="${side}">
                 ${icon("chevron-up", { size: 18, class: "icon" })}
             </button>
-            <button class="find-btn find-next" type="button" aria-label="${nextLbl}" title="${nextLbl}">
+            <button class="find-btn find-next" type="button" aria-label="${nextLbl}" data-tooltip="${nextLbl}" data-tooltip-side="${side}">
                 ${icon("chevron-down", { size: 18, class: "icon" })}
             </button>
-            <button class="find-btn find-close" type="button" aria-label="${closeLbl}" title="${closeLbl}">
+            <button class="find-btn find-close" type="button" aria-label="${closeLbl}" data-tooltip="${closeLbl}" data-tooltip-side="${side}">
                 ${icon("x", { size: 18, class: "icon" })}
             </button>
         `;

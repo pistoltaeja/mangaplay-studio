@@ -2,6 +2,7 @@ import { state } from "./state.js";
 import { t } from "../adapters/tauri-i18n.js";
 import { scriptRelPathOf } from "../util/paths.js";
 import { setLastPageIndex } from "../project/project.js";
+import { isDisplayMode } from "./right-pane-storyboard-mode.js";
 
 // Storyboard pagination state. Drives only the Storyboard canvas page
 // (mps-canvas). The Visual Editor scrolls independently and does NOT follow
@@ -136,6 +137,12 @@ export function wireTopbarPagination()
     {
         const d = /** @type {CustomEvent} */ (e).detail;
         if (!d) return;
+        // While the right pane is showing mps-display, the pagination widget
+        // reflects the DECK, not the active file. Ignore file-scoped updates
+        // (i.e. anything without `source: "display"`) so switching between
+        // Storyboard-folder siblings doesn't jerk the label back to the
+        // active file's page range.
+        if (isDisplayMode() && d.source !== "display") return;
         if (Number.isFinite(d.pageIndex)) _paginationPageIndex = d.pageIndex;
         if (Number.isFinite(d.totalPages)) _paginationTotalPages = d.totalPages;
         _paginationPageLabel = d.pageLabel != null ? String(d.pageLabel) : null;
@@ -149,31 +156,61 @@ export function wireTopbarPagination()
     // pages are loaded. Project mount can take several seconds on debug
     // builds, so poll on a slow interval until pages exist (no upper cap —
     // a long-running poll is cheap; we clear it once pages land).
-    const tryPullFromCanvas = () =>
-    {
-        const canvas = /** @type {any} */ (document.querySelector("mps-canvas"));
-        const state = canvas?.store?.state;
-        if (!state) return false;
-        const pages = state.script?.pages ?? [];
-        const total = pages.length;
-        if (total <= 0) return false;
-        _paginationPageIndex = state.currentPageIndex ?? 0;
-        _paginationTotalPages = total;
-        const cur = pages[_paginationPageIndex];
-        _paginationPageLabel = cur?.id != null ? String(cur.id) : null;
-        if (wrap.hasAttribute("hidden")) wrap.removeAttribute("hidden");
-        render();
-        return true;
-    };
-    if (!tryPullFromCanvas())
+    _renderTopbarPaginationWrap = wrap;
+    if (!_tryPullFromCanvasImpl(render))
     {
         const intervalId = setInterval(() =>
         {
-            if (tryPullFromCanvas()) clearInterval(intervalId);
+            if (_tryPullFromCanvasImpl(render)) clearInterval(intervalId);
         }, 250);
     }
 
     render();
+}
+
+/** @type {HTMLElement | null} */
+let _renderTopbarPaginationWrap = null;
+
+/**
+ * Pull the current pagination state from the active mps-canvas store into
+ * the widget. No-op while the right pane is showing mps-display — display
+ * mode owns pagination. Returns true when the widget was refreshed.
+ * @param {() => void} render
+ */
+function _tryPullFromCanvasImpl(render)
+{
+    if (isDisplayMode()) return false;
+    const canvas = /** @type {any} */ (document.querySelector("mps-canvas"));
+    const canvasState = canvas?.store?.state;
+    if (!canvasState) return false;
+    const pages = canvasState.script?.pages ?? [];
+    const total = pages.length;
+    if (total <= 0) return false;
+    _paginationPageIndex = canvasState.currentPageIndex ?? 0;
+    _paginationTotalPages = total;
+    const cur = pages[_paginationPageIndex];
+    _paginationPageLabel = cur?.id != null ? String(cur.id) : null;
+    if (_renderTopbarPaginationWrap && _renderTopbarPaginationWrap.hasAttribute("hidden"))
+    {
+        _renderTopbarPaginationWrap.removeAttribute("hidden");
+    }
+    render();
+    return true;
+}
+
+/**
+ * Refresh the pagination widget from the currently-active `mps-canvas` store.
+ * Called by the display controller after tearing down display mode so the
+ * widget reflects the newly-visible file's page count instead of the
+ * previous deck's total.
+ * @returns {boolean} true if the widget was refreshed, false if the canvas
+ *   store isn't ready yet (caller is free to retry later — the boot poll
+ *   installed by `wireTopbarPagination` also keeps trying on its own cadence).
+ */
+export function refreshFromActiveCanvas()
+{
+    if (!_renderTopbarPagination) return false;
+    return _tryPullFromCanvasImpl(_renderTopbarPagination);
 }
 
 /**
@@ -212,6 +249,10 @@ export function wirePageIndexSessionWriteThrough()
     {
         const d = /** @type {any} */ (e).detail || {};
         if (!Number.isFinite(d.pageIndex)) return;
+        // Skip write-through in display mode — the deck-scoped index has
+        // its own persistence path (projectSessions[uuid].storyboardDisplay)
+        // and doesn't belong in the file's session.json lastPageIndex.
+        if (isDisplayMode() || d.source === "display") return;
         lastIndex = Number(d.pageIndex);
         // Back-write the index onto the active slot so a later tab activate
         // restores the user to the page they were last viewing.

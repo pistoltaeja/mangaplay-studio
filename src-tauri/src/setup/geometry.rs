@@ -156,7 +156,7 @@ pub fn resolve_standalone_from_parts(
     }
 }
 
-/// Mobile: 720×1280 logical, non-resizable, centered on the work area.
+/// Mobile: 720×1280 or 450×800 (9:16), non-resizable, centered on work area.
 fn resolve_mobile(work_area: (i32, i32, i32, i32), scale_factor: f64) -> WindowGeometry
 {
     let (wa_left, wa_top, wa_right, wa_bottom) = work_area;
@@ -166,8 +166,15 @@ fn resolve_mobile(work_area: (i32, i32, i32, i32), scale_factor: f64) -> WindowG
     let wa_logical_w = (wa_right - wa_left) as f64 / scale;
     let wa_logical_h = (wa_bottom - wa_top) as f64 / scale;
 
-    let logical_w = 720.0_f64;
-    let logical_h = 1280.0_f64;
+    // 9:16 aspect at two sizes — pick the larger one when the monitor can host it.
+    let (logical_w, logical_h) = if wa_logical_h >= 1280.0
+    {
+        (720.0_f64, 1280.0_f64)
+    }
+    else
+    {
+        (450.0_f64, 800.0_f64)
+    };
     let logical_x = wa_logical_left + ((wa_logical_w - logical_w) / 2.0).max(0.0);
     let logical_y = wa_logical_top + ((wa_logical_h - logical_h) / 2.0).max(0.0);
 

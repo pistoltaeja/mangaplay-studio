@@ -282,6 +282,34 @@ function _renderFatal(p)
 // Without these, uncaught rejections during boot disappear into devtools
 // (and are invisible on mobile where devtools isn't accessible). Install
 // once on module load.
+
+// `tauri-plugin-http` (<=2.5.9) stores each fetch response in the WebView's
+// `ResourceTable` under an integer id. Its JS wrapper's `dropBody()` calls
+// are fire-and-forget (`void dropBody()` in `dist-js/index.js`), so when the
+// AbortSignal fires mid-body-read the second cleanup call reports the
+// already-closed resource id as invalid and Rust returns
+// `Error("The resource id NNN is invalid.")` — surfacing here as an
+// unhandled rejection. This is an upstream-crate race the plugin owns; it
+// must never fatal-overlay our app. Suppress to debug-log.
+const PLUGIN_HTTP_RESOURCE_ID_RE = /^Error: The resource id \d+ is invalid\.?$/;
+
+/**
+ * @param {unknown} reason
+ * @returns {boolean}
+ */
+function _isPluginHttpResourceIdRace(reason)
+{
+    const msg = reason instanceof Error
+        ? reason.message
+        : (reason && typeof reason === "object" && typeof /** @type any */ (reason).message === "string")
+            ? /** @type any */ (reason).message
+            : String(reason || "");
+    if (!msg) return false;
+    if (PLUGIN_HTTP_RESOURCE_ID_RE.test(msg)) return true;
+    // Some paths surface the message without the leading "Error: " prefix.
+    return /^The resource id \d+ is invalid\.?$/.test(msg);
+}
+
 if (typeof window !== "undefined")
 {
     window.addEventListener("error", (ev) =>
@@ -291,6 +319,16 @@ if (typeof window !== "undefined")
     });
     window.addEventListener("unhandledrejection", (ev) =>
     {
-        reportError(/** @type {any} */ (ev).reason, { origin: "unhandled-rejection" });
+        const reason = /** @type {any} */ (ev).reason;
+        if (_isPluginHttpResourceIdRace(reason))
+        {
+            console.debug(
+                "[error-router] suppressed plugin-http resource-id race:",
+                reason?.message || reason,
+            );
+            try { ev.preventDefault(); } catch (_) {}
+            return;
+        }
+        reportError(reason, { origin: "unhandled-rejection" });
     });
 }

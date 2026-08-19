@@ -1,4 +1,4 @@
-//! Integration tests for Phase 5 of the .mangaart storyboard relocation:
+//! Integration tests for .mangaart storyboard relocation:
 //! in-project folder rename (via `rename_file_impl` against a directory) and
 //! in-project move (via `move_path_with_art`).
 //!
@@ -317,7 +317,7 @@ fn move_single_script_file_rewrites_key_only_art_stays_put()
         "single-file move rewrites the one key",
     );
 
-    // Per Phase 3's per-file rule, the .mangaart file stays put.
+    // Per per-file rule: the .mangaart file stays put.
     assert!(art_path.exists(), "art file unchanged on disk");
     let art_bytes_after = fs::read(&art_path).expect("read art after");
     assert_eq!(art_bytes_before, art_bytes_after, "art bytes unchanged");
@@ -326,9 +326,9 @@ fn move_single_script_file_rewrites_key_only_art_stays_put()
     assert!(!root.join("_mangaplaystudio").join("storyboard").join("bar").exists());
 }
 
-// ── folder delete (delete_file_force_impl directory branch, Phase 6) ─────
+// ── folder delete (delete_file_force_impl directory branch) ──────────────
 // Force variant used here because trash:: behaviour against tempdirs is hard
-// to verify deterministically — matches the Phase 4 file-delete test choice.
+// to verify deterministically — same choice as the file-delete tests.
 
 #[test]
 fn delete_folder_with_scripts_drops_keys_and_removes_storyboard_subtree()

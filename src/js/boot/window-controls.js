@@ -62,16 +62,29 @@ export async function wireWindowControls()
     if (!hasWindowChrome()) return;
 
     const os = await resolveOs();
-    // macOS draws its own traffic lights via decorations(true); our hand-rolled
-    // pips stay hidden so the chrome isn't doubled up.
+    // macOS uses Overlay title-bar style — AppKit draws real traffic lights
+    // floating over the left edge of #top-bar. Our hand-rolled pips stay
+    // hidden. Set a left-inset var so in-flow content clears the lights,
+    // and stamp data-platform so CSS can gate macOS-only rules.
     if (os === "macos")
     {
+        document.documentElement.style.setProperty("--mps-macos-titlebar-inset", "78px");
+        document.documentElement.dataset.platform = "macos";
+        // Traffic lights float on the LEFT (Overlay style) — the right edge has
+        // no window controls, so content docking against the right edge must
+        // subtract 0, not the 114px :root default (root.css). Without this the
+        // collapsed storyboard-collapse button lands ~114px shy of the edge.
+        document.documentElement.style.setProperty("--tauri-frame-controls-width", "0px");
         wired = true;
         return;
     }
 
     host.setAttribute("data-platform", os === "windows" ? "windows" : "linux");
     host.hidden = false;
+    // Windows: 3 × 46px buttons, no gap, no padding = 138px.
+    // macOS pips (114px) are the CSS default; override for Windows.
+    const controlsWidth = os === "windows" ? "138px" : "114px";
+    document.documentElement.style.setProperty("--tauri-frame-controls-width", controlsWidth);
     wired = true;
 
     const w = getCurrentWindow();

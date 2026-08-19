@@ -35,8 +35,8 @@ export function jumpToScene(info)
     const slot = state.slotManager?.getActive();
     if (!slot) return;
     /** @type {string} */
-    const mode = /** @type {any} */ (state.modeToggleEl)?.mode || "text";
-    if (mode === "visual")
+    const mode = /** @type {any} */ (state.modeToggleEl)?.mode || "wysiwyg";
+    if (mode === "easy")
     {
         const canvasEl = /** @type {any} */ (document.querySelector("mps-canvas"));
         let pageIndex = 0;

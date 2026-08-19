@@ -2,8 +2,10 @@
 /**
  * analytics/google-auth.js — auth telemetry adapter.
  *
- * Fire-and-forget POST to `https://api.absolutelyskint.com/v1/log` with a
- * compact `{ event, ...payload, ts }` body.
+ * Thin wrapper over the unified analytics façade (`mps-analytics.js`). The
+ * actual transport lives in `sink-absolutelyskint.js`; this file exists to
+ * keep the auth EVENT CATALOG documented next to its call sites and to
+ * preserve the stable `logAuthEvent` / `setAnalyticsAllowed` surface.
  *
  * PRIVACY CONTRACT (do not break):
  *   - NO access tokens
@@ -41,30 +43,19 @@
  *   Identity drift:
  *     auth.id_token.sub_mismatch { phase: "restore" | "refresh" | "signin" }
  *
- * Per TODO/AuthRefreshToken/INDEX.md ticket 11: after rollout, the rate of
- * auth.signin.start should drop ~95% relative to auth.refresh.success
- * (one sign-in per install vs. hourly refreshes). If auth.restore.revoked
- * runs above ~1-2%/week per active user, something's wrong — most likely
- * the GCP consent screen regressed from Published to Testing (precheck 00a).
+ * After rollout, the rate of auth.signin.start should drop ~95% relative to
+ * auth.refresh.success (one sign-in per install vs. hourly refreshes). If
+ * auth.restore.revoked runs above ~1-2%/week per active user, something's
+ * wrong — most likely the GCP consent screen regressed from Published to
+ * Testing (precheck 00a).
  */
 
-const ENDPOINT = "https://api.absolutelyskint.com/v1/log";
-
-// /v1/log requires an `x-api-key` header (see api.absolutelyskint.com
-// log-handler.js). The desktop app does not yet have a provisioned API
-// key — until one is issued, route events to console.debug only so we
-// don't pollute the BFF with 401s on every sign-in attempt.
-const TRANSPORT_ENABLED = false;
-
-// User preference — mirrors app_settings.analyticsEnabled. Defaults to
-// true; boot code calls setAnalyticsAllowed(bool) after loading settings.
-// When false, logAuthEvent is a no-op (including the console.debug path).
-let _analyticsAllowed = true;
+import { track, setAnalyticsAllowed as facadeSetAllowed } from "./mps-analytics.js";
 
 /** @param {boolean} allowed */
 export function setAnalyticsAllowed(allowed)
 {
-    _analyticsAllowed = allowed !== false;
+    facadeSetAllowed(allowed);
 }
 
 /**
@@ -74,25 +65,5 @@ export function setAnalyticsAllowed(allowed)
  */
 export function logAuthEvent(name, payload = {})
 {
-    try
-    {
-        if (!_analyticsAllowed) return;
-        const body = { event: name, ...payload, ts: Date.now() };
-        if (!TRANSPORT_ENABLED)
-        {
-            console.debug("[mps:analytics]", body);
-            return;
-        }
-        // Fire and forget — no await, errors swallowed.
-        fetch(ENDPOINT, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-            keepalive: true,
-        }).catch(() => { /* swallow */ });
-    }
-    catch (_)
-    {
-        // Stringify or fetch threw synchronously — drop silently.
-    }
+    track(name, payload);
 }

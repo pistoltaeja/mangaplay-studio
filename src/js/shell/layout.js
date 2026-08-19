@@ -26,6 +26,13 @@ export function setViewMode(mode) {
     // View 1 (editor) is visible in dual + solo-mangaplay
     if (editorEl) editorEl.hidden = !(mode === "dual" || mode === "solo-mangaplay");
 
+    console.warn('[layout:setViewMode]', JSON.stringify({
+        mode,
+        editorHidden: editorEl?.hidden,
+        viewSwapInFlight: !!document.querySelector('.workspace.view-swap-in-flight'),
+        pane: document.documentElement.getAttribute('data-active-pane'),
+    }));
+
     // View 2 children (mps-canvas / mps-screenplay) live inside
     // .right-pane-slider and their visibility is driven entirely by the
     // slider's [data-active] + CSS transforms — we no longer toggle
@@ -48,6 +55,133 @@ export function setViewMode(mode) {
 
     // Persist to app settings (shell layout is app-wide).
     queueAppSettingsSave({ viewMode: mode, lastSoloMode: state.lastSoloMode });
+}
+
+/**
+ * Mobile / tablet — coordinated slide between solo-mangaplay and
+ * solo-storyboard. Runs entirely under a .view-swap-in-flight class that
+ * forces both panes visible + full-width, sets pre-swap transforms
+ * inline, reflows, then adds the direction class to trigger the slide.
+ * On completion, commits the view-mode flip through setViewMode() so
+ * session persistence still fires.
+ *
+ * The step order (esp. the two force-reflows) is load-bearing — do NOT reorder.
+ *
+ * @param {'solo-mangaplay' | 'solo-storyboard'} nextMode
+ * @returns {Promise<void>}
+ */
+export function animateViewSwap(nextMode)
+{
+    return new Promise((resolve) =>
+    {
+        const ws = /** @type {HTMLElement|null} */ (document.querySelector(".workspace"));
+        if (!ws) { setViewMode(nextMode); resolve(); return; }
+
+        const currentMode = state.viewMode;
+        // No-op if already there, or dual (dual doesn't animate).
+        if (currentMode === nextMode || currentMode === "dual")
+        {
+            setViewMode(nextMode);
+            resolve();
+            return;
+        }
+
+        const editor = /** @type {HTMLElement|null} */ (ws.querySelector("mps-editor-host"));
+        const stack  = /** @type {HTMLElement|null} */ (ws.querySelector(".right-pane-stack"));
+        if (!editor || !stack) { setViewMode(nextMode); resolve(); return; }
+
+        // Direction: editor visible -> storyboard = forward.
+        const isForward = currentMode === "solo-mangaplay" && nextMode === "solo-storyboard";
+        const dirClass  = isForward ? "view-swap-forward" : "view-swap-backward";
+
+        // Step 2 — Un-hide + full-width both panes.
+        ws.classList.add("view-swap-in-flight");
+        console.warn('[layout:viewSwap] START', JSON.stringify({ currentMode, nextMode, dirClass }));
+
+        // Step 3 — Pre-swap starting transforms as inline styles so the
+        // transition has a stable "from" value the browser can see before
+        // the direction class provides the "to".
+        if (isForward)
+        {
+            editor.style.transform = "translateX(0)";
+            stack.style.transform  = "translateX(100%)";
+        }
+        else
+        {
+            editor.style.transform = "translateX(-100%)";
+            stack.style.transform  = "translateX(0)";
+        }
+
+        // Step 3.5 — Pin the slider's target child so the sliding stack
+        // reveals content (not an empty pane). Strip stale data-view-sliding
+        // so the slider's own 420ms transition doesn't fight our pin.
+        const slider = /** @type {HTMLElement|null} */ (stack.querySelector(".right-pane-slider"));
+        if (slider)
+        {
+            slider.setAttribute("data-active", nextMode === "solo-screenplay" ? "screenplay" : "storyboard");
+            slider.removeAttribute("data-view-sliding");
+        }
+
+        // Step 4 — Force reflow so the pre-swap transforms commit BEFORE
+        // we add the direction class (which supplies the destination).
+        // eslint-disable-next-line no-unused-expressions
+        ws.offsetHeight;
+
+        // Step 5 — Clear inline styles so the direction-class rule wins.
+        editor.style.transform = "";
+        stack.style.transform  = "";
+
+        // Step 5.5 — Second reflow. Without this, WebView2 / WKWebView /
+        // Android WebView coalesce steps 5 and 6 into a single style
+        // recomputation and elide the transition entirely.
+        // eslint-disable-next-line no-unused-expressions
+        ws.offsetHeight;
+
+        // Step 6 — Add direction class -> transition kicks off.
+        ws.classList.add(dirClass);
+
+        // Steps 7-9 — Wait for transitionend, then commit view-mode.
+        // CRITICAL: listener must be installed with a small delay so it
+        // doesn't catch the transitionend fired by step 5 (clearing the
+        // inline transforms), which would resolve finish() at ~t=20ms
+        // and skip the whole animation. Use rAF twice to guarantee we're
+        // past the direction-class's initial paint frame.
+        let done = false;
+        let fallbackTimer = 0;
+        let onEnd;
+        const finish = () =>
+        {
+            if (done) return;
+            done = true;
+            clearTimeout(fallbackTimer);
+            if (onEnd) ws.removeEventListener("transitionend", onEnd);
+            ws.classList.remove("view-swap-in-flight", dirClass);
+            console.warn('[layout:viewSwap] FINISH', JSON.stringify({ nextMode, hadFallback: !onEnd }));
+            editor.style.transform = "";
+            stack.style.transform  = "";
+            // Commit view-mode via the canonical setter so session
+            // persistence + slider data-active + pagination-refresh fire.
+            setViewMode(nextMode);
+            resolve();
+        };
+        // Wait 2 rAFs so the direction-class transition has actually
+        // started before we start listening for its completion.
+        requestAnimationFrame(() =>
+        {
+            requestAnimationFrame(() =>
+            {
+                if (done) return;
+                onEnd = (ev) =>
+                {
+                    if (ev.propertyName !== "transform") return;
+                    if (ev.target !== editor && ev.target !== stack) return;
+                    finish();
+                };
+                ws.addEventListener("transitionend", onEnd);
+            });
+        });
+        fallbackTimer = setTimeout(finish, 400);
+    });
 }
 
 /** Toggle between dual and solo-mangaplay */

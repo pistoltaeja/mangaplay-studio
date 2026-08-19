@@ -1,33 +1,79 @@
 // @ts-check
 /**
- * spellcheck-linter.js — CM6 `linter()` source that drives Harper over
- * the prose-bearing ranges of the active document.
+ * spellcheck-linter.js — CM6 linter source that drives Harper over the
+ * prose-bearing ranges of the active document.
  *
- * Tier A (en-US / en-GB):
- *   - Walks the Lezer tree via `proseRanges(state)`.
- *   - Concatenates the prose into one string with `\n` separators and
- *     keeps an offset table so Harper's relative spans can be mapped
- *     back to absolute doc positions.
- *   - Calls `lintEnglish(text, dialect)` and surfaces each result as a
- *     CM6 `Diagnostic` with quick-fix `actions` (top 5 suggestions).
+ * Architecture (read this before adding features)
+ * ------------------------------------------------
+ * The spellcheck pipeline has four layers, each with a single job:
  *
- * Tier B (de, es, fr, it, pt, ru, vi, ko):
- *   v1 returns `[]`. The `contenteditable spellcheck="true"` on source
- *   and visual modes carries spelling for these locales; retext-spell +
- *   Hunspell dictionaries are deliberately deferred — they would add
- *   ~6 MB to the bundle and the native WebView2 spellchecker covers the
- *   common case. Tracked as a follow-up in `desktop-spellcheck-grammar.md`.
+ *   1. lezer-prose-ranges.js  — walks the Lezer syntax tree and yields
+ *      only the node types that contain user prose (Action, Dialogue,
+ *      Parenthetical, Centered, Lyric, TitlePageEntry). Structural
+ *      nodes (page/panel headings, character cues, scene slugs, SFX,
+ *      transitions, notes, boneyard) are excluded here so Harper never
+ *      sees them. If a new structural node type is added to the grammar,
+ *      add it to PROSE_NODE_NAMES there — not here.
  *
- * Tier C, D, OFF:
- *   No-op (`[]`).
+ *   2. this file (spellcheck-linter.js) — concatenates the prose ranges
+ *      into one string, sends it to Harper, maps Harper's spans back to
+ *      absolute CM6 document positions, and applies screenplay-aware
+ *      post-filters before emitting CM6 Diagnostics.
  *
- * Debounce: 400 ms via CM6's `delay` option — coarser than the parser
- * linter (250 ms) because Harper's worker bounce + WASM cost dwarfs the
- * keystroke cadence.
+ *   3. harper-linter.js — owns the singleton Harper WorkerLinter (WASM).
+ *      Handles dialect resolution, worker lifecycle, user-dictionary
+ *      injection, and benchmark stamping. This file is lazy-loaded
+ *      (~1.5 MB) so the boot chunk stays slim.
+ *
+ *   4. combined-linter.js — wires the parser linter (sync, 250 ms) and
+ *      spell linter (async, 400 ms) as two separate CM6 linter()
+ *      extensions so parser diagnostics surface immediately even while
+ *      Harper is still warming up.
+ *
+ * Where to make changes
+ * ---------------------
+ * - New screenplay-safe words: if they come from the script (character
+ *   names, title-page Vocabulary), add them via collectVocabulary() →
+ *   ensureDictionary(). Harper's user dictionary handles these.
+ *
+ * - Entire classes of false positives (e.g. ALL CAPS prop introductions):
+ *   add a post-filter in the `for (const lint of lints)` loop below.
+ *   This is the right layer because we have both the flagged text and
+ *   the Harper lint metadata (kind, message, suggestions).
+ *
+ * - New node types that should/shouldn't be linted: change
+ *   PROSE_NODE_NAMES in lezer-prose-ranges.js.
+ *
+ * - Harper config (enable/disable rules): use setLintConfig() on the
+ *   WorkerLinter instance in harper-linter.js. Rule names are
+ *   Record<string, boolean | null> — never hard-code rule existence,
+ *   Harper adds rules across versions.
+ *
+ * Known upstream limitations (Harper v2.x)
+ * ----------------------------------------
+ * - ALL CAPS words produce bad spelling suggestions and may be
+ *   misidentified as acronyms (Automattic/harper#939, #1419). We
+ *   filter these out in the lint loop below.
+ * - Spell suggestions for title-case and all-caps variants of the same
+ *   word can suggest each other recursively (#2661).
+ * - Harper's LintConfig is Record<string, boolean | null>; rule names
+ *   are not guaranteed stable across versions.
+ *
+ * Tier system
+ * -----------
+ *   Tier A (en-US / en-GB): Harper — spelling + grammar + style.
+ *   Tier B (de, es, fr, it, pt, ru, vi, ko): deferred retext-spell +
+ *     Hunspell. v1 returns []; native WebView2 spellcheck carries load.
+ *   Tier C (id): native browser spellcheck only.
+ *   Tier D (ja, zh-CN, zh-TW, th): limited / no spellcheck model.
+ *   OFF: master toggle disabled.
  */
 
+import { forceLinting } from "@codemirror/lint";
 import { proseRanges } from "../editor/lezer-prose-ranges.js";
 import { parseScript } from "../../../../core/parser/fountain-plus-mangaplay-parser.js";
+import { isIgnored, personalDictWords } from "./spellcheck-store.js";
+import { scanStyleTagTokens } from "../../../../core/parser/style-tag-scanner.js";
 
 // harper-linter.js (which imports the 1.5 MB harper.js bundle + WASM) is
 // lazy-loaded inside runSpellcheckLinter so the bundle never lands until
@@ -201,7 +247,8 @@ export async function runSpellcheckLinter(getCfg, view)
         const source = view.state.doc.toString();
         const ast = parseScript(source);
         const words = collectVocabulary(ast);
-        if (words.length > 0) await harper.ensureDictionary(words);
+        const merged = [...words, ...personalDictWords()];
+        if (merged.length > 0) await harper.ensureDictionary(merged);
     }
     catch (_) { /* fail open — at worst we get more false positives */ }
 
@@ -254,15 +301,37 @@ export async function runSpellcheckLinter(getCfg, view)
         const to = entry.absStart + (span.end - entry.concatStart);
         if (to <= from) continue;
 
+        // Screenplay convention: ALL CAPS words in prose denote prop
+        // introductions, emphasis, or inline SFX ("She grabs the KNIFE").
+        // Harper mishandles all-caps text (Automattic/harper#939, #1419).
+        const flaggedText = concat.slice(span.start, span.end);
+        if (flaggedText.length >= 2 && /^[A-Z]+$/.test(flaggedText)) continue;
+        if (isIgnored(flaggedText)) continue;
+
+        // Style-tag body filter: suppress any diagnostic whose doc range
+        // falls entirely inside a [[~...]] open tag or [[~]] close tag.
+        // These are syntax — not user prose — so Harper squiggles inside
+        // them are always false positives.
+        {
+            const docLine = view.state.doc.lineAt(from);
+            const lineTokens = scanStyleTagTokens(docLine.text, docLine.from);
+            const insideTag = lineTokens.some(
+                (tok) => from >= tok.from && to <= tok.to
+            );
+            if (insideTag) continue;
+        }
+
         const { severity, markClass } = severityFor(lint);
 
         let message = "";
         try { message = String(lint?.message?.() || ""); }
         catch (_) { message = ""; }
 
+        const suggestions = suggestionsFor(lint, 5);
+
         /** @type {import("@codemirror/lint").Action[]} */
         const actions = [];
-        for (const replacement of suggestionsFor(lint, 5))
+        for (const replacement of suggestions)
         {
             actions.push({
                 name: replacement,
@@ -273,13 +342,51 @@ export async function runSpellcheckLinter(getCfg, view)
             });
         }
 
+        // "Add to personal dictionary" — lazy-loads harper module (already
+        // cached after a lint pass has run, so no extra 1.5 MB fetch).
+        actions.push({
+            name: "Add to dictionary",
+            apply(v, aFrom, aTo)
+            {
+                const word = v.state.doc.sliceString(aFrom, aTo);
+                loadHarperModule().then((m) =>
+                {
+                    m.addToDictionary(word);
+                    forceLinting(v);
+                }).catch(() => {});
+            }
+        });
+
+        // "Always correct to X" — one action per suggestion.
+        for (const sugg of suggestions)
+        {
+            const captured = sugg;
+            actions.push({
+                name: `Always correct to "${captured}"`,
+                apply(v, aFrom, aTo)
+                {
+                    const word = v.state.doc.sliceString(aFrom, aTo);
+                    v.dispatch({ changes: { from: aFrom, to: aTo, insert: captured } });
+                    import("../project/user-settings.js").then(({ getUserSetting, saveUserSettings }) =>
+                    {
+                        const existing = getUserSetting("autoCorrections", []);
+                        if (!existing.some((r) => r.from === word && r.to === captured))
+                        {
+                            saveUserSettings({ autoCorrections: [...existing, { from: word, to: captured }] });
+                        }
+                    }).catch(() => {});
+                }
+            });
+        }
+
         diagnostics.push({
             from,
             to,
             severity,
             message: message || "Spelling",
             markClass,
-            actions
+            actions,
+            mpsSpellSuggestion: markClass === "cm-mp-error" && actions.length > 0,
         });
     }
 

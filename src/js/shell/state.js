@@ -2,8 +2,6 @@
 //
 // Every module under src/js/shell/ reads and writes fields on the single
 // `state` object below. Mutate fields; do not reassign the object.
-// Field ownership (which module writes each field) is documented in
-// TODO/app-js-shell-split.md.
 
 export const state = {
     // slots + editor
@@ -16,7 +14,7 @@ export const state = {
     canvasApi: null,
     modeToggleEl: null,
     appFooter: null,
-    visualEditorEl: null,
+    easyEditorEl: null,
     outlineView: null,
     statisticsView: null,
     applyEditorModeRef: null,
@@ -24,6 +22,7 @@ export const state = {
     editorBarPagePrevBtn: null,
     editorBarPageNextBtn: null,
     editorBarFixIssuesBtn: null,
+    editorToolbarEl: null,
 
     // project + fs
     currentProject: null,
@@ -59,6 +58,24 @@ export const state = {
 
     // pills / menus
     publishDocPillCtrl: null,
+    publishSlidesPillCtrl: null,
+    slidesLinkedForActive: false,
+    // Slides sync status for the active script. Updated asynchronously
+    // after slot activation. Drives the badge overlay on the Slides pill.
+    //   null             — check not yet run or skipped (no auth, non-mangaplay)
+    //   "synced"         — remote revisionId matches lastKnownRevisionId
+    //   "remote-changed" — remote revisionId differs from stored value
+    //   "unknown"        — no stored revisionId to compare against
+    slidesSyncStatus: null,
+    // Monotonic generation counter — incremented on every slot activation
+    // that triggers a sync-status check. The fire-and-forget IIFE captures
+    // the value before awaiting and bails if it changed (another activation
+    // superseded this one).
+    slidesSyncCheckGen: 0,
+    // True when the active file lives in a Storyboard Folder — drives the
+    // Publish Slides pill's tooltip variant + the "Group Google Slides™"
+    // menu label. Refreshed by onSlotActivated (app.js).
+    publishScopeIsFolder: false,
     projectSwitcherMenuEl: null,
     lastRightClickedFolder: null,
     lastRightClickedFolderUuid: null,

@@ -9,12 +9,10 @@ use crate::commands::project_mutations::{read_project_json, write_project_json};
 use crate::fs_helpers;
 use crate::fs_helpers::next_free_name;
 use crate::locks::ProjectJsonLocks;
-use crate::project_root::{ProjectRoot, assert_within_project_root};
 use crate::script_map::{script_map_drop, script_map_drop_prefix};
 use crate::slides_links::slides_link_drop as slides_link_drop_pure;
 
 use super::crud::{project_rel_path, rel_join};
-use super::fs_events::{FsChange, emit_fs_changed};
 use super::fs_events::{split_base_and_ext, strip_trailing_number};
 
 // ── app_copy_file ────────────────────────────────────────────────────────
@@ -44,16 +42,6 @@ pub fn copy_file_impl(path: &Path) -> Result<PathBuf, String>
     let dst = parent.join(&new_name);
     std::fs::copy(path, &dst).map_err(|e| format!("copy-error:{}", e))?;
     Ok(dst)
-}
-
-#[tauri::command]
-pub fn app_copy_file(app: tauri::AppHandle, path: String) -> Result<String, String>
-{
-    let p = Path::new(&path);
-    let dst = copy_file_impl(p)?;
-    let dst_str = dst.to_string_lossy().to_string();
-    emit_fs_changed(&app, &path, FsChange::Copied { to: dst_str.clone() });
-    Ok(dst_str)
 }
 
 // ── app_delete_file ──────────────────────────────────────────────────────
@@ -88,8 +76,7 @@ pub fn classify_trash_error(err: trash::Error) -> String
     }
 }
 
-/// Pure helper backing `app_delete_file`. See
-/// TODO/mangaplay-storyboard-relocation.md Phase 4.
+/// Pure helper backing `app_delete_file`.
 ///
 /// When `project_root` is provided AND `path` is a script file (per
 /// `is_script_filename`) AND `project.json` has an `artMap.scripts` entry
@@ -109,7 +96,7 @@ pub fn classify_trash_error(err: trash::Error) -> String
 /// succeed but (3) fails, the art file is orphaned without a map entry —
 /// dead bytes on disk, never referenced.
 ///
-/// Folder deletes (`path.is_dir()`) route through a separate branch (Phase 6):
+/// Folder deletes (`path.is_dir()`) route through a separate branch:
 /// the script-side folder is trashed first, then every `artMap.scripts` key
 /// under `<folderRel>/` is dropped and the mirrored
 /// `<root>/storyboard/<folderRel>/` subtree is trashed too. Art-side steps
@@ -124,7 +111,7 @@ pub fn delete_file_impl(
         return Err("not-found".into());
     }
 
-    // ── FOLDER delete branch (Phase 6) ────────────────────────────────────
+    // ── FOLDER delete branch ──────────────────────────────────────────────
     if path.is_dir()
     {
         // Capture rel path BEFORE the trash so `project_rel_path` resolves
@@ -144,7 +131,7 @@ pub fn delete_file_impl(
         return Ok(());
     }
 
-    // ── FILE delete branch (Phase 4) ──────────────────────────────────────
+    // ── FILE delete branch ────────────────────────────────────────────────
     // Compute art-side bookkeeping inputs BEFORE trashing the script, while
     // the file still exists (`is_file` would flip to false post-trash, and
     // `project_rel_path` doesn't care either way, but we want the gate
@@ -160,21 +147,6 @@ pub fn delete_file_impl(
         apply_art_cleanup_trash(&root, &script_rel, &uuid);
     }
 
-    Ok(())
-}
-
-#[tauri::command]
-pub fn app_delete_file(
-    app: tauri::AppHandle,
-    state: tauri::State<ProjectRoot>,
-    path: String,
-    project_root: Option<String>,
-) -> Result<(), String>
-{
-    let safe = assert_within_project_root(Path::new(&path), &state)?;
-    let root_buf = project_root.as_deref().map(Path::new);
-    delete_file_impl(&safe, root_buf)?;
-    emit_fs_changed(&app, &path, FsChange::Deleted);
     Ok(())
 }
 
@@ -203,7 +175,7 @@ pub fn force_delete_impl(path: &Path) -> Result<(), String>
 ///   * the matching art file is removed via `std::fs::remove_file` (same)
 ///
 /// The shared `force_delete_impl` is intentionally untouched so the folder
-/// delete path (Phase 6) can keep using it unchanged.
+/// delete path can keep using it unchanged.
 pub fn delete_file_force_impl(
     path: &Path,
     project_root: Option<&Path>,
@@ -214,7 +186,7 @@ pub fn delete_file_force_impl(
         return Err("not-found".into());
     }
 
-    // ── FOLDER delete branch (Phase 6) ────────────────────────────────────
+    // ── FOLDER delete branch ──────────────────────────────────────────────
     if path.is_dir()
     {
         let folder_rel_opt = project_root
@@ -230,7 +202,7 @@ pub fn delete_file_force_impl(
         return Ok(());
     }
 
-    // ── FILE delete branch (Phase 4) ──────────────────────────────────────
+    // ── FILE delete branch ────────────────────────────────────────────────
     let art_cleanup = compute_art_cleanup(path, project_root);
 
     force_delete_impl(path)?;
@@ -243,25 +215,10 @@ pub fn delete_file_force_impl(
     Ok(())
 }
 
-#[tauri::command]
-pub fn app_delete_file_force(
-    app: tauri::AppHandle,
-    state: tauri::State<ProjectRoot>,
-    path: String,
-    project_root: Option<String>,
-) -> Result<(), String>
-{
-    let safe = assert_within_project_root(Path::new(&path), &state)?;
-    let root_buf = project_root.as_deref().map(Path::new);
-    delete_file_force_impl(&safe, root_buf)?;
-    emit_fs_changed(&app, &path, FsChange::Deleted);
-    Ok(())
-}
-
 /// Decide whether a delete call needs to do art bookkeeping. Returns
 /// `Some((project_root, script_rel_path, uuid))` when ALL gates pass:
 ///   * project root supplied (call originated inside an open project)
-///   * the path is a regular file (folder delete is Phase 6's job)
+///   * the path is a regular file (folder delete is the folder branch's job)
 ///   * basename is a script filename per [`is_script_filename`]
 ///   * the path lives under `project_root` (else `project_rel_path` returns
 ///     `None`)
@@ -301,6 +258,12 @@ pub fn apply_art_cleanup_trash(root: &Path, script_rel: &str, uuid: &str)
     apply_art_cleanup_trash_locked(root, script_rel, uuid);
 }
 
+enum ArtCleanupMode
+{
+    Trash,
+    ForceRemove,
+}
+
 /// Lockless variant of [`apply_art_cleanup_trash`]. Skips the
 /// `ProjectJsonLocks` acquisition — callers MUST already hold the per-project
 /// mutex, otherwise the read-modify-write on `project.json` races. Used by
@@ -309,35 +272,7 @@ pub fn apply_art_cleanup_trash(root: &Path, script_rel: &str, uuid: &str)
 /// same thread, non-reentrant).
 pub fn apply_art_cleanup_trash_locked(root: &Path, script_rel: &str, uuid: &str)
 {
-    let Ok(mut pj) = read_project_json(root)
-    else
-    {
-        eprintln!(
-            "[delete] art cleanup skipped: project.json unreadable at {}",
-            root.display(),
-        );
-        return;
-    };
-    art_map_drop(&mut pj, script_rel);
-    script_map_drop(&mut pj, script_rel);
-    slides_link_drop_pure(&mut pj, uuid);
-    if let Err(e) = write_project_json(root, &pj)
-    {
-        eprintln!("[delete] failed to write project.json after drop: {}", e);
-        return;
-    }
-    let art_path = resolve_art_path(root, script_rel, uuid);
-    if art_path.exists()
-    {
-        if let Err(e) = fs_helpers::trash_or_remove(&art_path)
-        {
-            eprintln!(
-                "[delete] failed to trash art file {}: {}",
-                art_path.display(),
-                e,
-            );
-        }
-    }
+    apply_art_cleanup_locked_shared(root, script_rel, uuid, ArtCleanupMode::Trash);
 }
 
 /// Like [`apply_art_cleanup_trash`] but uses `std::fs::remove_file` for the
@@ -355,11 +290,27 @@ pub fn apply_art_cleanup_remove(root: &Path, script_rel: &str, uuid: &str)
 /// [`apply_art_cleanup_trash_locked`] for the invariant callers must uphold.
 pub fn apply_art_cleanup_remove_locked(root: &Path, script_rel: &str, uuid: &str)
 {
+    apply_art_cleanup_locked_shared(root, script_rel, uuid, ArtCleanupMode::ForceRemove);
+}
+
+fn apply_art_cleanup_locked_shared(
+    root: &Path,
+    script_rel: &str,
+    uuid: &str,
+    mode: ArtCleanupMode,
+)
+{
+    let tag = match mode
+    {
+        ArtCleanupMode::Trash => "[delete]",
+        ArtCleanupMode::ForceRemove => "[delete-force]",
+    };
     let Ok(mut pj) = read_project_json(root)
     else
     {
         eprintln!(
-            "[delete-force] art cleanup skipped: project.json unreadable at {}",
+            "{} art cleanup skipped: project.json unreadable at {}",
+            tag,
             root.display(),
         );
         return;
@@ -369,16 +320,29 @@ pub fn apply_art_cleanup_remove_locked(root: &Path, script_rel: &str, uuid: &str
     slides_link_drop_pure(&mut pj, uuid);
     if let Err(e) = write_project_json(root, &pj)
     {
-        eprintln!("[delete-force] failed to write project.json after drop: {}", e);
+        eprintln!("{} failed to write project.json after drop: {}", tag, e);
         return;
     }
     let art_path = resolve_art_path(root, script_rel, uuid);
     if art_path.exists()
     {
-        if let Err(e) = std::fs::remove_file(&art_path)
+        let res = match mode
         {
+            ArtCleanupMode::Trash => fs_helpers::trash_or_remove(&art_path),
+            ArtCleanupMode::ForceRemove =>
+                std::fs::remove_file(&art_path).map_err(|e| e.to_string()),
+        };
+        if let Err(e) = res
+        {
+            let verb = match mode
+            {
+                ArtCleanupMode::Trash => "trash",
+                ArtCleanupMode::ForceRemove => "remove",
+            };
             eprintln!(
-                "[delete-force] failed to remove art file {}: {}",
+                "{} failed to {} art file {}: {}",
+                tag,
+                verb,
                 art_path.display(),
                 e,
             );
@@ -386,7 +350,7 @@ pub fn apply_art_cleanup_remove_locked(root: &Path, script_rel: &str, uuid: &str
     }
 }
 
-/// Best-effort folder-delete art cleanup using the trash crate (Phase 6).
+/// Best-effort folder-delete art cleanup using the trash crate.
 /// Called AFTER the script folder has already been trashed; any failure here
 /// is logged via `eprintln!` and never unwinds the script delete.
 ///
@@ -402,62 +366,67 @@ pub fn apply_art_cleanup_remove_locked(root: &Path, script_rel: &str, uuid: &str
 ///      a clean no-op.
 fn apply_folder_art_cleanup_trash(root: &Path, folder_rel: &str)
 {
-    let locks = ProjectJsonLocks::global();
-    let lock = locks.lock_for(root);
-    let _guard = lock.lock().expect("project-json mutex poisoned");
-
-    let Ok(mut pj) = read_project_json(root)
-    else
-    {
-        eprintln!(
-            "[delete-folder] art cleanup skipped: project.json unreadable at {}",
-            root.display(),
-        );
-        return;
-    };
-    art_map_drop_prefix(&mut pj, folder_rel);
-    script_map_drop_prefix(&mut pj, folder_rel);
-    if let Err(e) = write_project_json(root, &pj)
-    {
-        eprintln!(
-            "[delete-folder] failed to write project.json after drop_prefix: {}",
-            e,
-        );
-        return;
-    }
-    let storyboard_subtree = rel_join(&storyboard_dir(root), folder_rel);
-    if storyboard_subtree.exists()
-    {
-        if let Err(e) = fs_helpers::trash_or_remove(&storyboard_subtree)
-        {
-            eprintln!(
-                "[delete-folder] failed to trash storyboard subtree {}: {}",
-                storyboard_subtree.display(),
-                e,
-            );
-        }
-    }
+    apply_folder_art_cleanup_shared(root, folder_rel, ArtCleanupMode::Trash);
 }
 
-/// Like [`apply_folder_art_cleanup_trash`] but uses `std::fs::remove_dir_all`
-/// for the storyboard subtree — used by the force-delete folder path so the
-/// call stays trash-free end to end.
+/// Force-delete counterpart to [`apply_folder_art_cleanup_trash`], used by
+/// the force-delete folder path. Diverges from the trash variant in two
+/// deliberate ways:
+///
+/// - Skips the [`ProjectJsonLocks::global()`] acquisition — the force-delete
+///   caller already owns exclusive access to the folder subtree.
+/// - Skips the [`script_map_drop_prefix`] call; only [`art_map_drop_prefix`]
+///   runs against `project.json`.
+///
+/// Uses `std::fs::remove_dir_all` (not the `trash` crate) so the call stays
+/// trash-free end to end.
 fn apply_folder_art_cleanup_remove(root: &Path, folder_rel: &str)
 {
+    apply_folder_art_cleanup_shared(root, folder_rel, ArtCleanupMode::ForceRemove);
+}
+
+fn apply_folder_art_cleanup_shared(
+    root: &Path,
+    folder_rel: &str,
+    mode: ArtCleanupMode,
+)
+{
+    let tag = match mode
+    {
+        ArtCleanupMode::Trash => "[delete-folder]",
+        ArtCleanupMode::ForceRemove => "[delete-folder-force]",
+    };
+
+    // Trash mode acquires the project-json mutex; ForceRemove skips it (caller owns the subtree).
+    let _lock_arc = match mode
+    {
+        ArtCleanupMode::Trash => Some(ProjectJsonLocks::global().lock_for(root)),
+        ArtCleanupMode::ForceRemove => None,
+    };
+    let _guard = _lock_arc
+        .as_ref()
+        .map(|arc| arc.lock().expect("project-json mutex poisoned"));
+
     let Ok(mut pj) = read_project_json(root)
     else
     {
         eprintln!(
-            "[delete-folder-force] art cleanup skipped: project.json unreadable at {}",
+            "{} art cleanup skipped: project.json unreadable at {}",
+            tag,
             root.display(),
         );
         return;
     };
     art_map_drop_prefix(&mut pj, folder_rel);
+    if matches!(mode, ArtCleanupMode::Trash)
+    {
+        script_map_drop_prefix(&mut pj, folder_rel);
+    }
     if let Err(e) = write_project_json(root, &pj)
     {
         eprintln!(
-            "[delete-folder-force] failed to write project.json after drop_prefix: {}",
+            "{} failed to write project.json after drop_prefix: {}",
+            tag,
             e,
         );
         return;
@@ -465,10 +434,24 @@ fn apply_folder_art_cleanup_remove(root: &Path, folder_rel: &str)
     let storyboard_subtree = rel_join(&storyboard_dir(root), folder_rel);
     if storyboard_subtree.exists()
     {
-        if let Err(e) = std::fs::remove_dir_all(&storyboard_subtree)
+        let res = match mode
         {
+            ArtCleanupMode::Trash =>
+                fs_helpers::trash_or_remove(&storyboard_subtree),
+            ArtCleanupMode::ForceRemove =>
+                std::fs::remove_dir_all(&storyboard_subtree).map_err(|e| e.to_string()),
+        };
+        if let Err(e) = res
+        {
+            let verb = match mode
+            {
+                ArtCleanupMode::Trash => "trash",
+                ArtCleanupMode::ForceRemove => "remove",
+            };
             eprintln!(
-                "[delete-folder-force] failed to remove storyboard subtree {}: {}",
+                "{} failed to {} storyboard subtree {}: {}",
+                tag,
+                verb,
                 storyboard_subtree.display(),
                 e,
             );

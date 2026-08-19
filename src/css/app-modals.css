@@ -51,6 +51,11 @@
     justify-content: center;
 }
 .settings-close:hover { background: var(--btn-hover-bg); }
+.settings-close[disabled]
+{
+    opacity: 0.4;
+    pointer-events: none;
+}
 
 .settings-body
 {
@@ -72,7 +77,7 @@
 }
 .settings-sidebar-heading
 {
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     color: rgba(0, 0, 0, 0.55);
     padding: 6px 8px;
     margin-bottom: 4px;
@@ -95,7 +100,7 @@ html[data-skin="night"] .settings-sidebar-heading { color: rgba(255, 255, 255, 0
        --mps-primary with white text via the .selected rule below. */
     color: #7a7a82;
     cursor: pointer;
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     text-align: left;
     user-select: none;
 }
@@ -127,7 +132,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 }
 .settings-section-heading
 {
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     font-weight: 500;
     margin: 20px 0 8px 0;
 }
@@ -135,7 +140,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 
 .settings-dialog
 {
-    font-family: system-ui, -apple-system, "Segoe UI Variable", "Segoe UI", var(--mps-font-app);
+    font-family: var(--mps-font-app);
 }
 .settings-card
 {
@@ -176,8 +181,176 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
     gap: 1px;
     flex: 1;
 }
-.mps-row-title { font-size: 14px; line-height: 1.4; }
-.mps-row-help { font-size: 13px; line-height: 1.4; opacity: 0.6; }
+.mps-row-title { font-size: var(--mps-font-size-md); line-height: 1.4; }
+.mps-row-help { font-size: var(--mps-font-size-base); line-height: 1.4; opacity: 0.6; }
+
+/* ── Drill-in row (Text Editor → Personal Dictionary) ───────────────────────
+ * A full-width button that reads like a static row but reveals a chevron and
+ * a hover wash so it announces "this goes deeper". */
+.mps-row-drill
+{
+    width: 100%;
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid var(--rule);
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+    font: inherit;
+    margin: 0 -8px;
+    padding-left: 8px;
+    padding-right: 8px;
+    width: calc(100% + 16px);
+    border-radius: 6px;
+}
+.settings-card > .mps-row-drill:last-child { border-bottom: none; }
+.mps-row-drill:hover { background: var(--btn-hover-bg); }
+.mps-row-drill:focus-visible
+{
+    outline: 2px solid var(--mps-primary);
+    outline-offset: -2px;
+}
+.mps-row-chevron
+{
+    display: inline-flex;
+    align-items: center;
+    opacity: 0.4;
+    transition: transform 160ms var(--mps-ease-ios-spring, ease), opacity 160ms ease;
+}
+.mps-row-drill:hover .mps-row-chevron { opacity: 0.75; transform: translateX(2px); }
+.mps-row-chevron svg { width: 16px; height: 16px; }
+
+/* ── Sub-page slide track (iOS drill-down) ──────────────────────────────────
+ * Overlays only `.settings-content`; the left rail stays put. Off unless a
+ * sub-page is pushed. */
+.settings-content { position: relative; }
+.settings-subpage-track
+{
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+    z-index: 2;
+}
+.settings-subpage-track.is-active { pointer-events: auto; }
+
+.settings-subpage
+{
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    padding: 20px 24px;
+    box-sizing: border-box;
+    background: var(--panel-bg);
+    overflow-y: auto;
+    transform: translateX(100%);
+    transition: transform 280ms var(--mps-ease-ios-spring, cubic-bezier(0.32, 0.72, 0, 1));
+    will-change: transform;
+}
+.settings-subpage.is-active { transform: translateX(0); }
+.settings-subpage.is-entering-right { transform: translateX(100%); }
+.settings-subpage.is-entering-left { transform: translateX(-100%); }
+.settings-subpage.is-leaving-left { transform: translateX(-100%); }
+.settings-subpage.is-leaving-right { transform: translateX(100%); }
+
+.settings-subpage-heading { margin-top: 0; margin-bottom: 14px; }
+
+/* ── Personal Dictionary panel ──────────────────────────────────────────── */
+.pdict-add-row
+{
+    display: flex;
+    gap: 8px;
+    margin-bottom: 14px;
+    flex-shrink: 0;
+}
+.pdict-input
+{
+    flex: 1;
+    height: 32px;
+    padding: 0 10px;
+    background: var(--row-highlight);
+    color: var(--text, inherit);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    font-size: var(--mps-font-size-base);
+    font-family: inherit;
+    box-sizing: border-box;
+}
+.pdict-input::placeholder { color: var(--text-muted, rgba(128, 128, 128, 0.7)); }
+.pdict-input:focus
+{
+    outline: none;
+    border-color: var(--mps-primary);
+    box-shadow: 0 0 0 2px var(--mps-primary-ghost, rgba(91, 141, 255, 0.30));
+}
+.pdict-add-btn { height: 32px; flex-shrink: 0; }
+
+.pdict-list
+{
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    background: var(--row-highlight);
+}
+.pdict-word-row
+{
+    padding: 8px 12px;
+    min-height: 40px;
+    border-bottom: 1px solid var(--rule);
+}
+.pdict-list .pdict-word-row:last-child { border-bottom: none; }
+.pdict-word
+{
+    flex: 1;
+    font-size: var(--mps-font-size-md);
+    overflow-wrap: anywhere;
+}
+.pdict-remove
+{
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    flex-shrink: 0;
+    background: transparent;
+    border: 0;
+    border-radius: 6px;
+    color: var(--danger-fg, #d33);
+    cursor: pointer;
+    opacity: 0.7;
+    transition: opacity 120ms ease, background 120ms ease;
+}
+.pdict-remove:hover
+{
+    opacity: 1;
+    background: var(--danger-ghost, rgba(211, 51, 51, 0.12));
+}
+.pdict-remove:focus-visible
+{
+    outline: 2px solid var(--danger-fg, #d33);
+    outline-offset: -2px;
+    opacity: 1;
+}
+.pdict-remove:disabled { opacity: 0.35; cursor: default; }
+.pdict-remove svg { width: 15px; height: 15px; }
+.pdict-empty
+{
+    padding: 24px 16px;
+    text-align: center;
+    color: var(--text-muted, rgba(128, 128, 128, 0.7));
+    font-size: var(--mps-font-size-base);
+}
+
+@media (prefers-reduced-motion: reduce)
+{
+    .settings-subpage { transition: none; }
+    .mps-row-chevron { transition: none; }
+}
 
 .mps-btn-primary
 {
@@ -187,7 +360,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
     border-radius: 6px;
     height: 28px;
     padding: 0 14px;
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     cursor: pointer;
 }
 .mps-btn-primary:hover { background: var(--mps-primary-hover); }
@@ -201,7 +374,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
     border-radius: 6px;
     height: 28px;
     padding: 0 14px;
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     cursor: pointer;
 }
 .mps-btn-danger:hover { background: var(--accent-red-hover, #b22); }
@@ -215,7 +388,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
     border-radius: 6px;
     height: 28px;
     padding: 0 14px;
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     cursor: pointer;
 }
 .mps-btn-secondary:hover { background: var(--btn-hover-bg); }
@@ -224,7 +397,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 .settings-link
 {
     color: var(--mps-primary);
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     cursor: pointer;
     text-decoration: none;
 }
@@ -236,7 +409,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
  * the text for an inline spinner while the fetch is in flight. */
 .settings-update-status
 {
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     line-height: 1.4;
 }
 .settings-update-status.is-error
@@ -324,7 +497,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 }
 .settings-account-row .settings-name-spoiler-text
 {
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     line-height: 1;
     white-space: nowrap;
     overflow: hidden;
@@ -351,7 +524,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
     border-radius: 6px;
     background: transparent;
     cursor: pointer;
-    font-size: 14px;
+    font-size: var(--mps-font-size-md);
     line-height: 1;
     padding: 0;
 }
@@ -391,7 +564,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
     color: var(--mps-text-secondary, #666);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
 }
 .settings-publish-avatar
 {
@@ -485,9 +658,121 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
     border-radius: 6px;
     height: 28px;
     padding: 0 8px;
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
 }
 .mps-select:focus { outline: 2px solid var(--mps-primary); outline-offset: 1px; }
+
+/* ── Skin preview-swatch grid (Settings → Appearance) ───────────────────────
+ * iOS-style mini app-mockup swatches ported from the native swatch grid
+ * (MPSSettingsView+Swatch.m). The mockup interiors use hardcoded per-skin
+ * palette colors set inline from JS — each swatch previews ITS skin, not the
+ * active one. Cell chrome (name, border, ring) uses the modal's live vars. */
+.skin-swatch-grid
+{
+    display: grid;
+    /* ~1/4 the previous card area: cells were ~290px wide (fixed 2-col in a
+       ~600px pane); ~140px cells halve each dimension and pack ~4 per row. */
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 14px 12px;
+    padding: 10px 2px 4px;
+}
+.skin-swatch-cell
+{
+    appearance: none;
+    background: none;
+    border: none;
+    padding: 0;
+    margin: 0;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+    border-radius: 10px;
+}
+.skin-swatch-art
+{
+    position: relative;
+    aspect-ratio: 4 / 3;
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid var(--rule);
+    transition: outline-color 140ms ease, transform 140ms ease;
+    outline: 3px solid transparent;
+    outline-offset: 2px;
+}
+.skin-swatch-cell:hover .skin-swatch-art { outline-color: var(--rule); }
+.skin-swatch-cell:active .skin-swatch-art { transform: scale(0.97); }
+.skin-swatch-cell.is-selected .skin-swatch-art { outline-color: var(--mps-primary); }
+.skin-swatch-cell:focus-visible { outline: none; }
+.skin-swatch-cell:focus-visible .skin-swatch-art { outline-color: var(--mps-primary); }
+.skin-swatch-toolbar
+{
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 22%;
+}
+.skin-swatch-page
+{
+    box-sizing: border-box;
+    position: absolute;
+    top: calc(22% + 8px);
+    left: 10px;
+    right: 10px;
+    bottom: 10px;
+    border-radius: 3px;
+    padding: 8px 8px 0 8px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 5px;
+}
+.skin-swatch-bar
+{
+    height: 3px;
+    border-radius: 1.5px;
+    flex-shrink: 0;
+}
+.skin-swatch-check
+{
+    position: absolute;
+    top: 5px;
+    right: 5px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--mps-primary);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transform: scale(0.92);
+    transition: opacity 160ms ease, transform 160ms cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+.skin-swatch-check svg { display: block; }
+.skin-swatch-cell.is-selected .skin-swatch-check
+{
+    opacity: 1;
+    transform: scale(1);
+}
+.skin-swatch-name
+{
+    margin-top: 6px;
+    font-size: calc(var(--mps-font-size-base) - 1px);
+    font-weight: 600;
+    line-height: 1.3;
+}
+@media (prefers-reduced-motion: reduce)
+{
+    .skin-swatch-art,
+    .skin-swatch-check
+    {
+        transition: none;
+    }
+    .skin-swatch-cell:active .skin-swatch-art { transform: none; }
+}
 
 /* Toast */
 .settings-toast
@@ -500,7 +785,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
     border-radius: 8px;
     padding: 12px 16px;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     z-index: 3000;
     opacity: 0;
     transform: translateY(8px);
@@ -548,7 +833,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 .confirm-modal-heading
 {
     margin: 0;
-    font-size: 16px;
+    font-size: var(--mps-font-size-lg);
     font-weight: 600;
     line-height: 1.2;
 }
@@ -556,7 +841,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 .confirm-modal-desc
 {
     margin: 0;
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     line-height: 1.5;
     color: var(--row-text);
     opacity: 0.92;
@@ -673,7 +958,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 .help-modal-version
 {
     color: #8a8a8a;
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
 }
 
 /* List of help entries — each row is label + desc on the left, action
@@ -710,7 +995,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 
 .help-modal-row-label
 {
-    font-size: 14px;
+    font-size: var(--mps-font-size-md);
     font-weight: 500;
     line-height: 1.3;
     margin-bottom: 2px;
@@ -719,7 +1004,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 
 .help-modal-row-desc
 {
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     line-height: 1.4;
     color: #9a9a9a;
 }
@@ -734,7 +1019,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
     background: #363636;
     color: #e6e6e6;
     font-family: var(--mps-font-app);
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     font-weight: 500;
     cursor: pointer;
     transition: background 90ms ease, border-color 90ms ease;
@@ -801,12 +1086,12 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 {
     margin: 0;
     color: var(--mps-text-secondary, #666);
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     line-height: 1.4;
 }
 .export-section-heading
 {
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     font-weight: 600;
     color: var(--mps-text-primary, #1a1a1a);
 }
@@ -850,6 +1135,22 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
     opacity: 0.4;
     cursor: not-allowed;
 }
+.export-font-row
+{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+.export-font-label
+{
+    font-size: var(--mps-font-size-base);
+    color: var(--mps-text-primary, #1a1a1a);
+}
+.export-font-select
+{
+    min-width: 160px;
+}
 .export-format-icon
 {
     width: 48px;
@@ -858,13 +1159,13 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 }
 .export-format-name
 {
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     font-weight: 600;
     color: var(--mps-text-primary, #1a1a1a);
 }
 .export-format-ext
 {
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     color: var(--mps-text-secondary, #666);
     font-variant-numeric: tabular-nums;
 }
@@ -901,7 +1202,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 .export-progress-label
 {
     color: var(--mps-text-secondary, #666);
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
 }
 
 /* Reveal-Navigator flash for the active folder-list row. */
@@ -920,15 +1221,15 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 /* The More Options button sits next to the mode toggle. It reuses
  * .mps-editor-mode-toggle-btn for the icon button styling. The mode toggle
  * keeps `margin-left: auto` so the pair sticks together at the right edge;
- * we own the right-side margin here so the spacing matches the toggle's
- * standalone version. */
+ * flush against the right — breathing room comes from the container's
+ * existing padding. */
 .editor-area-top-bar .editor-bar-more-options
 {
     margin-left: 4px;
-    margin-right: 14px;
+    margin-right: 0;
 }
 
-/* ── Google Docs sync — folder picker tree (Phase 1) ───────────────────
+/* ── Google Docs sync — folder picker tree ──────────────────────────────
  * Lazy Drive folder tree rendered inline inside the Publish modal.
  * Styling kept lightweight to match the existing .folder-list pattern
  * above; no hover animation, no drag-and-drop semantics. */
@@ -939,7 +1240,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
     border: 1px solid var(--row-border, rgba(255, 255, 255, 0.08));
     border-radius: 6px;
     padding: 4px 0;
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     background: var(--row-bg, rgba(255, 255, 255, 0.02));
 }
 
@@ -994,7 +1295,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 .gds-folder-picker .gds-empty,
 .gds-folder-picker .gds-error
 {
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     color: var(--row-badge, rgba(255, 255, 255, 0.55));
     padding: 4px 8px;
     font-style: italic;
@@ -1006,9 +1307,8 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 /* ───────────────────────────────────────────────────────────────────────
  * Publish to Google Docs modal — three-panel sliding track.
  *
- * Per TODO/mangaplay-studio-google-docs-sync.md §3a. The modal-shell
- * already owns the backdrop / fade-in / Esc handling; this block only
- * styles the three sibling panels and their transition.
+ * The modal-shell already owns the backdrop / fade-in / Esc handling;
+ * this block only styles the three sibling panels and their transition.
  * ─────────────────────────────────────────────────────────────────────── */
 
 .settings-dialog.publish-modal
@@ -1032,6 +1332,11 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 {
     font-weight: 600;
     font-size: 15px;
+    /* Explicit token instead of inheriting from body — the modal is skin-aware
+     * (Default → `#1a1a1a`, Night → `#e8e8e8`) so a hardcoded value would go
+     * black on the Night `--panel-bg: #1e1e1e` titlebar. Both Publish modals
+     * (Docs + Slides) share this class. */
+    color: var(--mps-text, inherit);
 }
 
 .publish-track
@@ -1053,6 +1358,75 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 .publish-track[data-panel="collab"]   { transform: translateX(calc(-100% / 7 * 5)); }
 .publish-track[data-panel="folder"]   { transform: translateX(calc(-100% / 7 * 6)); }
 
+/* Slides modal uses a stack pattern — only the active panel is visible via
+ * `[hidden]`. Docs modal keeps the transform-track pattern above; scoping
+ * these rules to `.publish-modal-slides` keeps the two flows independent. */
+.publish-modal-slides .publish-track
+{
+    display: block;
+    width: 100%;
+    transform: none;
+    transition: none;
+    position: relative;
+    contain: none;
+    overflow: hidden;              /* clip the mid-slide off-screen halves */
+}
+
+/* Every panel absolutely stacked on top of each other. Base state = off-screen
+ * to the right; JS adds `is-active` / `is-leaving-*` to drive transitions. */
+.publish-modal-slides .publish-track > .publish-panel
+{
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    flex-shrink: initial;
+    transform: translateX(100%);
+    opacity: 0;
+    transition: transform 260ms cubic-bezier(0.4, 0, 0.2, 1),
+                opacity 200ms ease;
+    pointer-events: none;
+}
+
+.publish-modal-slides .publish-track > .publish-panel.is-active
+{
+    transform: translateX(0);
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.publish-modal-slides .publish-track > .publish-panel.is-leaving-left
+{
+    transform: translateX(-100%);
+    opacity: 0;
+    pointer-events: none;
+}
+
+.publish-modal-slides .publish-track > .publish-panel.is-leaving-right
+{
+    transform: translateX(100%);
+    opacity: 0;
+    pointer-events: none;
+}
+
+.publish-modal-slides .publish-track > .publish-panel.is-entering-left
+{
+    transform: translateX(-100%);
+    opacity: 0;
+}
+
+.publish-modal-slides .publish-track > .publish-panel[hidden]
+{
+    display: none;
+}
+
+@media (prefers-reduced-motion: reduce)
+{
+    .publish-modal-slides .publish-track > .publish-panel
+    {
+        transition: none;
+    }
+}
+
 .publish-panel
 {
     width: 14.2857%;
@@ -1064,6 +1438,20 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
     overflow-y: auto;
     box-sizing: border-box;
 }
+
+/* Slides form wrapper hosts two nested `.publish-panel` sub-panels
+ * (publish + sync). Base `.publish-panel` sizes them at 14.2857% of parent,
+ * which collapses the sub-panels to ~70px inside the 558px wrapper. Fill
+ * the wrapper instead, and drop `[hidden]` down to `display: none` since
+ * `display: flex` on `.publish-panel` otherwise wins over the UA rule. */
+.publish-panel-form > .publish-panel
+{
+    width: 100%;
+    flex: 1;
+    padding: 0;
+    overflow-y: visible;
+}
+.publish-panel-form > .publish-panel[hidden] { display: none; }
 
 /* Gate slot — slot 0 of the slide track. Hosts the spinner and sign-in
    substates as stacked absolutely-positioned children that cross-fade. */
@@ -1128,30 +1516,212 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 }
 .publish-spinner-label
 {
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     color: var(--mps-text-secondary, #666);
 }
 
 .publish-body
 {
     margin: 0;
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     line-height: 1.45;
     color: var(--mps-text-secondary, #666);
     max-width: 360px;
 }
 .publish-signin-error
 {
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     color: var(--accent-red, #ff453a);
     max-width: 360px;
     margin-top: 8px;
 }
+
+/* Sync Slides form — picker button + live caption below. Chrome matches
+ * the Gate/End panels: heading + lede owned by the shared
+ * `.publish-heading` / `.publish-body` rules; footer owned by
+ * `.publish-panel .publish-footer`. This block only styles the picker
+ * button container and caption. */
+.publish-sync-form
+{
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    width: 100%;
+    max-width: 480px;
+    margin: 0 auto;
+}
+.publish-sync-form[hidden] { display: none; }
+.publish-sync-caption
+{
+    margin: 0;
+    min-height: 16px;
+    font-size: var(--mps-font-size-sm);
+    color: var(--mps-text-secondary, #666);
+}
+.publish-sync-caption[data-kind="ok"]   { color: var(--accent-green, #3fa84a); }
+.publish-sync-caption[data-kind="err"]  { color: var(--accent-red, #ff453a); }
+.publish-sync-caption[data-kind="info"] { color: var(--mps-text-secondary, #666); }
+
+/* ── Summary panel (Slides modal — post-prep, pre-link) ──────────────── */
+.publish-panel-summary
+{
+    padding: 24px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+.publish-summary-meta
+{
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: var(--mps-font-size-sm);
+    color: var(--mps-text-secondary, #666);
+}
+.publish-summary-meta p
+{
+    margin: 0;
+}
+.publish-summary-counts
+{
+    border: 1px solid var(--rule, rgba(0, 0, 0, 0.10));
+    border-radius: 6px;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: row;
+    gap: 20px;
+}
+.publish-summary-counts-col
+{
+    flex: 1 1 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+.publish-summary-counts-col + .publish-summary-counts-col
+{
+    border-left: 1px solid var(--rule, rgba(0, 0, 0, 0.10));
+    padding-left: 20px;
+}
+.publish-summary-counts-col-heading
+{
+    margin: 0 0 4px 0;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--mps-text-secondary, #666);
+}
+.publish-summary-counts p
+{
+    margin: 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+    font-size: var(--mps-font-size-base);
+}
+.publish-summary-counts-label
+{
+    color: var(--mps-text-secondary, #666);
+}
+.publish-summary-counts-value
+{
+    color: var(--mps-text-primary, #1a1a1a);
+    font-variant-numeric: tabular-nums;
+}
+.publish-summary-mismatch
+{
+    border-top: 1px solid var(--rule, rgba(0, 0, 0, 0.10));
+    padding-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.publish-summary-mismatch[hidden] { display: none; }
+.publish-summary-mismatch-prompt
+{
+    margin: 0;
+    font-size: var(--mps-font-size-base);
+    color: var(--mps-text-primary, #1a1a1a);
+}
+.publish-summary-mismatch fieldset
+{
+    border: 0;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.publish-summary-mismatch-option
+{
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    cursor: pointer;
+    font-size: var(--mps-font-size-base);
+}
+.publish-summary-mismatch-option input[type="radio"]
+{
+    margin-top: 3px;
+    flex: 0 0 auto;
+}
+.publish-summary-mismatch-text
+{
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+.publish-summary-mismatch-title
+{
+    color: var(--mps-text-primary, #1a1a1a);
+    font-weight: 500;
+}
+.publish-summary-mismatch-desc
+{
+    font-size: 11px;
+    color: var(--mps-text-secondary, #666);
+    line-height: 1.35;
+}
+.publish-summary-warnings
+{
+    border-top: 1px solid var(--rule, rgba(0, 0, 0, 0.10));
+    padding-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.publish-summary-warnings[hidden] { display: none; }
+.publish-summary-warnings h3
+{
+    margin: 0;
+    font-size: var(--mps-font-size-sm);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--mps-text-secondary, #666);
+}
+.publish-summary-warnings ul
+{
+    margin: 0;
+    padding-left: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.publish-summary-warnings li
+{
+    font-size: var(--mps-font-size-sm);
+    color: var(--accent-red, #ff453a);
+}
 /* Permanently-mounted inline error slot for both settings + publish
  * sign-in surfaces. `:empty` collapses the top margin so no dead
  * zone remains in the common (signed-out, no error) case. The
- * layout shift on populate is a deliberate trade-off — see
- * TODO/oauth-error-ux.md. */
+ * layout shift on populate is a deliberate trade-off. */
 .settings-account-error
 {
     color: var(--mps-error-fg, var(--accent-red, #c53030));
@@ -1176,7 +1746,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 }
 .publish-saveto-label
 {
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     color: var(--mps-text-primary, #1a1a1a);
 }
 .publish-saveto-pill
@@ -1189,7 +1759,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
     background: var(--btn-hover-bg, rgba(0, 0, 0, 0.06));
     border: 1px solid var(--rule, rgba(0, 0, 0, 0.10));
     border-radius: 999px;
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     color: var(--mps-text-primary, #1a1a1a);
     max-width: 240px;
     white-space: nowrap;
@@ -1231,7 +1801,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 .publish-heading
 {
     margin: 0;
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     font-weight: 500;
     line-height: 1.4;
     color: var(--mps-text-primary, #1a1a1a);
@@ -1293,7 +1863,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
     padding: 2px 6px 2px 8px;
     border-radius: 12px;
     background: var(--btn-hover-bg, rgba(0, 0, 0, 0.06));
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
 }
 
 .publish-email-chip-x
@@ -1308,7 +1878,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 .publish-form-error
 {
     min-height: 18px;
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     color: var(--accent-red, #ff453a);
 }
 
@@ -1340,15 +1910,25 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 
 .publish-step-label
 {
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     color: var(--mps-text-secondary, #666);
     text-align: center;
     min-height: 18px;
 }
 
+.publish-progress-warning
+{
+    color: var(--danger-fg, #d33);
+    font-weight: 600;
+    font-size: var(--mps-font-size-base);
+    margin-top: 8px;
+    text-align: center;
+}
+.publish-progress-warning[hidden] { display: none; }
+
 .publish-quota-warning
 {
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     color: var(--accent-amber, #f0b400);
     background: rgba(240, 180, 0, 0.08);
     padding: 6px 10px;
@@ -1404,7 +1984,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 {
     text-align: center;
     font-family: var(--mono-font, monospace);
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     width: 100%;
     max-width: 360px;
 }
@@ -1412,7 +1992,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 .publish-error-body
 {
     margin: 0;
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     line-height: 1.45;
     color: var(--mps-text-secondary, #666);
 }
@@ -1421,7 +2001,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 {
     width: 100%;
     text-align: left;
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     color: var(--mps-text-secondary, #666);
 }
 
@@ -1483,7 +2063,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
     border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
     border-radius: 8px;
     box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     user-select: none;
 }
 
@@ -1494,7 +2074,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
     gap: 8px;
     font-weight: 600;
     margin: 0 0 6px;
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
 }
 
 .sync-popover-header-title
@@ -1525,7 +2105,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 
 .sync-popover-filename
 {
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     color: var(--text-default, #f0f0f0);
     white-space: nowrap;
     overflow: hidden;
@@ -1602,10 +2182,11 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 }
 .publish-picker-heading
 {
-    font-size: 18px;
+    font-size: var(--mps-font-size-xl);
     font-weight: 600;
     text-align: center;
     margin: 0;
+    color: var(--mps-text, inherit);
 }
 .publish-picker-cards
 {
@@ -1634,6 +2215,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
     border: 1px solid var(--rule, rgba(0, 0, 0, 0.12));
     border-radius: 12px;
     background: var(--bg-elevated, transparent);
+    color: var(--mps-text, inherit);
     cursor: pointer;
     text-align: center;
     transition: background 120ms ease, border-color 120ms ease;
@@ -1675,7 +2257,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 }
 .publish-picker-card-body
 {
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     line-height: 1.45;
     color: var(--mps-text-secondary, #666);
     margin: 6px 0 0;
@@ -1695,10 +2277,147 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 {
     margin-top: auto;
     padding-top: 16px;
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     font-weight: 600;
     letter-spacing: 0.08em;
     text-transform: uppercase;
+    color: var(--mps-text-secondary, #666);
+}
+
+/* Coming-Soon panel — single centred card. Base .publish-picker-cards is
+ * flex:1 flex-direction:row so a lone .publish-picker-card would stretch
+ * to fill the panel; constrain the row so the card reads as a card. */
+.publish-picker-cards-coming-soon
+{
+    justify-content: center;
+    align-items: flex-start;
+    flex: 0 0 auto;
+}
+.publish-picker-cards-coming-soon > .publish-picker-card
+{
+    flex: 0 1 320px;
+    max-width: 320px;
+}
+
+/* Update panel — reuses the picker-card grid; adds a centred red Unlink
+ * button row below the two cards. Only the button chrome is bespoke. */
+.publish-panel-update
+{
+    align-items: stretch;
+}
+.publish-update-heading
+{
+    text-align: center;
+}
+.publish-update-unlink-row
+{
+    display: flex;
+    justify-content: center;
+    margin-top: 20px;
+}
+.publish-update-unlink-btn
+{
+    padding: 8px 20px;
+    font-size: var(--mps-font-size-base);
+    font-weight: 500;
+    border-radius: 6px;
+    cursor: pointer;
+    background: rgb(255, 235, 235);
+    color: rgb(180, 40, 40);
+    border: 1px solid rgb(220, 180, 180);
+}
+.publish-update-unlink-btn:hover
+{
+    background: rgb(255, 220, 220);
+    border-color: rgb(200, 140, 140);
+}
+.publish-update-unlink-btn:disabled
+{
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Update-Story panel — diff list between local script and remote deck.
+ * Scrollable body between a small summary line and the Back / Push footer. */
+.publish-panel-update-story
+{
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+}
+.publish-update-story-heading
+{
+    text-align: center;
+    margin-bottom: 4px;
+}
+.publish-update-story-summary
+{
+    font-size: var(--mps-font-size-base);
+    color: var(--mps-text-secondary, #666);
+    margin: 0 0 8px 0;
+    text-align: center;
+    min-height: 18px;
+}
+.publish-update-story-list-wrap
+{
+    flex: 1 1 auto;
+    min-height: 120px;
+    max-height: 55vh;
+    overflow-y: auto;
+    border: 1px solid var(--mps-border, rgba(0, 0, 0, 0.12));
+    border-radius: 6px;
+    background: var(--bg-subtle, rgba(0, 0, 0, 0.02));
+}
+.publish-update-story-list
+{
+    list-style: none;
+    margin: 0;
+    padding: 6px 0;
+}
+.publish-update-story-row
+{
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 14px;
+    font-size: var(--mps-font-size-base);
+    line-height: 1.4;
+}
+.publish-update-story-row + .publish-update-story-row
+{
+    border-top: 1px solid var(--mps-border, rgba(0, 0, 0, 0.06));
+}
+.publish-update-story-row-page
+{
+    font-family: var(--mps-mono-font, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+    color: var(--mps-text-primary, #222);
+}
+.publish-update-story-row-arrow
+{
+    color: var(--mps-text-secondary, #999);
+}
+.publish-update-story-row-status
+{
+    text-align: left;
+    color: var(--mps-text-secondary, #666);
+}
+.publish-update-story-row-updated .publish-update-story-row-status
+{
+    color: rgb(70, 120, 210);
+    font-weight: 500;
+}
+.publish-update-story-row-new .publish-update-story-row-status
+{
+    color: rgb(50, 150, 90);
+    font-weight: 500;
+}
+.publish-update-story-row-unchanged .publish-update-story-row-status
+{
+    color: var(--mps-text-secondary, #999);
+}
+.publish-update-story-error.is-info
+{
     color: var(--mps-text-secondary, #666);
 }
 
@@ -1728,13 +2447,13 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 }
 .publish-collab-heading
 {
-    font-size: 16px;
+    font-size: var(--mps-font-size-lg);
     font-weight: 600;
     margin: 0;
 }
 .publish-collab-body
 {
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     line-height: 1.5;
     color: var(--mps-text-secondary, #666);
     max-width: 360px;
@@ -1771,7 +2490,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 {
     text-align: center;
     color: var(--mps-text-secondary, #666);
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     line-height: 1.5;
     margin: 0 0 8px 0;
 }
@@ -1834,7 +2553,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 .import-heading
 {
     margin: 0;
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     font-weight: 500;
     line-height: 1.4;
     color: var(--mps-text-primary, #1a1a1a);
@@ -1843,7 +2562,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 .import-body
 {
     margin: 0;
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     line-height: 1.45;
     color: var(--mps-text-secondary, #666);
     max-width: 360px;
@@ -1868,7 +2587,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 
 .import-picker-heading
 {
-    font-size: 18px;
+    font-size: var(--mps-font-size-xl);
     font-weight: 600;
     text-align: center;
     margin: 0;
@@ -1878,7 +2597,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 {
     margin: 0;
     padding: 8px 12px;
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     line-height: 1.4;
     text-align: center;
     color: var(--accent-amber, #b07300);
@@ -1963,7 +2682,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 
 .import-picker-card-body
 {
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     line-height: 1.45;
     color: var(--mps-text-secondary, #666);
     margin: 6px 0 0;
@@ -1975,7 +2694,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
    card's flex-column layout regardless of body length. */
 .import-picker-card-note
 {
-    font-size: 10px;
+    font-size: var(--mps-font-size-xs);
     line-height: 1.4;
     color: var(--mps-text-tertiary, #999);
     margin: 12px 0 0;
@@ -2018,7 +2737,7 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
 
 .import-progress-label
 {
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     color: var(--mps-text-secondary, #666);
     text-align: center;
     min-height: 18px;
@@ -2060,4 +2779,87 @@ html[data-skin="night"] .settings-entry.selected:hover { color: #ffffff; }
     .import-track             { transition: none; }
     .import-progress-bar-fill { transition: none; }
     .import-checkmark path    { animation: none; stroke-dashoffset: 0; }
+}
+
+/* === Folder Options modal ===
+ *
+ * Widened confirm-modal shell with a 4-column pip grid. Title lives IN
+ * the titlebar (left-aligned) mirroring the Export Screenplay modal;
+ * `<input type="radio">` inputs are visually hidden but kept in the DOM
+ * for keyboard nav / a11y — selection is reflected via `.is-selected`
+ * on the enclosing label.
+ */
+.settings-backdrop.folder-options-modal .confirm-modal-dialog
+{
+    width: 560px;
+    max-width: 92vw;
+}
+.settings-backdrop.folder-options-modal .confirm-modal-titlebar
+{
+    justify-content: space-between;
+    padding: 0 6px 0 18px;
+}
+.folder-options-modal .folder-options-title
+{
+    font-weight: 600;
+    font-size: 15px;
+}
+.folder-options-modal .folder-options-grid
+{
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    margin: 12px 0 4px 0;
+}
+.folder-options-modal .folder-options-pip
+{
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    padding: 10px 10px;
+    border: 1px solid var(--rule, rgba(0, 0, 0, 0.10));
+    border-radius: 8px;
+    cursor: pointer;
+    background: var(--panel-bg, #fff);
+    transition: background 120ms ease, border-color 120ms ease, outline 120ms ease;
+    text-align: left;
+}
+.folder-options-modal .folder-options-pip:hover
+{
+    background: var(--btn-hover-bg, rgba(0, 0, 0, 0.04));
+}
+.folder-options-modal .folder-options-pip.is-selected
+{
+    outline: 2px solid var(--mps-accent, #5b8dff);
+    outline-offset: 1px;
+    border-color: var(--mps-accent, #5b8dff);
+}
+.folder-options-modal .folder-options-pip:focus-within
+{
+    outline: 2px solid var(--mps-accent, #5b8dff);
+    outline-offset: 2px;
+}
+.folder-options-modal .folder-options-pip-radio
+{
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+}
+.folder-options-modal .folder-options-pip-name
+{
+    font-size: var(--mps-font-size-sm);
+    font-weight: 600;
+    color: var(--mps-text-primary, #1a1a1a);
+    line-height: 1.2;
+}
+.folder-options-modal .folder-options-pip-hint
+{
+    font-size: 11px;
+    line-height: 1.35;
+    color: var(--mps-text-secondary, #666);
+    opacity: 0.85;
 }

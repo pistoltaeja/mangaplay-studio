@@ -141,6 +141,15 @@
     left: calc(var(--rail-width, 40px) - 33px);
 }
 
+/* macOS Overlay title-bar: only the collapsed-state needs an override.
+ * Expanded base rule lands the button at rail+leftpane+4 (≈284px) — correct.
+ * #top-bar needs NO padding-left inset: the home icon is gone and .editor-tabs
+ * is absolutely positioned clear of the traffic lights already. */
+:root[data-platform="macos"] #app-chrome[data-left-pane-collapsed] .top-bar-action-anchored-left
+{
+    left: var(--mps-macos-titlebar-inset, 78px);
+}
+
 .top-bar-subview-group
 {
     /* `will-change: transform` creates a stacking context. Without an explicit
@@ -164,19 +173,6 @@
  * an aria-pressed background; the user asked for the rest of the subview
  * buttons to match that look.) Hover still highlights via the shared
  * :where(.top-bar-icon, .rail-icon, .top-bar-action):hover rule. */
-
-/* "Home" variant of #btn-subview-folder — uses a transparent PNG instead
- * of a lucide icon. Size matches the other top-bar-subview buttons; the
- * image inside scales to fit. No tooltip wrapper here (drop the
- * data-tooltip on the host element to suppress it). */
-.top-bar-home-icon
-{
-    width: 20px;
-    height: 20px;
-    object-fit: contain;
-    display: block;
-    pointer-events: none;
-}
 
 /* === Top-bar pagination — sits to the LEFT of the storyboard-anchored
  * actions, mirroring the paint widget's pw-pagination-group. Hidden by
@@ -234,7 +230,7 @@
 
 .topbar-page-label
 {
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     color: #444;
     min-width: 56px;
     text-align: center;
@@ -289,6 +285,8 @@
 
 #left-sidebar
 {
+    position: relative;
+    z-index: 1;
     flex: 0 0 var(--rail-width);
     display: flex;
     flex-direction: column;
@@ -298,6 +296,9 @@
     border-right: 1px solid var(--rule);
     background: var(--grey-light);
 }
+
+:root[data-ux-mode="mobile"] #left-sidebar,
+:root[data-ux-mode="tablet"] #left-sidebar { display: none; }
 
 .rail-icon
 {
@@ -324,6 +325,9 @@
     -webkit-user-select: none;
 }
 #btn-rail-account[hidden] { display: none; }
+
+#left-sidebar > .rail-account-slot { margin-top: auto; }
+#left-sidebar > .rail-account-slot svg { width: 16px; height: 16px; }
 #btn-rail-account .rail-account-avatar
 {
     width: 24px;
@@ -447,6 +451,42 @@
     left: calc(var(--rail-width, 40px) - 1px);
 }
 
+/* macOS: with the left pane collapsed, the Collapse button is pushed right to
+ * clear the traffic lights (rule above: left = --mps-macos-titlebar-inset).
+ * The Windows/Linux base anchor (rail − 1px ≈ 39px) would tuck the first tab
+ * UNDER the lights + button. Anchor 4px past the button's right edge:
+ * inset (78) + button width (28) + 4px gap = inset + 32px. */
+:root[data-platform="macos"] #app-chrome[data-left-pane-collapsed] .editor-tabs
+{
+    left: calc(var(--mps-macos-titlebar-inset, 78px) + 32px);
+}
+
+/* Mobile + tablet: the topbar is stripped down to just the tab strip
+   (home icon, pager, layout/swap/collapse buttons are all hidden by
+   app.css rules, and window-controls is hidden by window-controls.js
+   via hasWindowChrome()). Reset the strip's left/right anchors from
+   their desktop pane-column offsets to the topbar's padding edges so
+   the strip actually has room to breathe. Without this, the pane
+   CSS vars still hold their desktop values (rail 40 + left-pane 240
+   + storyboard 520 + gutters) which pushes the strip's usable width
+   NEGATIVE on a 720px mobile viewport — the observed ~40px tab. */
+:root[data-ux-mode="mobile"] .editor-tabs,
+:root[data-ux-mode="tablet"] .editor-tabs
+{
+    left: 0;
+    right: 0;
+}
+
+/* Mobile + tablet tabs cap at 140px (vs desktop's 200px) so single-tab
+   width feels appropriate on a narrower viewport and more tabs fit
+   before shrinking begins. Min-width unchanged. */
+:root[data-ux-mode="mobile"] .editor-tab,
+:root[data-ux-mode="tablet"] .editor-tab
+{
+    flex: 1 1 140px;
+    max-width: 140px;
+}
+
 /* Tab sizing: min 32px, max 200px. Default 200px.
  * `flex: 1 1 200px` lets each tab start at 200 and shrink uniformly as
  * more are added. Once shrink hits min-width 32px, overflow scrolls
@@ -480,7 +520,7 @@
     color: var(--tab-text, #1a1a1a);
     cursor: pointer;
     font-family: var(--mps-font-app);
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     font-weight: 400;
     line-height: 1.2;
     text-align: left;
@@ -591,6 +631,13 @@
     opacity: 1;
 }
 
+.editor-tab-close:active
+{
+    background: rgba(0, 0, 0, 0.18);
+    opacity: 1;
+    color: #444;
+}
+
 .editor-tab-close [data-icon]
 {
     width: 12px;
@@ -621,6 +668,12 @@
 .editor-tab-new:hover
 {
     background: var(--grey-mid, #e8e8e8);
+}
+
+.editor-tab-new:active
+{
+    background: var(--btn-active-bg, #d8dce3);
+    color: #444;
 }
 
 .editor-tab-new [data-icon]

@@ -9,13 +9,11 @@
 use std::path::{Path, PathBuf};
 
 use crate::art_map::{art_map_drop, art_map_get, art_map_set};
-use crate::commands::project::{app_dir, is_script_filename, project_json_path};
+use crate::commands::project::{app_dir, is_script_filename, project_json_path, read_project_json_locked};
 use crate::fs_helpers::{atomic_write_impl, chrono_iso_now};
 use crate::locks::ProjectJsonLocks;
-use crate::project_root::{ProjectRoot, assert_within_project_root};
 use crate::script_map::script_map_rewrite_key;
 use crate::commands::file_ops::crud::{apply_folder_art_relocation, project_rel_path};
-use crate::commands::file_ops::fs_events::{FsChange, emit_fs_changed};
 
 // ── Project rename / move / close commands ────────────────────────────────
 
@@ -29,6 +27,11 @@ pub fn app_rename_project(
     display_name: Option<String>,
     scope: String,
 ) -> Result<(), String> {
+    let project_dir = std::path::Path::new(&project_path);
+    if read_project_json_locked(project_dir) {
+        return Err("project-locked".into());
+    }
+
     let scope = scope.as_str();
     if scope != "local" && scope != "shared" {
         return Err("scope must be 'local' or 'shared'".into());
@@ -90,6 +93,9 @@ pub fn app_rename_folder(
         return Err("invalid-name".into());
     }
     let src = std::path::Path::new(&project_path);
+    if read_project_json_locked(src) {
+        return Err("project-locked".into());
+    }
     let parent = src.parent().ok_or("no parent")?.to_path_buf();
     let dst = parent.join(&new_basename);
     if dst.exists() {
@@ -117,6 +123,9 @@ pub fn app_move_folder(
         return Err("project-is-open".into());
     }
     let src = std::path::Path::new(&project_path);
+    if read_project_json_locked(src) {
+        return Err("project-locked".into());
+    }
     let parent = std::path::Path::new(&new_parent);
     let dst = move_path_impl(src, parent)?;
     let dst_str = dst.to_string_lossy().to_string();
@@ -271,8 +280,7 @@ pub fn move_path_impl(
 }
 
 /// Move a file or folder INSIDE an open project, then keep the artMap and
-/// the `<root>/storyboard/` mirror in sync. Phase 5 of the .mangaart
-/// relocation plan.
+/// the `<root>/storyboard/` mirror in sync.
 ///
 /// Always calls [`move_path_impl`] first — that's the visible filesystem
 /// operation. Only after it succeeds does the artMap bookkeeping run, and
@@ -288,8 +296,8 @@ pub fn move_path_impl(
 ///   [`apply_folder_art_relocation`].
 ///
 /// * **Source is a single script file.** Rewrite the single artMap key from
-///   old rel → new rel; the `.mangaart` file is NOT moved. Matches Phase 3's
-///   per-file rule — the art's identity is its UUID, the mirrored folder is
+///   old rel → new rel; the `.mangaart` file is NOT moved. The art's identity
+///   is its UUID, the mirrored folder is
 ///   a human-browsable convenience derived from the script's *creation*
 ///   address, not its current one. (Folder-level ops still move the subtree
 ///   because the user's intent is wholesale relocation; single-file moves
@@ -361,20 +369,3 @@ pub fn move_path_with_art(
     Ok(dst)
 }
 
-#[tauri::command]
-pub fn app_move_path(
-    app: tauri::AppHandle,
-    state: tauri::State<ProjectRoot>,
-    src_path: String,
-    new_parent: String,
-    project_root: Option<String>,
-) -> Result<String, String>
-{
-    let safe_src = assert_within_project_root(std::path::Path::new(&src_path), &state)?;
-    let safe_parent = assert_within_project_root(std::path::Path::new(&new_parent), &state)?;
-    let root_buf = project_root.as_deref().map(std::path::Path::new);
-    let dst = move_path_with_art(&safe_src, &safe_parent, root_buf)?;
-    let dst_str = dst.to_string_lossy().to_string();
-    emit_fs_changed(&app, &src_path, FsChange::Renamed { to: dst_str.clone() });
-    Ok(dst_str)
-}

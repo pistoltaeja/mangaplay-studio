@@ -107,6 +107,36 @@ export function _resetBrokerForTest()
     }
 }
 
+/**
+ * Creates a fresh, isolated Broker instance. Unlike the getBroker() singleton,
+ * a factory-created broker owns its own state and is intended for scenarios
+ * where multiple files need concurrent brokered saves (e.g. the aggregate view
+ * mounts 3 CM6 EditorViews and each needs its own debounced save timeline).
+ *
+ * One-broker-per-fileUuid contract:
+ *   Callers must guarantee that at any moment, at most ONE factory-created
+ *   broker in the entire renderer has a given (path, uuid) as its active
+ *   identity. Two brokers with the same active identity will race on writes
+ *   and the "last write wins" outcome is undefined.
+ *
+ *   The aggregate view enforces this by mapping fileUuid → broker 1:1 and
+ *   draining + destroying the old broker before creating a new one when a
+ *   slide brings a new file into the window.
+ *
+ * Factory-created brokers set `_isFactory = true` so `setActive` can warn if
+ * called a second time with a different identity (a violation of the contract
+ * above). The singleton is exempt because its `setActive` swap-and-cancel
+ * behaviour is load-bearing for the single-file code path.
+ *
+ * @returns {Broker}
+ */
+export function createBroker()
+{
+    const broker = new Broker();
+    broker._isFactory = true;
+    return broker;
+}
+
 class Broker
 {
     constructor()
@@ -124,6 +154,16 @@ class Broker
         /** @type {Array<() => void>} */
         this.queue = [];
         this.locked = false;
+        /**
+         * Set to true by `createBroker()` for factory-created instances. The
+         * singleton path leaves this false. Used by `setActive` to warn when
+         * a factory-created broker's identity is changed after construction —
+         * a violation of the one-broker-per-fileUuid contract documented on
+         * `createBroker`. Not exposed as a constructor parameter to keep the
+         * constructor cost near-zero and its shape unchanged.
+         * @type {boolean}
+         */
+        this._isFactory = false;
     }
 
     /**
@@ -131,6 +171,19 @@ class Broker
      * any pending writes belonging to the previous file — those writes were
      * targeting a different file and must not land here. Legacy call sites
      * that omit `uuid` still work; the broker treats absence as null.
+     *
+     * Singleton vs factory:
+     *   - On the singleton (getBroker), `setActive` is the swap-file entry
+     *     point: the singleton writes for one file at a time and switching
+     *     files MUST cancel the previous file's pending writes. This is
+     *     load-bearing — the single-file code path relies on it.
+     *   - On a factory-created broker (createBroker), `setActive` should be
+     *     called ONCE right after construction to bind the broker's identity.
+     *     Calling it later with a different identity violates the
+     *     one-broker-per-fileUuid contract from `createBroker`; the broker
+     *     emits a console.warn but still performs the swap (safety valve,
+     *     never the intended path).
+     *
      * @param {string | null} path
      * @param {string | null} [uuid]
      */
@@ -138,6 +191,16 @@ class Broker
     {
         const stripped = stripUncPrefix(path);
         if (this.path === stripped && this.uuid === uuid) return;
+        if (this._isFactory && (this.path !== null || this.uuid !== null))
+        {
+            console.warn(
+                "[broker] setActive called twice on a factory-created broker " +
+                "(previous: " + this.path + " / " + this.uuid + ", " +
+                "next: " + stripped + " / " + uuid + "). " +
+                "Factory brokers should be bound once at construction; " +
+                "this indicates an aggregate-view mount/unmount bug."
+            );
+        }
         this._cancelAllPending();
         this.path = stripped;
         this.uuid = uuid;

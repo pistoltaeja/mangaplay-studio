@@ -1,21 +1,21 @@
 // @ts-check
 /**
- * spellcheck-tier.js — pure resolver from `spellcheckLanguage` (the user-
- * settings dropdown value) to a capability tier.
+ * spellcheck-tier.js — pure resolver from the user's language setting
+ * to a capability tier.
  *
- *   Tier A — Harper (en-US / en-GB), spelling + grammar + style.
- *   Tier B — `retext-spell` + Hunspell (de, es, fr, it, pt, ru, vi, ko).
- *            v1 returns no Diagnostics from Harper for these; the
- *            contenteditable native `spellcheck="true"` carries the load
- *            until retext is wired in a follow-up.
- *   Tier C — native browser spellcheck only (id).
- *   Tier D — limited / no spellcheck model (ja, zh-CN, zh-TW, th).
+ * Tiers
+ * -----
+ *   A — Harper (en-US / en-GB). Full spelling + grammar + style.
+ *   B — Planned retext-spell + Hunspell (de, es, fr, it, pt, ru, vi, ko).
+ *       v1 returns no diagnostics; native WebView2 spellcheck carries
+ *       the load. Tracked in desktop-spellcheck-grammar.md.
+ *   C — Native browser spellcheck only (id).
+ *   D — Limited / no spellcheck model (ja, zh-CN, zh-TW, th).
  *
- * IMPORTANT: this module no longer imports `harper.js` so the 1.5 MB
- * Harper bundle stays out of the boot chunk. The `dialect` field returns a
- * plain string ("American" / "British"); harper-linter.js resolves it to
- * `Dialect.American` / `Dialect.British` internally when the worker is
- * lazy-loaded.
+ * This module does NOT import harper.js. The `dialect` field is a plain
+ * string sentinel ("American" / "British"); harper-linter.js resolves
+ * it to the real `Dialect` enum value when the worker spins up. This
+ * keeps the 1.5 MB Harper bundle out of the boot chunk.
  */
 
 const TIER_B = new Set(["de", "es", "fr", "it", "pt", "ru", "vi", "ko"]);

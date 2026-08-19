@@ -94,6 +94,15 @@ function renderItems()
             menuEl.appendChild(div);
             return;
         }
+        if (it && it.kind === "header")
+        {
+            const hdr = document.createElement("div");
+            hdr.className = "ctx-menu-header";
+            hdr.setAttribute("role", "presentation");
+            hdr.textContent = it.label || "";
+            menuEl.appendChild(hdr);
+            return;
+        }
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "ctx-menu-item";
@@ -133,7 +142,7 @@ function nextActivatableIndex(from, step)
     {
         i = (i + step + n) % n;
         const it = currentItems[i];
-        if (it && it.kind !== "divider" && !it.disabled) return i;
+        if (it && it.kind !== "divider" && it.kind !== "header" && !it.disabled) return i;
     }
     return -1;
 }

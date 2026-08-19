@@ -1,7 +1,6 @@
 //! Integration tests for the four recent.json writers.
 //!
-//! Background: B3/B4 in `TODO/audit-rust.md` unified all four writers on
-//! `path_eq_caseless` so a case-only rename on Windows / macOS finds the
+//! Background: all four writers use `path_eq_caseless` so a case-only rename on Windows / macOS finds the
 //! existing entry instead of leaving a duplicate. The fix had ZERO automated
 //! coverage — a future refactor that reverted one of the sites to an
 //! exact-string compare would not be caught by any test.
@@ -133,6 +132,28 @@ fn update_recent_replaces_case_variant_not_duplicates_it()
         recent[0].get("displayNameOverride").and_then(|v| v.as_str()),
         Some("My Custom Name"),
         "displayNameOverride must survive case-rename",
+    );
+}
+
+#[test]
+fn update_recent_dedupes_separator_variant()
+{
+    let tmp = TempDir::new().expect("tempdir");
+    // Same project recorded once with backslashes (picker) and once with
+    // forward slashes (auto-resume) — a raw-string caseless compare left both.
+    seed_recent(tmp.path(), &[
+        serde_json::json!({ "path": "D:\\proj\\Dorothy", "name": "Dorothy" }),
+        serde_json::json!({ "path": "D:/proj/Dorothy",   "name": "Dorothy" }),
+    ]);
+
+    app_update_recent_impl(tmp.path(), "D:/proj/Dorothy").expect("update succeeds");
+
+    let recent = read_recent(tmp.path());
+    assert_eq!(recent.len(), 1, "separator variants must collapse to one entry");
+    assert_eq!(
+        recent[0].get("path").and_then(|v| v.as_str()),
+        Some("D:/proj/Dorothy"),
+        "new entry uses the passed path",
     );
 }
 

@@ -1,7 +1,6 @@
 //! TOCTOU-safe UUID → open-file resolver.
 //!
-//! See [`TODO/uuid-file-registry.md`](../../../../TODO/uuid-file-registry.md)
-//! Part 3 — TOCTOU-safe resolution — for the design.
+//! TOCTOU-safe UUID → path resolution design:
 //!
 //! # Flow
 //!
@@ -51,9 +50,9 @@ use crate::registry::store::RegistryEntry;
 /// - Returns [`FsErr::UnknownUuid`] / [`FsErr::Deleted`] /
 ///   [`FsErr::Stale`] on the failure paths.
 ///
-/// # Non-goals for Part 3a
+/// # Non-goals
 ///
-/// - Full-project rescan on heal failure (Part 5).
+/// - Full-project rescan on heal failure.
 /// - Content-hash tie-break on native-ID recycling (later pass).
 /// - Windows native-ID verification (needs the real reader — deferred).
 pub fn resolve_and_open(
@@ -181,11 +180,10 @@ fn try_heal(
 /// project-relative path (forward-slashes) on hit, `Ok(None)` if the parent
 /// exists but no candidate matches.
 ///
-/// # Scope for Part 3a
+/// # Scope
 ///
-/// Single-directory scan only. Recursive full-project rescan is deferred to
-/// Part 5 — we don't want a stray failed open to trigger a walk of a huge
-/// project.
+/// Single-directory scan only. Recursive full-project rescan is deferred —
+/// a stray failed open must not trigger a walk of a huge project.
 ///
 /// If the parent directory itself is missing, returns `Ok(None)` — the
 /// caller surfaces `Stale`.

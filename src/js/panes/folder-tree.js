@@ -3,8 +3,7 @@
  * folder-tree.js — pure tree model for the file-explorer.
  *
  * Turns the UUID-keyed entry list emitted by `registry_list_tree`
- * (see TODO/uuid-file-registry.md, Part 4b) into a hierarchical
- * TreeNode structure. Hierarchy is derived from `parentUuid`
+ * into a hierarchical TreeNode structure. Hierarchy is derived from `parentUuid`
  * linkage — no path-splitting.
  *
  * `uuid` is the authoritative identity key everywhere. `relPath`

@@ -39,3 +39,38 @@ export async function getPlatformKey()
     }
     return _cached;
 }
+
+/**
+ * True when the runtime OS is a real IAP store platform (android/ios).
+ * Memoised via getPlatformKey(). UX mode is irrelevant — a Mobile-UX build
+ * on Windows/macOS/Linux returns false (no store behind it).
+ * @returns {Promise<boolean>}
+ */
+export async function isIapPlatform()
+{
+    const p = await getPlatformKey();
+    return p === "android" || p === "ios";
+}
+
+/**
+ * Synchronous read of the memoised platform key. Returns null until
+ * getPlatformKey() has resolved at least once. Callers that need a sync
+ * answer (render loops) must ensure the async resolve ran earlier at boot.
+ * @returns {PlatformKey|null}
+ */
+export function getPlatformKeyCached()
+{
+    return _cached;
+}
+
+/**
+ * Synchronous "is this a real IAP store platform?" read of the memoised
+ * key. Returns false until getPlatformKey() has resolved — a SAFE default:
+ * false = no IAP gating (desktop behaviour). Premium skins are hidden
+ * off-store anyway, so an unresolved-yet read never wrongly shows them.
+ * @returns {boolean}
+ */
+export function isStorePlatformCached()
+{
+    return _cached === "android" || _cached === "ios";
+}

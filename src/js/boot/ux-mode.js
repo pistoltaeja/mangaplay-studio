@@ -70,21 +70,3 @@ export function isMobile() { return getUxMode() === UX_MOBILE; }
 /** @returns {boolean} */
 export function isTablet() { return getUxMode() === UX_TABLET; }
 
-/**
- * Flip the active mobile pane (drives [data-active-pane] on <html>;
- * CSS shows the matching pane and hides the others). No-op in standalone.
- * @param {"files"|"editor"|"storyboard"} name
- */
-export function setActivePane(name)
-{
-    if (!isMobileLike()) return;
-    if (name !== "files" && name !== "editor" && name !== "storyboard") return;
-    document.documentElement.setAttribute("data-active-pane", name);
-    document.dispatchEvent(new CustomEvent("mps-active-pane-change", { detail: { pane: name } }));
-}
-
-/** @returns {string} */
-export function getActivePane()
-{
-    return document.documentElement.getAttribute("data-active-pane") || "editor";
-}

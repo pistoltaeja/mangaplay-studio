@@ -79,11 +79,20 @@ export function applyMetaBeforeFirstPaint(_meta, options = {})
         chrome.style.setProperty("--storyboard-width", settings.storyboardWidth + "px");
     }
 
-    if (settings.leftPaneCollapsed === true && chrome)
+    // Mobile / tablet UX modes hide the left-pane collapse-toggle button
+    // entirely, so the user has no way to un-collapse the left pane. Force
+    // it collapsed. The STORYBOARD pane on mobile is driven by the FAB
+    // view-toggle now (solo-mangaplay ↔ solo-storyboard) — force-collapsing
+    // it here would hide the storyboard even when the user selected it via
+    // the FAB, because data-storyboard-collapsed translates the stack
+    // off-screen with opacity 0 regardless of view-mode.
+    const forceCollapsedForMobile = (root.getAttribute("data-ux-mode") === "mobile"
+        || root.getAttribute("data-ux-mode") === "tablet");
+    if (chrome && (settings.leftPaneCollapsed === true || forceCollapsedForMobile))
     {
         chrome.setAttribute("data-left-pane-collapsed", "");
     }
-    if (settings.storyboardCollapsed === true && chrome)
+    if (chrome && settings.storyboardCollapsed === true && !forceCollapsedForMobile)
     {
         chrome.setAttribute("data-storyboard-collapsed", "");
     }
@@ -110,6 +119,18 @@ export function applyMetaBeforeFirstPaint(_meta, options = {})
     if (settings.lastSoloMode === "solo-screenplay" || settings.lastSoloMode === "solo-storyboard")
     {
         appliedLastSolo = settings.lastSoloMode;
+    }
+
+    // Active subview — stamp on #left-pane pre-paint so the subview panels
+    // don't flash the wrong one. Strict enum validation happens later in
+    // app.js's boot path; here we accept any non-empty string.
+    if (typeof settings.activeSubview === "string" && settings.activeSubview.length > 0)
+    {
+        const leftPane = document.getElementById("left-pane");
+        if (leftPane)
+        {
+            leftPane.setAttribute("data-subview", settings.activeSubview);
+        }
     }
 
     // Settings: stamp <html data-skin> as a redundant FOUC guarantee. The

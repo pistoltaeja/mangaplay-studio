@@ -105,17 +105,36 @@ pub fn atomic_write_impl(path: &str, contents: &str) -> Result<(), String> {
     file.write_all(contents.as_bytes()).map_err(|e| e.to_string())?;
     file.sync_all().map_err(|e| e.to_string())?;
 
-    let mut last_err = String::new();
-    for delay_ms in [0u64, 50, 150, 450] {
-        if delay_ms > 0 {
+    retry_rename(Path::new(&tmp_path), Path::new(path)).map_err(|e| e.to_string())
+}
+
+/// Rename `from` → `to` with truncated retry/backoff at 0/50/150/450 ms.
+/// Windows AV / indexer briefly holds an exclusive lock on the destination
+/// slot after a prior write; four attempts is enough to ride out every
+/// case we've seen in the wild.
+///
+/// Returns `Ok(())` on the first successful rename; returns the LAST
+/// underlying `io::Error` on total failure. Does NOT clean up `from` on
+/// failure — the caller decides whether the leftover tmp is worth
+/// scrubbing.
+pub fn retry_rename(from: &Path, to: &Path) -> std::io::Result<()>
+{
+    let mut last_err: Option<std::io::Error> = None;
+    for delay_ms in [0u64, 50, 150, 450]
+    {
+        if delay_ms > 0
+        {
             std::thread::sleep(std::time::Duration::from_millis(delay_ms));
         }
-        match std::fs::rename(&tmp_path, &path) {
+        match std::fs::rename(from, to)
+        {
             Ok(()) => return Ok(()),
-            Err(e) => last_err = e.to_string(),
+            Err(e) => last_err = Some(e),
         }
     }
-    Err(last_err)
+    // Safe: the loop above executes at least once, so `last_err` is Some
+    // on any error path we reach here from.
+    Err(last_err.unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "unknown")))
 }
 
 pub fn chrono_iso_now() -> String {

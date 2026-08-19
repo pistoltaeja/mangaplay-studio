@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * conflict-toast.test.js — DOM smoke tests for the Phase 4 conflict toast.
+ * conflict-toast.test.js — DOM smoke tests for the conflict toast.
  *
  * Verifies that:
  *   - Render produces the three action buttons + the close X.

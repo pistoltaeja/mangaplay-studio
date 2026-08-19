@@ -32,6 +32,35 @@
     --row-text:  #5a5a5a;
     --row-badge: #9a9a9a;
 
+    /* Mangaplay editor highlight tokens — consumed by mangaplay-highlight.js.
+     * Each skin OWNS every token explicitly (no var() fallbacks); the JS
+     * baseTheme reads them via var(--cm-mp-*). Some tokens differ per skin
+     * (error/style/hint/tooltip/page/panel/sfx/chevron/emph-marker), others
+     * share the same value across skins (title-card, dialogue, action, etc.)
+     * — both are declared here so a new skin only needs to edit CSS. */
+    --cm-mp-error:               #E03E3E;
+    --cm-mp-style:               #E08600;
+    --cm-mp-hint:                #8BC34A;
+    --cm-mp-tooltip-bg:          #ffffff;
+    --cm-mp-tooltip-fg:          #1a1a1a;
+    --cm-mp-tooltip-border:      #d0d4dc;
+    --cm-mp-page-color:          #000000;
+    --cm-mp-panel-color:         #000000;
+    --cm-mp-sfx-color:           #c62828;
+    --cm-mp-chevron-color:       #9ca3af;
+    --cm-mp-emph-marker-color:   #b0b7c3;
+    --cm-mp-title-card-color:    #6a1b9a;
+    --cm-mp-dialogue-color:      #212121;
+    --cm-mp-parenthetical-color: #616161;
+    --cm-mp-action-color:        #212121;
+    --cm-mp-transition-color:    #455a64;
+    --cm-mp-note-color:          #9e9e9e;
+    --cm-mp-centered-color:      #546e7a;
+    --cm-mp-page-break-color:    #bdbdbd;
+    --cm-mp-title-page-key-color: #b8860b;
+    --cm-mp-cue-color:           #1a1a1a;
+    --cm-mp-diagnostic-action-fg: #ffffff;
+
     /* Destructive action text colour (context-menu items, danger buttons) */
     --danger-fg:       #c62828;
     --danger-fg-hover: #b71c1c;
@@ -50,18 +79,63 @@
        Consumers now read --tauri-frame-controls-width (defined on :root in root.css,
        114px = three 46px buttons matching the in-flow #window-controls block). */
 
-    /* Website-shared tokens — override prefers-color-scheme: dark.
-     * The website's theme.css defines these in a @media (prefers-color-scheme: dark)
-     * block that fires on macOS dark mode. Without explicit light values here,
-     * the dark overrides win even when this Default skin is active. */
+    /* Website-shared tokens.
+     * theme.css's @media (prefers-color-scheme: dark) block excludes
+     * :root[data-skin] so these skin values always win. Kept explicit
+     * for clarity and as a safety net. */
     --mps-editor-bg:            #ffffff;
     --mps-screenplay-paper:     var(--grey-dark);
     --mps-screenplay-ink:       #1a1a1a;
     --mps-screenplay-ink-muted: #666666;
+
+    /* Storyboard <mps-panel> bg — mirrors --mps-panel-bg on Default (both
+     * white). Night overrides --mps-panel-bg to dark for visualiser but
+     * keeps this white for storyboard panels-on-paper. */
+    --mps-storyboard-panel-bg:  #ffffff;
+    --mps-storyboard-panel-text:#1a1a1a;
+
+    /* Body/secondary text tokens consumed by modals (settings, publish, import,
+     * export). Referenced via var() fallbacks across the codebase but never
+     * declared in the skin — so consumers previously always fell back to the
+     * hardcoded literal (fine in Default, unreadable on the Night `#1e1e1e`
+     * panel bg). Explicit values here let the Night skin remap without a fork. */
+    --mps-text:           #1a1a1a;
+    --mps-text-secondary: #666666;
 
     /* Splash background — hex mirrored into the build-time
      * MPS_SPLASH_BG marker by scripts/copy-assets.js. Non-Default
      * skins declare their own value; the native Windows/Android
      * splash and inline #boot-screen still resolve to THIS value. */
     --mps-splash-bg: #1a1a1a;
+}
+
+/* CodeMirror caret colour — Default skin.
+ *
+ * We omit drawSelection() (see mps-editor.js → extensionsForMode), so
+ * .cm-cursor / .cm-dropCursor spans are NEVER created; the caret shown
+ * in the Source Editor is the native contenteditable caret painted by
+ * the browser on .cm-content. Native carets are driven by `caret-color`,
+ * not `border-left-color`. Without an explicit rule the caret inherits
+ * `currentColor` (#1a1a1a from .cm-content), which happens to look right
+ * in Default — the explicit `caret-color` pins it deliberately.
+ *
+ * The `.cm-cursor` / `.cm-dropCursor` block is retained as belt-and-braces
+ * for the day drawSelection() is re-enabled. If/when that happens, CM6's
+ * baseTheme sets `border-left: 1.2px solid black` on .cm-cursor at editor
+ * construction and its StyleModule injection order beats any
+ * EditorView.theme / EditorView.baseTheme — the shorthand `border-left`
+ * re-specifies border-left-color as `black`. skin CSS loads AFTER CM6's
+ * dynamically-injected StyleModule so plain CSS wins by source order AND
+ * higher specificity (`.cm-editor .cm-cursor` = 2 classes vs CM6's
+ * `.<baseThemeID> .cm-cursor` = 2 classes but earlier in the cascade).
+ * Same pattern as .cm-lintRange-info override in app.css:2564. */
+:root[data-skin="default"] .cm-editor .cm-content
+{
+    caret-color: #000000;
+}
+:root[data-skin="default"] .cm-editor .cm-cursor,
+:root[data-skin="default"] .cm-editor .cm-dropCursor
+{
+    border-left-color: #000000;
+    border-left-width: 2px;
 }

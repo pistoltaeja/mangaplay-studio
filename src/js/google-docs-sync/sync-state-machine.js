@@ -2,7 +2,7 @@
 /**
  * sync-state-machine.js — gear-icon state machine for a single open script.
  *
- * Per TODO/mangaplay-studio-google-docs-sync.md §4 + §4a. The machine owns:
+ * The machine owns:
  *   - the canonical sync state (`unsynced` | `idle` | `local-ahead` |
  *     `remote-ahead` | `error`, plus the transient `checking` while an L1
  *     check is in flight),
@@ -14,8 +14,8 @@
  *   - a 30s "humanised text" tick that re-fires `onStatusText` so the
  *     footer's "Synced N min ago" string ages live without polling Drive.
  *
- * Push / Pull themselves live in Phase 4 — this machine only exposes hooks
- * for them: `notifyLocalEdit()`, `notifyPushSucceeded()`, `notifyPullSucceeded()`,
+ * Push / Pull themselves live in the round-trip workers — this machine only
+ * exposes hooks for them: `notifyLocalEdit()`, `notifyPushSucceeded()`, `notifyPullSucceeded()`,
  * and the public `inflight` flag callers flip while a Push / Pull is in
  * progress so L2 doesn't race the user's own write.
  *
@@ -108,7 +108,7 @@ export class SyncStateMachine
         this.lastErrorPayload = null;
 
         /** Public flag — flipped true while a Push or Pull is in flight so
-         *  L2 backstop pauses. Phase 4 callers manage it. */
+         *  L2 backstop pauses. Callers manage it. */
         this.inflight = false;
 
         // ── L2 + heartbeat state ──
@@ -132,8 +132,6 @@ export class SyncStateMachine
      */
     async bootFromCache()
     {
-        console.warn("[mps:auth:TRACE] SyncStateMachine.bootFromCache() ENTRY projectPath=",
-            this.projectPath, " scriptRelPath=", this.scriptRelPath);
         let entry = null;
         try
         {
@@ -146,18 +144,9 @@ export class SyncStateMachine
 
         if (!entry)
         {
-            console.warn("[mps:auth:TRACE] SyncStateMachine.bootFromCache() → NO cache entry → unsynced");
             this._transition("unsynced");
             return;
         }
-        console.warn("[mps:auth:TRACE] SyncStateMachine.bootFromCache() cache entry restored",
-            {
-                docId: entry.docId,
-                lastKnownRevisionId: entry.lastKnownRevisionId,
-                lastKnownLockToken: entry.lastKnownLockToken ? "present" : "null",
-                format: entry.format,
-                lastCheckedAt: entry.lastCheckedAt
-            });
 
         this.docId = entry.docId || null;
         this.lastKnownRevisionId = entry.lastKnownRevisionId || null;
@@ -264,15 +253,13 @@ export class SyncStateMachine
     }
 
     /**
-     * Called by Phase 4 Push worker on success. Updates cache + transitions
+     * Called by the Push worker on success. Updates cache + transitions
      * `local-ahead → idle`.
      *
      * @param {string} newRevisionId
      */
     async notifyPushSucceeded(newRevisionId)
     {
-        console.warn("[mps:auth:TRACE] SyncStateMachine.notifyPushSucceeded() newRevisionId=", newRevisionId,
-            " (was lastKnownRevisionId=", this.lastKnownRevisionId + ")");
         this.lastKnownRevisionId = newRevisionId || this.lastKnownRevisionId;
         this.lastCheckedAt = new Date(this._now()).toISOString();
         await this._persistCacheUpdate();
@@ -280,7 +267,7 @@ export class SyncStateMachine
     }
 
     /**
-     * Called by Phase 4 Pull worker on success. Updates cache + transitions
+     * Called by the Pull worker on success. Updates cache + transitions
      * `remote-ahead → idle`.
      *
      * @param {string} newRevisionId
@@ -445,9 +432,6 @@ export class SyncStateMachine
      */
     _transition(state)
     {
-        console.warn("[mps:auth:TRACE] SyncStateMachine._transition() →", state,
-            " (was", this.state + ")",
-            " lastKnownRevisionId=", this.lastKnownRevisionId);
         this.state = state;
         try
         {

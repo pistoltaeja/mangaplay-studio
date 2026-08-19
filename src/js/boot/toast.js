@@ -9,12 +9,9 @@
 
 let container = null;
 
-/**
- * @param {string} msg
- */
-export function showBanner(msg)
+/** Ensure the shared, module-local toast container exists and is attached. */
+function ensureContainer()
 {
-    if (typeof document === "undefined") return;
     if (!container)
     {
         container = document.createElement("div");
@@ -25,6 +22,16 @@ export function showBanner(msg)
             "pointer-events:none;";
         document.body.appendChild(container);
     }
+    return container;
+}
+
+/**
+ * @param {string} msg
+ */
+export function showBanner(msg)
+{
+    if (typeof document === "undefined") return;
+    ensureContainer();
     const el = document.createElement("div");
     el.className = "mps-toast";
     el.textContent = msg;
@@ -42,4 +49,68 @@ function dismiss(el)
 {
     if (!el.parentNode) return;
     try { el.remove(); } catch {}
+}
+
+/**
+ * A toast with an inline action button — used for undoable operations (e.g.
+ * soft-delete). Shares the same top-center container and stacking as
+ * {@link showBanner}. Auto-dismisses after `duration`; clicking the action
+ * button runs `onAction` then dismisses; clicking elsewhere on the toast
+ * dismisses WITHOUT running the action. All dismissal paths are idempotent.
+ *
+ * @param {string} msg — the message text.
+ * @param {{ actionLabel?: string, onAction?: () => void, duration?: number }} [opts]
+ *   `actionLabel` — the button label. `onAction` — invoked on button click.
+ *   `duration` — auto-dismiss delay in ms (default 5000).
+ * @returns {{ dismiss: () => void }} handle whose `dismiss()` flushes the toast
+ *   early (idempotent).
+ */
+export function showUndoToast(msg, { actionLabel, onAction, duration = 5000 } = {})
+{
+    if (typeof document === "undefined") return { dismiss() {} };
+    ensureContainer();
+
+    const el = document.createElement("div");
+    el.className = "mps-toast mps-undo-toast";
+    el.style.cssText =
+        "background:rgba(20,20,20,0.92);color:#fff;font-size:13px;" +
+        "padding:8px 14px;border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,0.3);" +
+        "pointer-events:auto;cursor:pointer;max-width:480px;" +
+        "display:flex;align-items:center;";
+
+    const label = document.createElement("span");
+    label.textContent = msg;
+    el.appendChild(label);
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "mps-undo-toast-action";
+    btn.textContent = actionLabel ?? "";
+    btn.style.cssText =
+        "font-weight:700;color:#6ea8ff;background:transparent;border:none;" +
+        "cursor:pointer;padding:4px 8px;margin-left:12px;font-size:13px;";
+    el.appendChild(btn);
+
+    let done = false;
+    let timer = null;
+    function close()
+    {
+        if (done) return;
+        done = true;
+        if (timer !== null) { clearTimeout(timer); timer = null; }
+        dismiss(el);
+    }
+
+    btn.addEventListener("click", (ev) =>
+    {
+        ev.stopPropagation();
+        onAction?.();
+        close();
+    });
+    el.addEventListener("click", () => close());
+
+    container.appendChild(el);
+    timer = setTimeout(close, duration);
+
+    return { dismiss: close };
 }

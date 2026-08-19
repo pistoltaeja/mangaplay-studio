@@ -108,11 +108,8 @@ export async function openHelpModal()
             const brand = document.createElement("div");
             brand.className = "help-modal-brand";
             const skinEntry = getSkin(getCurrentSkinId());
-            // The single-image mascot asset was removed in favour of the
-            // two-part head + body pair used by <mps-mascot>. The help modal
-            // uses the head only — it's the recognisable half at this
-            // thumbnail size.
-            const mascotUrl = skinEntry.baseUrl + skinEntry.manifest.mascotHeadFile;
+            const mascotFile = skinEntry.manifest.mainMascotFile || skinEntry.manifest.mascotHeadFile;
+            const mascotUrl = skinEntry.baseUrl + mascotFile;
             brand.innerHTML = `
                 <img class="help-modal-mascot" src="${escapeHtml(mascotUrl)}" alt="">
                 <div class="help-modal-title">${escapeHtml(t("mangaplay-studio.help.title", "Mangaplay Studio"))}</div>
@@ -121,7 +118,7 @@ export async function openHelpModal()
             const helpMascot = brand.querySelector(".help-modal-mascot");
             if (helpMascot instanceof HTMLImageElement)
             {
-                registerSkinnedImage(helpMascot, "mascotHead");
+                registerSkinnedImage(helpMascot, "mainMascot");
             }
 
             // Help rows. Each row: label + description + action button.

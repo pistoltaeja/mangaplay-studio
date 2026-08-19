@@ -40,6 +40,10 @@ const STAGE_PROGRESS = {
     opening:       0.85
 };
 
+// Readability floors — must match the inline shim in index.html.
+const SPLASH_MIN_TOTAL_MS = 2000;
+const SPLASH_MIN_STAGE_MS = 250;
+
 class MpsSplash extends HTMLElement
 {
     constructor()
@@ -47,6 +51,9 @@ class MpsSplash extends HTMLElement
         super();
         this._progress = 0;
         this._done = false;
+        this._lastUpdateAt = 0;
+        this._pendingTimer = null;
+        this._pendingArgs = null;
     }
 
     connectedCallback()
@@ -85,15 +92,39 @@ class MpsSplash extends HTMLElement
 
     /**
      * Update caption and (if stage is known) advance the progress bar.
+     * Throttled by SPLASH_MIN_STAGE_MS so each caption stays readable —
+     * updates arriving faster than that are coalesced (latest wins) and
+     * flushed once the gap is satisfied.
      * @param {string} stage
      * @param {string} [msg]
      */
     update(stage, msg)
     {
+        const now = performance.now();
+        const gap = now - this._lastUpdateAt;
+        if (this._lastUpdateAt === 0 || gap >= SPLASH_MIN_STAGE_MS)
+        {
+            this._applyUpdate(stage, msg);
+            return;
+        }
+        this._pendingArgs = [stage, msg];
+        if (this._pendingTimer) return;
+        this._pendingTimer = setTimeout(() =>
+        {
+            this._pendingTimer = null;
+            const args = this._pendingArgs;
+            this._pendingArgs = null;
+            if (args) this._applyUpdate(args[0], args[1]);
+        }, SPLASH_MIN_STAGE_MS - gap);
+    }
+
+    _applyUpdate(stage, msg)
+    {
         const cap = this.querySelector(".mps-splash-caption, #boot-caption");
         if (cap && msg) cap.textContent = msg;
         const p = STAGE_PROGRESS[stage];
         if (typeof p === "number") this.setProgress(p);
+        this._lastUpdateAt = performance.now();
     }
 
     /**
@@ -125,15 +156,32 @@ class MpsSplash extends HTMLElement
             return this._donePromise || Promise.resolve();
         }
         this._done = true;
+        // Flush any pending throttled update so the final caption isn't lost.
+        if (this._pendingTimer)
+        {
+            clearTimeout(this._pendingTimer);
+            this._pendingTimer = null;
+            if (this._pendingArgs)
+            {
+                this._applyUpdate(this._pendingArgs[0], this._pendingArgs[1]);
+                this._pendingArgs = null;
+            }
+        }
         this.setProgress(1);
-        this.style.opacity = "0";
+        const startAt = /** @type {number} */ (window.__splashStartAt) || 0;
+        const elapsed = startAt ? (performance.now() - startAt) : SPLASH_MIN_TOTAL_MS;
+        const wait = Math.max(0, SPLASH_MIN_TOTAL_MS - elapsed);
         this._donePromise = new Promise((resolve) =>
         {
             setTimeout(() =>
             {
-                try { this.remove(); } catch (_) {}
-                resolve();
-            }, 260);
+                this.style.opacity = "0";
+                setTimeout(() =>
+                {
+                    try { this.remove(); } catch (_) {}
+                    resolve();
+                }, 260);
+            }, wait);
         });
         return this._donePromise;
     }

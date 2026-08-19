@@ -25,6 +25,7 @@ pub fn build_main_window(app: &tauri::App, ux_mode: &str) -> tauri::Result<()>
     // called from the native Win32 splash BEFORE Tauri init — both paths
     // land on identical logical/physical rects so the splash → shell
     // handoff has no size/position pop. See src/setup/geometry.rs.
+    #[cfg(desktop)]
     let g = crate::setup::geometry::WindowGeometry::resolve(Some(&app.handle()), ux_mode);
 
     // disable_drag_drop_handler: Tauri 2 on Windows registers an OS-level
@@ -68,14 +69,19 @@ pub fn build_main_window(app: &tauri::App, ux_mode: &str) -> tauri::Result<()>
     let hide_html_boot_screen = std::env::var("MPS_HIDE_HTML_BOOT_SCREEN")
         .map(|v| !v.is_empty() && v != "0" && v.to_lowercase() != "false")
         .unwrap_or(false);
+    let platform = if cfg!(target_os = "ios") { "ios" }
+        else if cfg!(target_os = "android") { "android" }
+        else { "desktop" };
     let init_script = format!(
-        "window.__MPS_UX_MODE__ = {};\nwindow.__MPS_BOOT_LANG__ = {};\nwindow.__MPS_BOOT_STRINGS__ = {};\nwindow.__MPS_LAST_SKIN__ = {};\nwindow.__MPS_PAUSE_AFTER_LOADING = {};\nwindow.__MPS_HIDE_HTML_BOOT_SCREEN = {};",
+        "window.__MPS_UX_MODE__ = {};\nwindow.__MPS_BOOT_LANG__ = {};\nwindow.__MPS_BOOT_STRINGS__ = {};\nwindow.__MPS_LAST_SKIN__ = {};\nwindow.__MPS_PAUSE_AFTER_LOADING = {};\nwindow.__MPS_HIDE_HTML_BOOT_SCREEN = {};\nwindow.__MPS_IS_DEV__ = {};\nwindow.__MPS_PLATFORM__ = {};",
         serde_json::to_string(ux_mode).unwrap_or_else(|_| "\"standalone\"".into()),
         serde_json::to_string(&boot_language).unwrap_or_else(|_| "\"en\"".into()),
         boot_strings_json,
         serde_json::to_string(&last_skin).unwrap_or_else(|_| "\"default\"".into()),
         if pause_after_loading { "true" } else { "false" },
         if hide_html_boot_screen { "true" } else { "false" },
+        if cfg!(debug_assertions) { "true" } else { "false" },
+        serde_json::to_string(platform).unwrap_or_else(|_| "\"desktop\"".into()),
     );
     log::debug!("[app_lib] Boot: initialization_script prepared ({} bytes, lang={})", init_script.len(), boot_language);
 
@@ -108,9 +114,10 @@ pub fn build_main_window(app: &tauri::App, ux_mode: &str) -> tauri::Result<()>
     // are unavailable on Android — gate them behind #[cfg(desktop)].
     #[cfg(desktop)]
     {
-        // macOS draws its own traffic-light chrome when decorations
-        // are enabled; Windows/Linux still use the hand-rolled buttons
-        // wired in window-controls.js.
+        // macOS uses Overlay title-bar style — the WebView extends under
+        // the traffic lights, merging them into the app's own #top-bar.
+        // Windows/Linux still use the hand-rolled buttons wired in
+        // window-controls.js with decorations(false).
         let use_native_decorations = cfg!(target_os = "macos");
         win_builder = win_builder
             // OS-level minimum. Below this the three workspace panes
@@ -132,6 +139,27 @@ pub fn build_main_window(app: &tauri::App, ux_mode: &str) -> tauri::Result<()>
             // shell_ready never fires (JS crash mid-boot).
             .visible(false)
             .disable_drag_drop_handler();
+
+        // macOS: Overlay title-bar style — keeps real AppKit traffic lights
+        // but extends the WebView to fill the full window, removing the
+        // separate native title strip. hidden_title(true) suppresses the
+        // "Mangaplay Studio" text that would otherwise show in the overlay
+        // area. The JS side sets a left inset (~78px) so #top-bar content
+        // clears the lights. Also force the theme to match the active skin
+        // so the traffic-light tint follows the skin, not the OS dark-mode.
+        #[cfg(target_os = "macos")]
+        {
+            win_builder = win_builder
+                .title_bar_style(tauri::TitleBarStyle::Overlay)
+                .hidden_title(true);
+
+            let win_theme = if last_skin == "night" {
+                Some(tauri::Theme::Dark)
+            } else {
+                Some(tauri::Theme::Light)
+            };
+            win_builder = win_builder.theme(win_theme);
+        }
 
         if ux_mode == "standalone"
         {
@@ -221,6 +249,18 @@ pub fn build_main_window(app: &tauri::App, ux_mode: &str) -> tauri::Result<()>
     let _main_window = win_builder.build()?;
     log::debug!("[app_lib] Boot: WebviewWindowBuilder.build() succeeded");
 
+    // Mobile: log the URL the webview was configured with so we can
+    // verify that index.html is being loaded from the correct location.
+    // (webview_url was moved into WebviewWindowBuilder::new above, so
+    // we log the compile-time constant instead.)
+    #[cfg(not(desktop))]
+    {
+        #[cfg(feature = "disk-frontend")]
+        log::info!("[boot] WebView URL = mpsdev://localhost/index.html (disk-frontend=true)");
+        #[cfg(not(feature = "disk-frontend"))]
+        log::info!("[boot] WebView URL = tauri://localhost/index.html (disk-frontend=false, embedded)");
+    }
+
     // Watchdog — if the loading shell never fires `shell_ready` (JS crash
     // mid-boot before the inline boot script runs, or an uncaught error
     // during initialization_script injection), force-show the window after
@@ -256,14 +296,56 @@ pub fn build_main_window(app: &tauri::App, ux_mode: &str) -> tauri::Result<()>
         });
     }
 
-    // Non-desktop boot marker — logs at the 5s mark so the developer can see
-    // how far into the boot sequence the app is. Not a failure indicator;
-    // shell_ready may have already fired by this point.
+    // Mobile boot diagnostics — sequential markers at 1s, 3s, 5s, 10s.
+    // Checks whether shell_ready has been received at each interval so
+    // we can pinpoint where the boot stalls (Rust init, WebView creation,
+    // HTML load, JS parse, or JS execution).
     #[cfg(not(desktop))]
     {
-        std::thread::spawn(|| {
-            std::thread::sleep(std::time::Duration::from_millis(5000));
-            log::debug!("[boot] 5s boot marker. If the app is still on the splash screen, JS may not have loaded.");
+        let diag_handle = app.handle().clone();
+        std::thread::spawn(move || {
+            use tauri::Manager;
+            let checkpoints: &[(u64, &str)] = &[
+                (1000, "1s"),
+                (3000, "3s"),
+                (5000, "5s"),
+                (10000, "10s"),
+            ];
+            let start = std::time::Instant::now();
+            for &(ms, label) in checkpoints
+            {
+                let target = std::time::Duration::from_millis(ms);
+                if let Some(remaining) = target.checked_sub(start.elapsed())
+                {
+                    std::thread::sleep(remaining);
+                }
+
+                let shell_ready_fired = diag_handle
+                    .try_state::<crate::commands::lifecycle::SplashState>()
+                    .and_then(|s| s.shell_ready_at.lock().ok().and_then(|g| *g))
+                    .is_some();
+
+                let win_exists = diag_handle.get_webview_window("main").is_some();
+
+                log::info!(
+                    "[boot] {} marker — shell_ready={}, window_exists={}",
+                    label,
+                    shell_ready_fired,
+                    win_exists,
+                );
+
+                if shell_ready_fired
+                {
+                    log::info!("[boot] JS boot completed successfully, stopping diagnostics.");
+                    return;
+                }
+            }
+
+            log::warn!(
+                "[boot] 10s elapsed without shell_ready — JS likely never loaded. \
+                 Check that index.html + app.js are present in the app bundle \
+                 and that CSP does not block local script execution."
+            );
         });
     }
 

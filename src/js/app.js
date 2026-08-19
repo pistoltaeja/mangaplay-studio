@@ -13,11 +13,13 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 // helper object is gone. The internals marker `__TAURI_INTERNALS__` stays
 // regardless — use it as the boolean "are we inside the .exe?" probe.
 import { isTauri } from "./util/index.js";
+import { isMobileLike } from "./boot/ux-mode.js";
+import { isEasyEditorEnabled } from "./boot/editor-features.js";
 
 // Side-import — registers customElements.define('mps-screenplay', MPSScreenplay).
 // The website component reads from RuntimeStorage; no imperative driver needed.
 import "../../../websites/mangaplay.studio/src/components/mps-screenplay.js";
-import { openProject, saveMeta, updateRecent, createUntitled, setTabSnapshot, migrateLegacySyncEntries } from "./project/project.js";
+import { openProject, updateRecent, createUntitled, setTabSnapshot, migrateLegacySyncEntries, listProjectTree, getFolderType } from "./project/project.js";
 import { getBroker } from "./project/active-script-broker.js";
 import {
     setMangaplayTargetConvention,
@@ -25,6 +27,7 @@ import {
 import {
     PersistentStorage as _StructuralFixerStorage,
     STORAGE_KEYS as _StructuralFixerKeys,
+    slidesLinkGet,
 } from "./adapters/tauri-storage.js";
 
 /**
@@ -61,8 +64,8 @@ import {
     filesGet as _filesGet
 } from "../../../core/google-docs/index.js";
 import { formatForFilename } from "./editor/lang-registry.js";
+import { getActiveAggregate } from "./editor/aggregate-view.js";
 import { getRuntimeStorage } from "@mangaplay-studio/core/state";
-import { refreshTooltipFor } from "./tooltip/tooltip.js";
 import {
     LEFT_PANE_MIN,
     LEFT_PANE_MAX,
@@ -70,8 +73,6 @@ import {
     EDITOR_MIN,
     clampOrNull,
 } from "./boot/shell-restore.js";
-import { openSettingsModal } from "./modals/settings-modal.js";
-import { openHelpModal } from "./modals/help-modal.js";
 import {
     setActiveScript as setGoogleDocsActiveScript,
     notifyEdit as notifyGoogleDocsEdit,
@@ -87,20 +88,20 @@ import { t } from "./adapters/tauri-i18n.js";
 // Side-effect imports: register web components.
 import "./components/mps-lang-select.js";
 // `mps-picker-shell` is lazy-imported inside the standalone branch of boot()
-// — review item #1. Phase 2 DCE can then drop the picker bundle entirely
-// from mobile builds. The picker-shell DOM element is NOT in index.html
-// anymore; standalone boot() creates it via document.createElement after
-// the dynamic import resolves.
-// Register `<mps-visual-editor>` and the three-state mode toggle. Both are
+// so DCE can drop the picker bundle from mobile builds. The picker-shell DOM
+// element is NOT in index.html; standalone boot() creates it via
+// document.createElement after the dynamic import resolves.
+// Register `<mps-easy-editor>` and the three-state mode toggle. Both are
 // side-effect imports — the files self-register via `customElements.define`.
-import "./components/mps-visual-editor.js";
+import "./components/mps-easy-editor.js";
 import "./components/mps-editor-mode-toggle.js";
+import "./components/mps-find-widget.js";
+import { installFindShortcut } from "./shell/find-controller.js";
 
 import { applySubview } from "./shell/subviews.js";
 import { renderStartScreen } from "./shell/start-screen.js";
 import { state } from "./shell/state.js";
 import {
-    switchSolo,
     syncNarrowTopbar,
     applyStoryboardCollapseState,
     applyLeftPaneCollapsedState,
@@ -144,6 +145,7 @@ if (typeof window !== "undefined")
     window.__mpsTest = {
         getCurrentWindow,
         invoke: (cmd, args) => window.__TAURI_INTERNALS__.invoke(cmd, args),
+        shellState: state,
     };
     // Diagnostic-only — exposes Google auth + Drive primitives so the CDP
     // harness can poke a live signed-in session without rebuilding. Safe
@@ -165,7 +167,13 @@ if (typeof window !== "undefined")
     };
     // Diagnostic: re-export everything the update flow touches so a CDP
     // harness can run an actual push without driving the footer button.
-    // Imports are lazy to avoid a bundle ordering hazard at boot.
+    // Gated behind the compile-time `__MPS_DIAGNOSTICS__` define — dev
+    // builds substitute `true` and ship the block; release builds
+    // substitute `false` and the minifier DCEs the entire assignment
+    // (including the three dynamic imports and their transitive graph)
+    // out of the mobile / production bundle. See
+    // @ts-ignore __MPS_DIAGNOSTICS__ injected by build-bundle.js define
+    if (__MPS_DIAGNOSTICS__) {
     window.__mpsGoogleDebug.runDiagPush = async (opts) => {
         const { push } = await import("./google-docs-sync/push-pull.js");
         const { evaluateLockState, liftRestriction } = await import("./google-docs-sync/lock-engine.js");
@@ -199,6 +207,7 @@ if (typeof window !== "undefined")
             return { ok: false, name: e.name, message: e.message, lockState };
         }
     };
+    }
 }
 
 // ── Release-only browser-shortcut guard ──
@@ -246,6 +255,10 @@ if (__MPS_RELEASE_KEY_GUARD__)
     }, { capture: true });
 }
 
+// Ctrl/Cmd+F opens the in-editor Find widget. Installed at module top so the
+// capture-phase listener beats WebView2's native find popup.
+installFindShortcut();
+
 // export-screenplay-modal pulls in @mangaplay-studio/core/export (jszip,
 // pdf-lib font resolvers, etc.). Lazy-imported on first menu open so the
 // boot chunk stays free of export-only deps. Cached as a module-level
@@ -254,6 +267,7 @@ if (__MPS_RELEASE_KEY_GUARD__)
 let exportScreenplayModalPromise = null;
 export async function openExportScreenplayModal(opts)
 {
+    if (isMobileLike()) return;
     if (!exportScreenplayModalPromise)
     {
         exportScreenplayModalPromise = import("./modals/export-screenplay-modal.js");
@@ -377,143 +391,18 @@ const SCREENPLAY_DEBOUNCE_MS = 80;
 state.viewMode = "dual";
 state.lastSoloMode = "solo-storyboard";
 
-/**
- * Route a meta.json save through the broker so destructive ops can drain.
- * The actual on-disk write is deferred 1.5 s; immediate flush callers go
- * through `broker.withLock` instead.
- * @param {string} projectPath
- * @param {any} meta
- */
-export function queueMetaSave(projectPath, meta)
-{
-    if (!projectPath) return;
-    getBroker().scheduleMetaSave(meta, async (latest) =>
-    {
-        try { await saveMeta(projectPath, latest); }
-        catch (e) { console.warn("queueMetaSave failed:", e); }
-    });
-}
+// ── App settings + meta.json persistence ─────────────────────────────────
+// Extracted to shell/app-settings-io.js. Re-exported so importers (boot.js,
+// layout.js, subviews.js, project-switcher.js, mount-project-views.js,
+// open-and-mount-project.js, explorer.js) keep resolving them from app.js.
+export {
+    queueMetaSave,
+    queueAppSettingsSave,
+    flushAppSettings,
+    probePlatform,
+    loadAppSettings,
+} from "./shell/app-settings-io.js";
 
-let _appSettingsTimer = null;
-let _appSettingsPending = {};
-export function queueAppSettingsSave(partial)
-{
-    Object.assign(_appSettingsPending, partial);
-    // Mirror into the cached in-memory copy so subsequent reads in the
-    // same session see the live value.
-    if (globalThis.__MPS_APP_SETTINGS__)
-    {
-        Object.assign(globalThis.__MPS_APP_SETTINGS__, partial);
-    }
-    if (_appSettingsTimer) clearTimeout(_appSettingsTimer);
-    _appSettingsTimer = setTimeout(async () =>
-    {
-        const value = _appSettingsPending;
-        _appSettingsPending = {};
-        _appSettingsTimer = null;
-        try { await invoke("app_settings_set", { value }); }
-        catch (e) { console.warn("queueAppSettingsSave failed:", e); }
-    }, 500);
-}
-export async function flushAppSettings()
-{
-    if (!_appSettingsTimer) return;
-    clearTimeout(_appSettingsTimer);
-    _appSettingsTimer = null;
-    const value = _appSettingsPending;
-    _appSettingsPending = {};
-    try { await invoke("app_settings_set", { value }); }
-    catch (e) { console.warn("flushAppSettings failed:", e); }
-}
-
-// ── Save state ──
-
-// ── Tauri platform probe ──
-export async function probePlatform() {
-    if (isTauri()) {
-        try {
-            /** @type {any} */
-            const p = await invoke("app_platform");
-            return { os: p.os, mode: "tauri" };
-        } catch {
-            return { os: "unknown", mode: "tauri" };
-        }
-    }
-    return { os: navigator.platform || "browser", mode: "browser" };
-}
-
-/**
- * Fetch app-wide settings from Tauri. Falls back to defaults if not in Tauri
- * (browser dev) or if the call fails.
- * @returns {Promise<{skin: string, hardwareAcceleration: boolean, smoothMotion: boolean, smoothScrolling: boolean, automaticUpdates: boolean, diagnosticsEnabled: boolean, analyticsEnabled: boolean, windowMaximized: boolean, windowWidth: number|null, windowHeight: number|null}>}
- */
-export async function loadAppSettings()
-{
-    const DEFAULTS = {
-        skin: "default",
-        hardwareAcceleration: true,
-        smoothMotion: true,
-        smoothScrolling: true,
-        automaticUpdates: true,
-        diagnosticsEnabled: true,
-        analyticsEnabled: true,
-        language: null,
-        screenplayFont: "default",
-        editorFont: "default",
-        leftPaneWidth: null,
-        storyboardWidth: null,
-        leftPaneCollapsed: false,
-        storyboardCollapsed: false,
-        viewMode: "dual",
-        lastSoloMode: "solo-storyboard",
-        activeSubview: "folder",
-        windowMaximized: false,
-        windowWidth: null,
-        windowHeight: null,
-    };
-    if (!isTauri()) return DEFAULTS;
-    try
-    {
-        /** @type {any} */
-        const v = await invoke("app_settings_get");
-        const viewModeOk = (v?.viewMode === "dual"
-            || v?.viewMode === "solo-mangaplay"
-            || v?.viewMode === "solo-storyboard"
-            || v?.viewMode === "solo-screenplay") ? v.viewMode : "dual";
-        const lastSoloOk = (v?.lastSoloMode === "solo-storyboard"
-            || v?.lastSoloMode === "solo-screenplay") ? v.lastSoloMode : "solo-storyboard";
-        const activeSubviewOk = (v?.activeSubview === "folder"
-            || v?.activeSubview === "outline"
-            || v?.activeSubview === "statistics") ? v.activeSubview : "folder";
-        return {
-            skin: typeof v?.skin === "string" && v.skin.length > 0 ? v.skin : "default",
-            hardwareAcceleration: v?.hardwareAcceleration !== false,
-            smoothMotion: v?.smoothMotion !== false,
-            smoothScrolling: v?.smoothScrolling !== false,
-            automaticUpdates: v?.automaticUpdates !== false,
-            diagnosticsEnabled: v?.diagnosticsEnabled !== false,
-            analyticsEnabled: v?.analyticsEnabled !== false,
-            language: typeof v?.language === "string" ? v.language : null,
-            screenplayFont: typeof v?.screenplayFont === "string" ? v.screenplayFont : "default",
-            editorFont: typeof v?.editorFont === "string" ? v.editorFont : "default",
-            leftPaneWidth: Number.isFinite(v?.leftPaneWidth) ? v.leftPaneWidth : null,
-            storyboardWidth: Number.isFinite(v?.storyboardWidth) ? v.storyboardWidth : null,
-            leftPaneCollapsed: v?.leftPaneCollapsed === true,
-            storyboardCollapsed: v?.storyboardCollapsed === true,
-            viewMode: viewModeOk,
-            lastSoloMode: lastSoloOk,
-            activeSubview: activeSubviewOk,
-            windowMaximized: v?.windowMaximized === true,
-            windowWidth: Number.isFinite(v?.windowWidth) ? v.windowWidth : null,
-            windowHeight: Number.isFinite(v?.windowHeight) ? v.windowHeight : null,
-        };
-    }
-    catch (e)
-    {
-        console.warn("[boot] app_settings_get failed, using defaults:", e?.message);
-        return DEFAULTS;
-    }
-}
 
 // ── DOM helpers ──
 /**
@@ -527,7 +416,7 @@ export async function loadAppSettings()
 export function setAppState(next) {
     // Debug-only pause point (MPS_PAUSE_AFTER_LOADING=1). Halt the moment
     // the app leaves any loading-phase substate. Splash NOT dismissed,
-    // chrome NOT unhidden. See TODO/unify-splash-component.md for context.
+    // chrome NOT unhidden (debug-only pause — MPS_PAUSE_AFTER_LOADING=1).
     const LOADING_PHASE = new Set(["app-init", "booting", "probing", "loading-recent", "user-data"]);
     if (typeof window !== "undefined"
         && /** @type {any} */ (window).__MPS_PAUSE_AFTER_LOADING
@@ -616,7 +505,6 @@ export function setAppState(next) {
             // THEN unhide chrome. Without this the splash and chrome cross-
             // fade opacity on the same frame band and body bg peeks through
             // for ~50ms → white flash on the light theme. See the boot-flash
-            // seam notes in TODO/.
             if (splash && typeof splash.done === "function") {
                 try { await splash.done(); }
                 catch (_) {}
@@ -749,7 +637,13 @@ export function restoreShellMeta()
         }
     }
 
-    if (settings.storyboardCollapsed === true)
+    // Mobile/tablet: FAB view-toggle owns storyboard visibility now — a
+    // persisted `storyboardCollapsed:true` from a prior desktop session
+    // must NOT flip the pane off-screen (see shell-restore.js for the same
+    // guard on boot).
+    const _uxMode = document.documentElement.getAttribute("data-ux-mode");
+    const _mobileLike = _uxMode === "mobile" || _uxMode === "tablet";
+    if (settings.storyboardCollapsed === true && !_mobileLike)
     {
         applyStoryboardCollapseState(true);
     }
@@ -954,30 +848,297 @@ export function onSlotActivated(slot)
     // App Footer counts follow the active slot.
     try { state.appFooter?.recountNow(); }
     catch (e) { console.debug("[app-footer] recountNow threw:", e); }
+    // Slides pill's greyed-out state depends on state.activeFormat, which
+    // was just updated a few lines above. Nudge it to re-evaluate.
+    //
+    // Slides pill linked state — driven by project.json's slidesLinks map.
+    // Resolved via slides_link_get; short-circuits on non-mangaplay formats
+    // to avoid a Rust hop + project.json read on every slot activation for
+    // .fountain / .txt files. Wrapped in an async IIFE because
+    // onSlotActivated is a sync function and we don't want to widen its
+    // signature just for this seam.
+    (async () =>
+    {
+        try
+        {
+            if (state.activeFormat !== "mangaplay")
+            {
+                state.slidesLinkedForActive = false;
+                state.slidesSyncStatus = null;
+            }
+            else
+            {
+                const activeSlot = state.slotManager?.getActive();
+                const localPath  = activeSlot?.path || "";
+                if (state.currentProject && localPath)
+                {
+                    const projNorm = state.currentProject.path.replace(/\\/g, "/");
+                    const slotNorm = String(localPath).replace(/\\/g, "/");
+                    const rel = slotNorm.startsWith(projNorm + "/")
+                        ? slotNorm.slice(projNorm.length + 1)
+                        : (activeSlot?.basename || "");
+                    // Resolve the active file's parent-folder uuid when
+                    // that folder is a Storyboard Folder — folder-scoped
+                    // links are keyed by `folder:<folderUuid>` in
+                    // project.json.slidesLinks. Without this the pill's
+                    // linked indicator can never see folder-scoped links.
+                    /** @type {string|null} */
+                    let folderUuid = null;
+                    try
+                    {
+                        const fileUuid = /** @type {any} */ (activeSlot)?.fileUuid || null;
+                        if (fileUuid)
+                        {
+                            const entries = await listProjectTree(state.currentProject.path);
+                            const target = entries.find((en) => en && en.uuid === fileUuid);
+                            const parentUuid = target && target.parentUuid ? target.parentUuid : null;
+                            if (parentUuid)
+                            {
+                                const folderType = await getFolderType(state.currentProject.path, parentUuid);
+                                if (folderType === "storyboard") folderUuid = parentUuid;
+                            }
+                        }
+                    }
+                    catch (e)
+                    {
+                        console.debug("[publish-slides-pill] folder-uuid resolve failed:", e?.message || e);
+                    }
+                    const link = await slidesLinkGet({
+                        projectPath:   state.currentProject.path,
+                        scriptRelPath: rel,
+                        folderUuid,
+                    });
+                    state.slidesLinkedForActive = !!link;
+                    // Background sync-status check — fire-and-forget.
+                    // Compares the remote headRevisionId against the
+                    // stored lastKnownRevisionId. Degrades silently on
+                    // any failure (pill stays in plain "linked" state).
+                    // Generation counter guards against a stale check
+                    // painting the wrong file's badge after a fast switch.
+                    state.slidesSyncStatus = null;
+                    if (link && link.presentationId)
+                    {
+                        const gen = ++state.slidesSyncCheckGen;
+                        (async () =>
+                        {
+                            try
+                            {
+                                const { isAuthenticated, getAccessToken } =
+                                    await import("./auth/google-oauth.js");
+                                if (!isAuthenticated()) return;
+                                if (gen !== state.slidesSyncCheckGen) return;
+                                const token = await getAccessToken({ allowRefresh: true });
+                                if (!token) return;
+                                if (gen !== state.slidesSyncCheckGen) return;
+                                const { getHeadRevisionId } =
+                                    await import("./google-slides-sync/slides-api.js");
+                                const headRev = await getHeadRevisionId(
+                                    link.presentationId, token);
+                                if (gen !== state.slidesSyncCheckGen) return;
+                                if (!headRev)
+                                {
+                                    state.slidesSyncStatus = null;
+                                    return;
+                                }
+                                if (!link.lastKnownRevisionId)
+                                {
+                                    state.slidesSyncStatus = "unknown";
+                                }
+                                else if (headRev === link.lastKnownRevisionId)
+                                {
+                                    state.slidesSyncStatus = "synced";
+                                }
+                                else
+                                {
+                                    state.slidesSyncStatus = "remote-changed";
+                                }
+                            }
+                            catch (e)
+                            {
+                                if (gen !== state.slidesSyncCheckGen) return;
+                                console.debug(
+                                    "[slides-sync-status] background check failed:",
+                                    e?.message || e);
+                                state.slidesSyncStatus = null;
+                            }
+                            try { state.publishSlidesPillCtrl?.refresh(); }
+                            catch (_) { /* best-effort */ }
+                        })();
+                    }
+                }
+                else
+                {
+                    state.slidesLinkedForActive = false;
+                    state.slidesSyncStatus = null;
+                }
+            }
+        }
+        catch (e)
+        {
+            console.debug("[publish-slides-pill] slides_link_get failed:", e?.message || e);
+            state.slidesLinkedForActive = false;
+            state.slidesSyncStatus = null;
+        }
+        try { state.publishSlidesPillCtrl?.refresh(); }
+        catch (e) { console.debug("[publish-slides-pill] refresh threw:", e); }
+    })();
+    // Publish-scope resolution — is the active file inside a Storyboard
+    // Folder? Drives the pill's "ready-group" tooltip variant + the editor
+    // menu's "Group Google Slides™" label. Same async IIFE pattern as
+    // slidesLinkedForActive above; short-circuits on non-mangaplay.
+    (async () =>
+    {
+        try
+        {
+            state.publishScopeIsFolder = false;
+            if (state.activeFormat !== "mangaplay") return;
+            const activeSlot = state.slotManager?.getActive();
+            const fileUuid = /** @type {any} */ (activeSlot)?.fileUuid || null;
+            const projectPath = state.currentProject?.path || "";
+            if (!projectPath || !fileUuid) return;
+            const entries = await listProjectTree(projectPath);
+            const target = entries.find((e) => e && e.uuid === fileUuid);
+            const parentUuid = target && target.parentUuid ? target.parentUuid : null;
+            if (!parentUuid) return;
+            const folderType = await getFolderType(projectPath, parentUuid);
+            state.publishScopeIsFolder = folderType === "storyboard";
+        }
+        catch (e)
+        {
+            console.debug("[publish-scope] scope refresh failed:", e?.message || e);
+            state.publishScopeIsFolder = false;
+        }
+        try { state.publishSlidesPillCtrl?.refresh(); }
+        catch (e) { console.debug("[publish-slides-pill] refresh threw:", e); }
+    })();
+    // Right-pane storyboard-display mode — swap <mps-canvas> for <mps-display>
+    // when the active .mangaplay file (or containing storyboard folder) has a
+    // linked Slides deck with cached PNGs. Same-group file switches re-target
+    // activeIndex without unmount; unlinked / non-mangaplay restores canvas.
+    (async () =>
+    {
+        try
+        {
+            const mod = await import("./shell/right-pane-storyboard-mode.js");
+            const activeSlot = state.slotManager?.getActive();
+            const fileUuid = /** @type {any} */ (activeSlot)?.fileUuid || null;
+            const projectPath = state.currentProject?.path || "";
+            const localPath  = activeSlot?.path || "";
+            if (state.activeFormat !== "mangaplay" || !projectPath || !localPath)
+            {
+                mod.unmountDisplay();
+                return;
+            }
+            const projNorm = projectPath.replace(/\\/g, "/");
+            const slotNorm = String(localPath).replace(/\\/g, "/");
+            const scriptRelPath = slotNorm.startsWith(projNorm + "/")
+                ? slotNorm.slice(projNorm.length + 1)
+                : (activeSlot?.basename || "");
+            // Resolve parent-folder uuid + type.
+            /** @type {string|null} */
+            let parentFolderUuid = null;
+            /** @type {"storyboard"|"screenplay"|null} */
+            let folderType = null;
+            if (fileUuid)
+            {
+                try
+                {
+                    const entries = await listProjectTree(projectPath);
+                    const target = entries.find((en) => en && en.uuid === fileUuid);
+                    parentFolderUuid = target?.parentUuid || null;
+                    if (parentFolderUuid)
+                    {
+                        const ft = await getFolderType(projectPath, parentFolderUuid);
+                        folderType = ft === "storyboard" || ft === "screenplay" ? ft : null;
+                    }
+                }
+                catch (e) { console.debug("[display-mode] folder resolve:", e?.message || e); }
+            }
+            // Page-id enumerator from the runtime AST (already parsed for
+            // active file). For group scope we fall back to per-file parse.
+            const activePages = getRuntimeStorage().state?.script?.pages || [];
+            const pageIdsForFile = async (/** @type {string} */ uuid) =>
+            {
+                if (fileUuid && uuid === fileUuid)
+                {
+                    return activePages.map((/** @type {any} */ p) => String(p?.id ?? "")).filter(Boolean);
+                }
+                // Group scope: read + parse the sibling file. Best-effort; on
+                // any failure return empty (renders placeholders for that file's slice).
+                try
+                {
+                    const { registryReadFile } = await import("./adapters/tauri-storage.js");
+                    const { contents } = await registryReadFile(uuid);
+                    const ast = parseScript(contents || "");
+                    return (ast.pages || []).map((/** @type {any} */ p) => String(p?.id ?? "")).filter(Boolean);
+                }
+                catch (e)
+                {
+                    console.debug("[display-mode] pageIdsForFile fallback:", e?.message || e);
+                    return [];
+                }
+            };
+            const groupResolver = async () =>
+            {
+                if (folderType !== "storyboard" || !parentFolderUuid) return null;
+                const entries = await listProjectTree(projectPath);
+                const siblings = entries
+                    .filter((en) => en.parentUuid === parentFolderUuid && en.kind === "file")
+                    .filter((en) => formatForFilename(en.name) === "mangaplay")
+                    .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+                return {
+                    files: siblings.map((en) => en.uuid),
+                    basenameFor: (/** @type {string} */ u) =>
+                        siblings.find((en) => en.uuid === u)?.name || "",
+                };
+            };
+            await mod.evaluateStoryboardMode({
+                projectPath,
+                scriptRelPath,
+                fileUuid,
+                parentFolderUuid,
+                folderType,
+                activeFormat: state.activeFormat,
+                pageIdsForFile,
+                groupResolver,
+            });
+        }
+        catch (e)
+        {
+            console.debug("[display-mode] evaluate failed:", /** @type {any} */ (e)?.message || e);
+        }
+    })();
 }
 
 /**
  * Map an EditorFormat to the editor modes it supports.
  *
- *   mangaplay         → [source, text, visual]
- *   fountain          → [source, text]
+ *   mangaplay         → [source, wysiwyg, easy]
+ *   fountain          → [source, wysiwyg]
  *   superscript       → [source] (+ alpha warning shown in the top bar)
  *   superscript-bin   → [source] (+ alpha warning shown in the top bar)
  *   general-text      → [source]
  *
+ * When the Easy Editor is build-gated off (EASY_EDITOR_ENABLED === false),
+ * "easy" is dropped from every set so the mode is unreachable from the cycle
+ * toggle + footer menu. The component itself stays mounted-on-demand.
+ *
  * @param {import("./editor/lang-registry.js").EditorFormat} format
- * @returns {Array<"source"|"text"|"visual">}
+ * @returns {Array<"source"|"wysiwyg"|"easy">}
  */
 function allowedModesForFormat(format)
 {
+    let modes;
     switch (format)
     {
-        case "mangaplay":        return ["source", "text", "visual"];
-        case "fountain":         return ["source", "text"];
-        case "superscript":      return ["source"];
-        case "superscript-bin":  return ["source"];
-        default:                 return ["source"]; // general-text / .txt
+        case "mangaplay":        modes = ["source", "wysiwyg", "easy"]; break;
+        case "fountain":         modes = ["source", "wysiwyg"]; break;
+        case "superscript":      modes = ["source"]; break;
+        case "superscript-bin":  modes = ["source"]; break;
+        default:                 modes = ["source"]; break; // general-text / .txt
     }
+    if (!isEasyEditorEnabled()) modes = modes.filter((m) => m !== "easy");
+    return /** @type {Array<"source"|"wysiwyg"|"easy">} */ (modes);
 }
 
 /**
@@ -990,7 +1151,20 @@ function allowedModesForFormat(format)
  */
 export function applyAllowedModesForFormat(format)
 {
-    const allowed = allowedModesForFormat(format);
+    let allowed = allowedModesForFormat(format);
+    // Aggregate override: the folder is guaranteed homogeneous by the
+    // explorer.js compatibility gate (a Storyboard folder only mounts
+    // mangaplay children; a Screenplay folder only mounts fountain).
+    // So the intersection across all valid children equals the format
+    // of the focused file — which the caller already passed. Nothing to
+    // narrow here. We keep the hook so future mixed-format folders can
+    // downgrade to `["source","wysiwyg"]` cheaply without touching call sites.
+    const activeAgg = getActiveAggregate();
+    if (activeAgg)
+    {
+        // Intersection is homogeneous; keep the format-driven default.
+        allowed = allowedModesForFormat(format);
+    }
     if (state.editorAreaTopBarEl)
     {
         state.editorAreaTopBarEl.setAttribute("data-format", format);
@@ -1004,8 +1178,8 @@ export function applyAllowedModesForFormat(format)
         const current = /** @type {any} */ (state.modeToggleEl).mode;
         if (!allowed.includes(current))
         {
-            // Walk Visual → Text → Source for the highest allowed downgrade.
-            const order = ["visual", "text", "source"];
+            // Walk Easy Editor → WYSIWYG → Source for the highest allowed downgrade.
+            const order = ["easy", "wysiwyg", "source"];
             const downgrade = /** @type {any} */ (
                 order.find((m) => allowed.includes(/** @type {any} */ (m)))
             ) || "source";
@@ -1074,204 +1248,18 @@ export const debouncedWriteSession = (() =>
     };
 })();
 
-/**
- * Animate the right pane from storyboard ↔ screenplay. The slider container
- * stays in place; its two children translateX between 0 and +100%.
- * @param {"solo-storyboard" | "solo-screenplay"} nextMode
- */
-function slideToRightPaneView(nextMode)
-{
-    const slider = document.querySelector(".right-pane-slider");
-    const targetActive = nextMode === "solo-screenplay" ? "screenplay" : "storyboard";
+// ── Top-bar / rail button wiring ─────────────────────────────────────────
+// Extracted to shell/app-toolbar-wiring.js. Re-exported so boot.js keeps
+// resolving the wire* helpers from app.js.
+export {
+    wireStoryboardSwitcher,
+    wireSettingsButton,
+    wireMobileFabActions,
+    wireRailAccount,
+    wireHelpButton,
+    wireQuickToggleRelocation,
+} from "./shell/app-toolbar-wiring.js";
 
-    if (slider)
-    {
-        slider.setAttribute("data-view-sliding", "");
-        slider.setAttribute("data-active", targetActive);
-        state.renderTopbarPagination?.();
-
-        const onEnd = () =>
-        {
-            slider.removeAttribute("data-view-sliding");
-            slider.removeEventListener("transitionend", onEnd);
-            // Force the website canvas to re-measure now that its slot is settled.
-            // Without this, the drawing engine may have bound pointer listeners to
-            // a 0×0 .drawing-canvas before the slider's translateX transition resolved.
-            const c = document.querySelector("mps-canvas");
-            if (c && typeof c.resizeDrawingCanvas === "function")
-            {
-                try { c.resizeDrawingCanvas(); } catch {}
-            }
-            if (c && typeof c.fitToContainer === "function")
-            {
-                try { c.fitToContainer(true); } catch {}
-            }
-        };
-        slider.addEventListener("transitionend", onEnd);
-        // Safety: in case transitionend doesn't fire (no transform change), tear down.
-        setTimeout(onEnd, 600);
-    }
-
-    // Drive the existing viewMode machinery so meta.viewMode + lastSoloMode persist.
-    switchSolo(nextMode);
-}
-
-export function wireStoryboardSwitcher()
-{
-    const btn = /** @type {HTMLElement|null} */ (document.getElementById("btn-storyboard-action"));
-    if (!btn) return;
-
-    btn.addEventListener("click", () =>
-    {
-        // Decide which mode to switch TO.
-        // - solo-storyboard → solo-screenplay
-        // - solo-screenplay → solo-storyboard
-        // - dual or solo-mangaplay → use the OPPOSITE of lastSoloMode (so the
-        //   button toggles even when both are visible).
-        let next;
-        if (state.viewMode === "solo-storyboard") next = "solo-screenplay";
-        else if (state.viewMode === "solo-screenplay") next = "solo-storyboard";
-        else next = (state.lastSoloMode === "solo-screenplay") ? "solo-storyboard" : "solo-screenplay";
-
-        // Update tooltip + aria for the NEXT click (which would swap back).
-        const willShowNext = next === "solo-storyboard" ? "Screenplay" : "Storyboard";
-        btn.setAttribute("data-tooltip", `Show ${willShowNext}`);
-        btn.setAttribute("aria-label", `Switch to ${willShowNext}`);
-        try { refreshTooltipFor(btn); } catch {}
-
-        // When the active file's format has no screenplay surface (plain
-        // text / binary .sup), the slider still slides to Screenplay so
-        // the toggle feels responsive — but the inline "not supported"
-        // overlay covers the screenplay area instead of the empty/broken
-        // panel. The overlay is driven by recomputeRightPaneEmpty +
-        // the slider's data-active attribute (see right-pane-empty.js).
-        slideToRightPaneView(next);
-    });
-}
-
-export function wireSettingsButton()
-{
-    const btn = /** @type {HTMLElement|null} */ (document.getElementById("btn-app-settings"));
-    if (!btn) return;
-    btn.addEventListener("click", () =>
-    {
-        try { openSettingsModal("general"); }
-        catch (e) { console.error("openSettingsModal failed:", e); }
-    });
-}
-
-/**
- * Bottom-of-sidebar account button. Visible only while signed in; click
- * opens the Settings modal on the Account tab. Avatar src + visibility
- * are driven by `mps:authChanged`.
- */
-export async function wireRailAccount()
-{
-    const btn = /** @type {HTMLButtonElement|null} */ (document.getElementById("btn-rail-account"));
-    if (!btn) return;
-    const avatar = /** @type {HTMLImageElement|null} */ (btn.querySelector(".rail-account-avatar"));
-
-    const apply = (detail) =>
-    {
-        const picture = detail && detail.picture;
-        if (picture && avatar)
-        {
-            avatar.src = picture;
-            avatar.alt = detail.name || "";
-            btn.hidden = false;
-        }
-        else
-        {
-            btn.hidden = true;
-            if (avatar) avatar.removeAttribute("src");
-        }
-    };
-
-    try
-    {
-        apply(getCurrentProfile());
-        onAuthChanged(apply);
-    }
-    catch (e) { console.warn("[wireRailAccount] auth wiring failed:", e); }
-
-    btn.addEventListener("click", () =>
-    {
-        try { openSettingsModal("account"); }
-        catch (e) { console.error("openSettingsModal(account) failed:", e); }
-    });
-}
-
-export function wireHelpButton()
-{
-    const btn = /** @type {HTMLElement|null} */ (document.getElementById("btn-app-help"));
-    if (!btn) return;
-    btn.addEventListener("click", () =>
-    {
-        try { openHelpModal(); }
-        catch (e) { console.error("openHelpModal failed:", e); }
-    });
-}
-
-// Home button — opens the same Help / About modal as `#btn-app-help` (the
-// circle-help icon in the left-pane footer). The Home button is otherwise
-// passive: it doesn't switch subviews, it just surfaces the application
-// info popup so the brand icon doubles as a "what is this app" entry point.
-export function wireHomeButton()
-{
-    const btn = /** @type {HTMLElement|null} */ (document.getElementById("btn-subview-folder"));
-    if (!btn) return;
-    btn.addEventListener("click", () =>
-    {
-        try { openHelpModal(); }
-        catch (e) { console.error("openHelpModal failed:", e); }
-    });
-}
-
-
-/**
- * Relocate the single <mps-quick-toggle-sidebar> rendered inside <mps-canvas>
- * into the #quick-toggle-strip sibling above the canvas. Re-parenting via
- * appendChild fires disconnectedCallback + connectedCallback on the
- * component — its document/window listeners re-bind cleanly. A
- * `data-relocated="true"` attr lets CSS target the horizontal layout.
- */
-export function wireQuickToggleRelocation()
-{
-    const strip = document.getElementById("quick-toggle-strip");
-    if (!strip) return;
-    const canvas = document.querySelector("mps-canvas");
-    if (!canvas) return;
-
-    // mps-canvas re-creates its child <mps-quick-toggle-sidebar> on each
-    // project mount; the previously-relocated sidebar would stack inside the
-    // static strip. Drain the strip before the new sidebar lands.
-    while (strip.firstChild) strip.removeChild(strip.firstChild);
-
-    let attempts = 0;
-    const MAX_ATTEMPTS = 60;
-
-    const tryRelocate = () =>
-    {
-        const el = canvas.querySelector("mps-quick-toggle-sidebar");
-        if (el)
-        {
-            el.setAttribute("data-relocated", "true");
-            strip.appendChild(el);
-            return true;
-        }
-        return false;
-    };
-
-    if (tryRelocate()) return;
-
-    const pump = () =>
-    {
-        if (tryRelocate()) return;
-        if (++attempts >= MAX_ATTEMPTS) return;
-        requestAnimationFrame(pump);
-    };
-    requestAnimationFrame(pump);
-}
 
 // ── Live parse pipeline (§1+§2) ──
 /**

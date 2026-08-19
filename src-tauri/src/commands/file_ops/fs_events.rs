@@ -1,6 +1,6 @@
 //! FS event types + filename utilities. Extracted from lib.rs verbatim.
 //!
-//! # Two parallel events during Part 3c.ii → Part 4 transition
+//! # Two parallel events
 //!
 //! Two `Emitter::emit` calls fire from the watcher hot path on every mapped
 //! event:
@@ -9,19 +9,20 @@
 //!   ([`FsChangedPayload`] + [`FsChange`]). Every existing JS listener still
 //!   depends on this shape.
 //! - `registry-fs-changed` — the NEW UUID-carrying payload
-//!   ([`RegistryFsChangedPayload`] + [`RegistryFsChange`]). Part 4 flips JS
-//!   listeners over one at a time; once all have moved, the OLD event and
+//!   ([`RegistryFsChangedPayload`] + [`RegistryFsChange`]). JS listeners
+//!   migrate over one at a time; once all have moved, the OLD event and
 //!   its emit call sites are deleted.
 //!
-//! See [`TODO/uuid-file-registry.md`](../../../../TODO/uuid-file-registry.md)
-//! Part 3 "Watcher event payload" for the target shape and Part 4 "Watcher
-//! event handling" for the JS-side reconciliation the new payload feeds.
+//! See the registry implementation for the target shape and watcher event
+//! handling for the JS-side reconciliation the new payload feeds.
 
 use std::path::Path;
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tauri::Emitter;
 use uuid::Uuid;
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::registry::ProjectRegistryState;
 use crate::registry::state::LoadedRegistry;
 
@@ -44,6 +45,7 @@ pub struct FsChangedPayload
     pub change: FsChange,
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// Broadcasts a `project-fs-changed` event. NOTE: `path` strings carry
 /// platform-native separators (backslashes on Windows, forward slashes on
 /// Unix). JS-side handlers must use the shared paths.js normaliser
@@ -57,7 +59,7 @@ pub(crate) fn emit_fs_changed(app: &tauri::AppHandle, path: &str, change: FsChan
 }
 
 // ---------------------------------------------------------------------------
-// Part 3c.ii — registry-fs-changed event
+// registry-fs-changed event
 // ---------------------------------------------------------------------------
 
 /// UUID-carrying payload variants for the new `registry-fs-changed` event.
@@ -66,10 +68,10 @@ pub(crate) fn emit_fs_changed(app: &tauri::AppHandle, path: &str, change: FsChan
 /// `change: "created" | "modified" | ...` in the emitted JSON. Every
 /// multi-word field carries an explicit `#[serde(rename = "kebab-case")]`
 /// so the emitted keys are deterministic; `rename_all` on the enum does
-/// NOT propagate into per-variant field names (Part 3a hard-won lesson —
+/// NOT propagate into per-variant field names (hard-won lesson —
 /// see the note on [`crate::registry::FsErr`]).
 ///
-/// Emitted JSON shapes (Part 4 JS handlers consume these verbatim):
+/// Emitted JSON shapes (JS handlers consume these verbatim):
 ///
 /// | Variant     | Emitted JSON keys                                                  |
 /// |-------------|---------------------------------------------------------------------|
@@ -90,7 +92,7 @@ pub(crate) fn emit_fs_changed(app: &tauri::AppHandle, path: &str, change: FsChan
 pub enum RegistryFsChange
 {
     /// Not emitted by the watcher; reserved for synthetic emits from
-    /// mutation commands (Part 3d+).
+    /// mutation commands.
     Created
     {
         uuid: String,
@@ -125,7 +127,7 @@ pub enum RegistryFsChange
         rev: u64,
     },
     /// Not emitted by the watcher; reserved for synthetic emits from
-    /// mutation commands (Part 3d+).
+    /// mutation commands.
     Moved
     {
         uuid: String,
@@ -356,7 +358,7 @@ pub fn path_eq_caseless(a: &Path, b: &Path) -> bool
 /// Split a directory entry name into `(base, ext_chain)` for the duplicate
 /// numbering. Recognised double-suffixes: `.mangaplay.md`, `.fountain.md`,
 /// `.sup.md`. Falls back to splitting on the last `.` for everything else.
-pub(super) fn split_base_and_ext(name: &str) -> (String, String)
+pub(crate) fn split_base_and_ext(name: &str) -> (String, String)
 {
     for suffix in &[".mangaplay.md", ".fountain.md", ".sup.md"]
     {
@@ -385,4 +387,35 @@ pub(super) fn strip_trailing_number(stem: &str) -> String
         }
     }
     stem.to_string()
+}
+
+#[cfg(test)]
+mod tests
+{
+    use super::split_base_and_ext;
+
+    #[test]
+    fn split_base_and_ext_parity()
+    {
+        assert_eq!(
+            split_base_and_ext("Untitled.mangaplay.md"),
+            ("Untitled".to_string(), ".mangaplay.md".to_string()),
+        );
+        assert_eq!(
+            split_base_and_ext("foo.fountain.md"),
+            ("foo".to_string(), ".fountain.md".to_string()),
+        );
+        assert_eq!(
+            split_base_and_ext("bar.sup.md"),
+            ("bar".to_string(), ".sup.md".to_string()),
+        );
+        assert_eq!(
+            split_base_and_ext("note.txt"),
+            ("note".to_string(), ".txt".to_string()),
+        );
+        assert_eq!(
+            split_base_and_ext("plain"),
+            ("plain".to_string(), "".to_string()),
+        );
+    }
 }

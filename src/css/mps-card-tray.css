@@ -22,11 +22,8 @@ mps-card-tray
        button (bottom-right of tray) has a meaningful `right: 0` anchor.
        Grid width is set below per-layout; the tray inherits via the
        fit-content of the grid child. */
-    /* Match dialogue lockstep so if the mascot repositions, the tray
-       follows without a jump. */
-    transition:
-        left 0.4s ease-in-out,
-        top 0.4s ease-in-out;
+    /* The tray snaps to the mascot's position — no left/top transition.
+       Animating left/top triggers layout recalc on every frame. */
 }
 
 /* Standalone (desktop) has more vertical room than mobile/tablet — push
@@ -34,6 +31,12 @@ mps-card-tray
 :root[data-ux-mode="standalone"] mps-card-tray
 {
     top: calc(var(--ob-mascot-y, 50vh) + var(--ob-mascot-size, 98px) + 54px);
+}
+
+/* Mobile: give the cards ~40px breathing room below the mascot badge. */
+:root[data-ux-mode="mobile"] mps-card-tray
+{
+    top: calc(var(--ob-mascot-y, 50vh) + var(--ob-mascot-size, 98px) + 40px);
 }
 
 mps-card-tray.mounted
@@ -166,7 +169,7 @@ mps-card-tray .mps-card-tray-button
     border-radius: 999px;
     padding: 10px 22px;
     font-family: var(--mps-font-app, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
-    font-size: 14px;
+    font-size: var(--mps-font-size-md);
     font-weight: 600;
     cursor: pointer;
     opacity: 0;

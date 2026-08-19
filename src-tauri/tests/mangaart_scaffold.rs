@@ -1,5 +1,5 @@
 //! Integration tests for `mangaart_scaffold_impl` under the storyboard-
-//! relocation layout (Phase 2 of mangaart-storyboard-relocation).
+//! relocation layout.
 //!
 //! Each test sits on a `tempfile::TempDir`, seeds a minimal `project.json`,
 //! and exercises the pure helper directly — no Tauri runtime needed.

@@ -5,7 +5,7 @@ use super::paths::{resolve_user_data_dir, user_settings_path};
 use super::settings::{user_settings_load_impl, user_settings_write_unlocked};
 use super::PACKAGED_APP_VERSION_INFO_JSON;
 
-/// Phase 2 of user-data versioning: gate command invoked from JS at boot.
+/// User-data versioning gate command invoked from JS at boot.
 ///
 /// Holds `SETTINGS_WRITE_LOCK` across the path-exists check and (if fresh)
 /// the seed-write so two windows racing the boot path can't both see "no
@@ -76,6 +76,44 @@ pub fn user_data_ensure_version_impl(dir: &PathBuf) -> Result<serde_json::Value,
     }))
 }
 
+/// Load user settings, strip the transient `_isFresh` flag, read the on-disk
+/// version with the standard fallback (`currentVersion` → `appVersionCreated`
+/// → `"1.0.0"`), and stale-check against `from`.
+///
+/// Returns:
+/// - `Ok(Ok((existing, on_disk)))` — caller holds the loaded settings and
+///   can proceed with the migration write.
+/// - `Ok(Err(stale_response))` — on-disk version already moved past `from`;
+///   the caller must return this JSON verbatim.
+/// - `Err(e)` — hard error from `user_settings_load_impl`.
+fn load_and_check_stale(
+    dir: &PathBuf,
+    from: &str,
+) -> Result<Result<(serde_json::Value, String), serde_json::Value>, String>
+{
+    let mut existing = user_settings_load_impl(dir)?;
+    if let Some(obj) = existing.as_object_mut()
+    {
+        obj.remove("_isFresh");
+    }
+
+    let on_disk = existing
+        .get("currentVersion")
+        .and_then(|v| v.as_str())
+        .or_else(|| existing.get("appVersionCreated").and_then(|v| v.as_str()))
+        .unwrap_or("1.0.0")
+        .to_string();
+
+    if on_disk != from
+    {
+        return Ok(Err(serde_json::json!({
+            "result": "stale",
+            "onDisk": on_disk
+        })));
+    }
+    Ok(Ok((existing, on_disk)))
+}
+
 /// Apply a single migration rung. JS produces the data patch and calls this
 /// command, which holds the user-settings mutex across read + stale-check +
 /// merge + write.
@@ -111,27 +149,10 @@ pub fn user_data_apply_rung_impl(
     patch: serde_json::Value,
 ) -> Result<serde_json::Value, String>
 {
-    let mut existing = user_settings_load_impl(dir)?;
-    // Strip transient flag so it never round-trips. _isFresh is not in
-    // USER_SETTINGS_KNOWN so merge would drop it, but be explicit.
-    if let Some(obj) = existing.as_object_mut()
+    match load_and_check_stale(dir, &from)?
     {
-        obj.remove("_isFresh");
-    }
-
-    let on_disk = existing
-        .get("currentVersion")
-        .and_then(|v| v.as_str())
-        .or_else(|| existing.get("appVersionCreated").and_then(|v| v.as_str()))
-        .unwrap_or("1.0.0")
-        .to_string();
-
-    if on_disk != from
-    {
-        return Ok(serde_json::json!({
-            "result": "stale",
-            "onDisk": on_disk
-        }));
+        Err(stale) => return Ok(stale),
+        Ok(_) => {}
     }
 
     // Build the partial: patch (must be object, treat null as empty) +
@@ -228,25 +249,10 @@ pub fn user_data_skip_rung_impl(
     to: String,
 ) -> Result<serde_json::Value, String>
 {
-    let mut existing = user_settings_load_impl(dir)?;
-    if let Some(obj) = existing.as_object_mut()
+    match load_and_check_stale(dir, &from)?
     {
-        obj.remove("_isFresh");
-    }
-
-    let on_disk = existing
-        .get("currentVersion")
-        .and_then(|v| v.as_str())
-        .or_else(|| existing.get("appVersionCreated").and_then(|v| v.as_str()))
-        .unwrap_or("1.0.0")
-        .to_string();
-
-    if on_disk != from
-    {
-        return Ok(serde_json::json!({
-            "result": "stale",
-            "onDisk": on_disk
-        }));
+        Err(stale) => return Ok(stale),
+        Ok(_) => {}
     }
 
     let partial = serde_json::json!({

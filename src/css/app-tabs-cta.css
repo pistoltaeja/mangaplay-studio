@@ -25,14 +25,14 @@
 
 .empty-state-title
 {
-    font-size: 18px;
+    font-size: var(--mps-font-size-xl);
     color: var(--focus-ring);
     margin: 0 0 8px 0;
 }
 
 .empty-state-hint
 {
-    font-size: 13px;
+    font-size: var(--mps-font-size-base);
     color: #666;
     margin: 0;
 }
@@ -118,6 +118,8 @@
     font-weight: 400;
     line-height: 1.4;
     pointer-events: auto;
+    user-select: none;
+    -webkit-user-select: none;
 }
 
 .right-pane-empty-overlay[hidden]
@@ -205,7 +207,7 @@
     border-radius: 6px;
     border-left: 3px solid transparent;
     font-family: var(--mps-font-app);
-    font-size: 12px;
+    font-size: var(--mps-font-size-sm);
     line-height: 1.35;
     color: var(--mps-text-secondary, #6c6c70);
     white-space: pre-wrap;
@@ -276,7 +278,7 @@ html[data-skin="night"] .cm-tooltip-lint [aria-selected]
 {
     order: 3;
     flex: 0 0 100%;
-    font-size: 10px;
+    font-size: var(--mps-font-size-xs);
     font-weight: 500;
     text-transform: capitalize;
     letter-spacing: 0.02em;
@@ -302,6 +304,17 @@ html[data-skin="night"] .cm-tooltip-lint .cm-diagnosticAction
     color: #1a1a1a;
 }
 html[data-skin="night"] .cm-tooltip-lint .cm-diagnosticAction:hover
+{
+    background: #9CCC65;
+}
+
+/* Dark-theme overrides for the spell-check mini-tooltip pill and icon buttons. */
+html[data-skin="night"] .spell-mini-fix
+{
+    background: #AED581;
+    color: #1a1a1a;
+}
+html[data-skin="night"] .spell-mini-fix:hover
 {
     background: #9CCC65;
 }

@@ -11,7 +11,7 @@
 //! persistence contract is obvious from the shell too. See
 //! `migrate_legacy_slides_cache()` for the one-shot migration.
 //!
-//! Atomicity contract per `TODO/sync-existing-slides-prepare.md`:
+//! Atomicity contract:
 //! 1. Per-presentation exclusive file lock.
 //! 2. Image bytes → `<file>.tmp` → fsync → rename.
 //! 3. Manifest RMW → `manifest.json.tmp` → fsync → rename. Manifest written LAST.
@@ -26,6 +26,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::commands::project::storyboard_dir;
+use crate::commands::slides_validation::validate_slug;
 use crate::fs_helpers::chrono_iso_now;
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -72,23 +73,8 @@ pub struct GcResult
 /// name no longer reads as "throwaway".
 fn presentation_dir(project_root: &Path, presentation_id: &str) -> Result<PathBuf, String>
 {
-    validate_presentation_id(presentation_id)?;
+    validate_slug(presentation_id, "bad-presentation-id", 200)?;
     Ok(storyboard_dir(project_root).join(presentation_id))
-}
-
-/// Reject presentation IDs with path separators or `..` segments. Defence in
-/// depth — the ID originates from a user-pasted URL parsed on the JS side.
-fn validate_presentation_id(id: &str) -> Result<(), String>
-{
-    if id.is_empty()
-        || id.contains('/')
-        || id.contains('\\')
-        || id.contains("..")
-        || id.contains('\0')
-    {
-        return Err("bad-presentation-id".into());
-    }
-    Ok(())
 }
 
 /// 8 lowercase hex chars.
@@ -102,23 +88,28 @@ fn validate_crc(crc: &str) -> Result<(), String>
     Ok(())
 }
 
-/// Reject page IDs that would let a caller escape the presentation dir.
-fn validate_page_id(page_id: &str) -> Result<(), String>
-{
-    if page_id.is_empty()
-        || page_id.contains('/')
-        || page_id.contains('\\')
-        || page_id.contains("..")
-        || page_id.contains('\0')
-    {
-        return Err("bad-page-id".into());
-    }
-    Ok(())
-}
-
 fn manifest_path(pres_dir: &Path) -> PathBuf
 {
     pres_dir.join("manifest.json")
+}
+
+/// Remove `path`, treating a missing file as a silent no-op. Returns `true`
+/// when a file was actually removed, `false` when it was already gone. Any
+/// other I/O error is logged via `log::warn!` (the `ctx` phrase followed by
+/// the path and error) and swallowed — best-effort cleanup must not abort
+/// the caller's transaction.
+fn remove_file_soft(path: &Path, ctx: &str) -> bool
+{
+    match std::fs::remove_file(path)
+    {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) =>
+        {
+            log::warn!("{} {}: {}", ctx, path.display(), e);
+            false
+        }
+    }
 }
 
 fn lock_path(pres_dir: &Path) -> PathBuf
@@ -342,7 +333,7 @@ pub fn slides_deck_write_impl(
 ) -> Result<WriteResult, String>
 {
     validate_crc(crc)?;
-    validate_page_id(page_id)?;
+    validate_slug(page_id, "bad-page-id", usize::MAX)?;
     let pres_dir = presentation_dir(project_path, presentation_id)?;
     std::fs::create_dir_all(&pres_dir).map_err(|e| e.to_string())?;
 
@@ -427,14 +418,9 @@ pub fn slides_deck_gc_impl(
         if let Some(entry) = manifest.remove(k)
         {
             let full = pres_dir.join(&entry.path);
-            match std::fs::remove_file(&full)
+            if remove_file_soft(&full, "[slides_deck_gc] failed to remove")
             {
-                Ok(()) => removed_paths.push(full.to_string_lossy().to_string()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => log::warn!(
-                    "[slides_deck_gc] failed to remove {}: {}",
-                    full.display(), e
-                ),
+                removed_paths.push(full.to_string_lossy().to_string());
             }
         }
     }
@@ -449,14 +435,9 @@ pub fn slides_deck_gc_impl(
     {
         if known.contains(&name) { continue; }
         let full = pres_dir.join(&name);
-        match std::fs::remove_file(&full)
+        if remove_file_soft(&full, "[slides_deck_gc] failed to remove orphan")
         {
-            Ok(()) => removed_paths.push(full.to_string_lossy().to_string()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => log::warn!(
-                "[slides_deck_gc] failed to remove orphan {}: {}",
-                full.display(), e
-            ),
+            removed_paths.push(full.to_string_lossy().to_string());
         }
     }
 
@@ -464,6 +445,79 @@ pub fn slides_deck_gc_impl(
     write_manifest(&pres_dir, &manifest)?;
 
     Ok(GcResult { removed_paths, kept })
+}
+
+#[derive(Serialize, Debug)]
+pub struct DeleteResult
+{
+    #[serde(rename = "removedFiles")]
+    pub removed_files: usize,
+}
+
+/// Delete every file belonging to `presentation_id` — all `<pageId>.png`
+/// files referenced by the manifest AND the manifest itself. Other decks'
+/// subdirectories are untouched because each deck lives in its own
+/// `<presentationId>/` folder.
+///
+/// Missing deck (dir doesn't exist) is `Ok({ removed_files: 0 })`, not an
+/// error — this is the recovery-path idempotent case.
+///
+/// The lock file is released and cleaned up as part of the same operation
+/// so the empty `<presentationId>/` dir can be removed on completion.
+pub fn slides_deck_delete_impl(
+    project_path: &Path,
+    presentation_id: &str,
+) -> Result<DeleteResult, String>
+{
+    let pres_dir = presentation_dir(project_path, presentation_id)?;
+    if !pres_dir.is_dir()
+    {
+        return Ok(DeleteResult { removed_files: 0 });
+    }
+
+    let mut removed_files: usize = 0;
+
+    // Scope the lock guard so we can drop the .lock file at the end.
+    {
+        let _guard = acquire_lock(&pres_dir)?;
+
+        let manifest = read_manifest(&pres_dir);
+        for entry in manifest.values()
+        {
+            let full = pres_dir.join(&entry.path);
+            if remove_file_soft(&full, "[slides_deck_delete] failed to remove")
+            {
+                removed_files += 1;
+            }
+        }
+
+        // Manifest itself.
+        let mp = manifest_path(&pres_dir);
+        if remove_file_soft(&mp, "[slides_deck_delete] failed to remove manifest")
+        {
+            removed_files += 1;
+        }
+
+        // Sweep any lingering tmp files so remove_dir succeeds below.
+        if let Ok(read) = std::fs::read_dir(&pres_dir)
+        {
+            for e in read.flatten()
+            {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.ends_with(".tmp")
+                {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+    }
+    // Lock released. Remove the .lock file itself, then attempt to remove
+    // the (now-empty) presentation dir. Best-effort — a leftover file
+    // authored outside our command surface leaves the dir behind.
+    let _ = std::fs::remove_file(lock_path(&pres_dir));
+    let _ = std::fs::remove_dir(&pres_dir);
+
+    Ok(DeleteResult { removed_files })
 }
 
 // ── Tauri commands ───────────────────────────────────────────────────────
@@ -509,232 +563,17 @@ pub fn slides_deck_gc(
     )
 }
 
+#[tauri::command]
+pub fn slides_deck_delete(
+    project_path: String,
+    presentation_id: String,
+) -> Result<DeleteResult, String>
+{
+    slides_deck_delete_impl(Path::new(&project_path), &presentation_id)
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests
-{
-    use super::*;
-    use tempfile::TempDir;
-
-    const PID: &str = "presABC123";
-
-    fn make_project() -> TempDir
-    {
-        let td = TempDir::new().unwrap();
-        // Scaffold storyboard dir the same way `project_open` does.
-        std::fs::create_dir_all(storyboard_dir(td.path())).unwrap();
-        td
-    }
-
-    #[test]
-    fn stat_no_cache_dir()
-    {
-        let td = make_project();
-        let r = slides_deck_stat_impl(td.path(), PID).unwrap();
-        assert!(!r.cache_dir_exists);
-        assert!(r.manifest.is_empty());
-        assert!(r.orphan_paths.is_empty());
-    }
-
-    #[test]
-    fn write_two_then_stat()
-    {
-        let td = make_project();
-        slides_deck_write_impl(td.path(), PID, "0001", "abcdef01", b"one").unwrap();
-        slides_deck_write_impl(td.path(), PID, "0002", "12345678", b"two").unwrap();
-        let r = slides_deck_stat_impl(td.path(), PID).unwrap();
-        assert!(r.cache_dir_exists);
-        assert_eq!(r.manifest.len(), 2);
-        assert_eq!(r.manifest.get("0001").unwrap().crc, "abcdef01");
-        assert_eq!(r.manifest.get("0002").unwrap().path, "0002.png");
-        assert!(r.orphan_paths.is_empty());
-    }
-
-    #[test]
-    fn write_same_page_twice_replaces_png()
-    {
-        // With the CRC-less filename the second write atomically replaces
-        // the first — no orphan is produced for update-in-place. Manifest
-        // reflects the new crc. Older test expected an orphan; that only
-        // held when the filename embedded the crc.
-        let td = make_project();
-        slides_deck_write_impl(td.path(), PID, "0001", "aaaaaaaa", b"v1").unwrap();
-        slides_deck_write_impl(td.path(), PID, "0001", "bbbbbbbb", b"v2").unwrap();
-        let r = slides_deck_stat_impl(td.path(), PID).unwrap();
-        assert_eq!(r.manifest.get("0001").unwrap().crc, "bbbbbbbb");
-        assert_eq!(r.manifest.get("0001").unwrap().path, "0001.png");
-        assert!(r.orphan_paths.is_empty(),
-            "expected no orphans after in-place rewrite; got {:?}", r.orphan_paths);
-
-        // And the on-disk bytes are the new version.
-        let contents = std::fs::read(presentation_dir(td.path(), PID).unwrap().join("0001.png"))
-            .unwrap();
-        assert_eq!(contents, b"v2");
-    }
-
-    #[test]
-    fn gc_removes_dropped_pages()
-    {
-        let td = make_project();
-        slides_deck_write_impl(td.path(), PID, "0001", "aaaaaaaa", b"a").unwrap();
-        slides_deck_write_impl(td.path(), PID, "0002", "bbbbbbbb", b"b").unwrap();
-        let keep = vec!["0001".to_string()];
-        let g = slides_deck_gc_impl(td.path(), PID, &keep).unwrap();
-        assert_eq!(g.kept, 1);
-        assert_eq!(g.removed_paths.len(), 1);
-        let r = slides_deck_stat_impl(td.path(), PID).unwrap();
-        assert_eq!(r.manifest.len(), 1);
-        assert!(r.manifest.contains_key("0001"));
-        assert!(r.orphan_paths.is_empty());
-    }
-
-    #[test]
-    fn gc_idempotent()
-    {
-        let td = make_project();
-        slides_deck_write_impl(td.path(), PID, "0001", "aaaaaaaa", b"a").unwrap();
-        let keep = vec!["0001".to_string()];
-        let g1 = slides_deck_gc_impl(td.path(), PID, &keep).unwrap();
-        let g2 = slides_deck_gc_impl(td.path(), PID, &keep).unwrap();
-        assert_eq!(g1.kept, 1);
-        assert_eq!(g2.kept, 1);
-        assert!(g2.removed_paths.is_empty());
-    }
-
-    #[test]
-    fn gc_missing_cache_dir_ok()
-    {
-        let td = make_project();
-        let g = slides_deck_gc_impl(td.path(), PID, &[]).unwrap();
-        assert_eq!(g.kept, 0);
-        assert!(g.removed_paths.is_empty());
-    }
-
-    #[test]
-    fn reject_page_id_with_separators()
-    {
-        let td = make_project();
-        assert!(slides_deck_write_impl(td.path(), PID, "a/b", "abcdef01", b"x").is_err());
-        assert!(slides_deck_write_impl(td.path(), PID, "a\\b", "abcdef01", b"x").is_err());
-        assert!(slides_deck_write_impl(td.path(), PID, "..", "abcdef01", b"x").is_err());
-        assert!(slides_deck_write_impl(td.path(), PID, "..hidden", "abcdef01", b"x").is_err());
-        assert!(slides_deck_write_impl(td.path(), PID, "", "abcdef01", b"x").is_err());
-    }
-
-    #[test]
-    fn reject_bad_crc()
-    {
-        let td = make_project();
-        // Uppercase.
-        assert!(slides_deck_write_impl(td.path(), PID, "0001", "ABCDEF01", b"x").is_err());
-        // Wrong length.
-        assert!(slides_deck_write_impl(td.path(), PID, "0001", "abc", b"x").is_err());
-        // Non-hex.
-        assert!(slides_deck_write_impl(td.path(), PID, "0001", "gggggggg", b"x").is_err());
-    }
-
-    #[test]
-    fn reject_bad_presentation_id()
-    {
-        let td = make_project();
-        assert!(slides_deck_stat_impl(td.path(), "a/b").is_err());
-        assert!(slides_deck_stat_impl(td.path(), "..").is_err());
-        assert!(slides_deck_write_impl(td.path(), "a\\b", "0001", "abcdef01", b"x").is_err());
-    }
-
-    #[test]
-    fn concurrent_lock_returns_lock_held()
-    {
-        use std::sync::{Arc, Mutex};
-        use std::sync::mpsc;
-
-        let td = make_project();
-        let pres_dir = presentation_dir(td.path(), PID).unwrap();
-        std::fs::create_dir_all(&pres_dir).unwrap();
-
-        // Spawn a thread that acquires the lock and holds it until signalled.
-        let held = Arc::new(Mutex::new(()));
-        let (grab_tx, grab_rx) = mpsc::channel::<()>();
-        let (release_tx, release_rx) = mpsc::channel::<()>();
-        let pres_dir_c = pres_dir.clone();
-        let held_c = held.clone();
-        let holder = std::thread::spawn(move ||
-        {
-            let _hg = held_c.lock().unwrap();
-            let _guard = acquire_lock(&pres_dir_c).unwrap();
-            grab_tx.send(()).unwrap();
-            // Hold until the main thread signals release.
-            release_rx.recv().unwrap();
-        });
-
-        // Wait for the holder to actually acquire.
-        grab_rx.recv().unwrap();
-
-        // Second call must fail with LOCK_HELD.
-        let err = slides_deck_write_impl(td.path(), PID, "0001", "abcdef01", b"x")
-            .expect_err("expected LOCK_HELD");
-        assert_eq!(err, "LOCK_HELD");
-        let err2 = slides_deck_gc_impl(td.path(), PID, &[]).expect_err("expected LOCK_HELD");
-        assert_eq!(err2, "LOCK_HELD");
-
-        // Release the holder.
-        release_tx.send(()).unwrap();
-        holder.join().unwrap();
-
-        // Now the write succeeds.
-        slides_deck_write_impl(td.path(), PID, "0001", "abcdef01", b"x").unwrap();
-    }
-
-    #[test]
-    fn migration_moves_legacy_dir_up_one_level()
-    {
-        // Pre-populate the legacy layout: storyboard/slides-cache/<pid>/*.
-        let td = make_project();
-        let legacy = storyboard_dir(td.path())
-            .join("slides-cache")
-            .join(PID);
-        std::fs::create_dir_all(&legacy).unwrap();
-        std::fs::write(legacy.join("0001.png"), b"legacy-png").unwrap();
-        std::fs::write(
-            legacy.join("manifest.json"),
-            r#"{"0001":{"crc":"abcdef01","path":"0001.png","downloadedAt":"2026-01-01T00:00:00Z"}}"#,
-        ).unwrap();
-
-        // First `stat` call triggers migration.
-        let r = slides_deck_stat_impl(td.path(), PID).unwrap();
-        assert!(r.cache_dir_exists);
-        assert_eq!(r.manifest.len(), 1);
-        assert_eq!(r.manifest.get("0001").unwrap().crc, "abcdef01");
-
-        // New layout on disk.
-        let new_dir = storyboard_dir(td.path()).join(PID);
-        assert!(new_dir.is_dir(), "expected new-layout dir {}", new_dir.display());
-        assert!(new_dir.join("0001.png").is_file());
-
-        // Legacy dir emptied + removed.
-        assert!(!storyboard_dir(td.path()).join("slides-cache").exists(),
-            "legacy slides-cache/ should be gone");
-    }
-
-    #[test]
-    fn migration_idempotent_when_target_exists()
-    {
-        // Pre-populate BOTH legacy AND new layouts for the same pid — the
-        // migration must not clobber a pre-existing target.
-        let td = make_project();
-        let legacy = storyboard_dir(td.path()).join("slides-cache").join(PID);
-        std::fs::create_dir_all(&legacy).unwrap();
-        std::fs::write(legacy.join("0001.png"), b"legacy").unwrap();
-
-        let new_dir = storyboard_dir(td.path()).join(PID);
-        std::fs::create_dir_all(&new_dir).unwrap();
-        std::fs::write(new_dir.join("0001.png"), b"new").unwrap();
-
-        // Migration should NOT overwrite the new dir.
-        let _ = slides_deck_stat_impl(td.path(), PID).unwrap();
-        assert!(legacy.is_dir(), "legacy dir must remain when target exists");
-        let contents = std::fs::read(new_dir.join("0001.png")).unwrap();
-        assert_eq!(contents, b"new", "new-layout png must not be clobbered");
-    }
-}
+#[path = "slides_cache_tests.rs"]
+mod tests;

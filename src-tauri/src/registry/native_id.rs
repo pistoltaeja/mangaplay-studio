@@ -1,10 +1,7 @@
 //! Platform-native stable-ID union used by the UUID file registry.
 //!
-//! See [`TODO/uuid-file-registry.md`](../../../../TODO/uuid-file-registry.md)
-//! Part 1 for the schema definition and Part 3/Part 6 for the platform-specific
-//! readers that will populate each variant. This file carries the TYPES
-//! only — actual `read_native_id_from_handle` implementations live behind
-//! `#[cfg]` gates and land in a later part.
+//! This file carries the TYPES only — actual `read_native_id_from_handle`
+//! implementations live behind `#[cfg]` gates in `native_id_read.rs`.
 //!
 //! Serde format is tag-based (`{"kind": "ntfs", ...}`) so JSON stays
 //! stable + human-inspectable in `_mangaplaystudio/registry.json`.
@@ -19,9 +16,9 @@ use serde::{Deserialize, Serialize};
 ///
 /// A file's `NativeId` is compared at every open to detect external
 /// rename/move/delete: mismatch triggers the healing path
-/// (`locate_by_native_id` — lands in Part 3).
+/// (`locate_by_native_id`).
 ///
-/// Variant tag matches the plan's JSON schema exactly. Do not rename
+/// Variant tag matches the on-disk JSON schema. Do not rename
 /// serde `kind` values without a matching migration.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
 #[serde(tag = "kind")]
@@ -61,7 +58,7 @@ pub enum NativeId
     ///
     /// Warn on tmpfs / overlayfs / NFS — inodes are unstable there. The
     /// `f_type` check + fallback to content-hash matching lives in the
-    /// resolver (Part 3), not here.
+    /// resolver, not here.
     #[serde(rename = "posix")]
     Posix
     {

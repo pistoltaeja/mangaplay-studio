@@ -40,6 +40,8 @@ export const CODE_META = {
     WARN_RESERVED_MARKER:     { severity: "info",    markClass: "cm-mp-style", messageKey: "ui.warnings.reservedMarker" },
     WARN_IMPLICIT_PAGE_1:     { severity: "info",    markClass: "cm-mp-style", messageKey: "ui.warnings.implicitPage1" },
     WARN_MIXED_INDENTATION:   { severity: "info",    markClass: "cm-mp-style", messageKey: "ui.warnings.mixedIndentation" },
+    WARN_STYLE_TAG_UNCLOSED:  { severity: "warning", markClass: "cm-mp-error", messageKey: "ui.warnings.styleTagUnclosed" },
+    WARN_STYLE_TAG_STRAY_CLOSE: { severity: "warning", markClass: "cm-mp-error", messageKey: "ui.warnings.styleTagStrayClose" },
 
     // Parser warnings — structural (red squiggle)
     WARN_PAGE_MISSING_HASH:   { severity: "warning", markClass: "cm-mp-error", messageKey: "ui.warnings.pageMissingHash" },
@@ -123,9 +125,8 @@ function locToRange(state, loc)
  * Run the parser linter synchronously against a CM6 view and return the
  * Diagnostic[] directly. Split out of `editorLinter()` so combined-linter.js
  * can merge these with spellcheck diagnostics inside a single CM6 lint
- * source — see TODO/lint-regression-investigation.md for the regression
- * this avoids (CM6's `batchResults` dropping the parser source when
- * spellcheck's async callback hung past its budget).
+ * source — this avoids a CM6 regression where `batchResults` drops the
+ * parser source when spellcheck's async callback hangs past its budget.
  *
  * @param {import("@codemirror/view").EditorView} view
  * @param {string} [format] - Document format hint. Case-hint warnings only fire for "mangaplay".

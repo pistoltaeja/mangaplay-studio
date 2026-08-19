@@ -20,7 +20,7 @@ mps-mascot
    (translateX(120vw) on .mps-mascot-container) doesn't extend any
    ancestor's scrollable overflow — no horizontal scrollbar during the
    fly-in. Centred via top/left calc — transform is deliberately left
-   free for compose/moveTo (Phase 2 needs the transform channel for
+   free for compose/moveTo (the transform channel is needed for
    face/bobble/moveTo composition). Container's translateX is applied
    in its own transform channel, so entrance/exit keyframes compose
    without stomping host layout. */
@@ -30,10 +30,6 @@ mps-mascot#app-mascot
     /* Centre via top/left calc — transform is free for compose/moveTo. */
     top: calc(50vh - 49px);
     left: calc(50vw - 49px);
-    /* Match dialogue's transition timing (mps-dialogue.css, Phase 2) so
-       satellite UI can `transition: left, top` at the same duration and
-       track the mascot without JS pumping. */
-    transition: left 0.4s ease-in-out, top 0.4s ease-in-out;
     /* Must sit ABOVE mps-picker-shell (z: 950 in app-picker.css) — the
        picker-shell is a full-viewport dark surface and would otherwise
        paint over the mascot. 1000 is well above the picker but still
@@ -111,8 +107,8 @@ mps-mascot .mps-mascot-body
 }
 
 /* Inner img inside each layer div fills the wrapper. Div-wrapping the
-   PNGs (Phase 2 requirement) lets the body layer host the .mascot-name-pin
-   as a child — <img> is a void element and can't contain other elements. */
+   PNGs lets the body layer host the .mascot-name-pin as a child —
+   <img> is a void element and can't contain other elements. */
 mps-mascot .mps-mascot-img
 {
     display: block;
@@ -177,7 +173,7 @@ mps-mascot[data-mascot-motion="exiting"][data-mascot-direction="left"]
     100% { transform: translateX(-120vw);  opacity: 0; }
 }
 
-/* ── Phase 2 — talking head, facing, bobble, name pin ──────────────── */
+/* ── Talking head, facing, bobble, name pin ─────────────────────────── */
 
 /* Talking rotation on the head layer. Origin bottom-left mirrors the
    website's `mps-talk` keyframe — the "chin" pivots up and down. */
@@ -234,7 +230,7 @@ mps-mascot .mascot-name-pin
     left: 50%;
     transform: translateX(-50%);
     white-space: nowrap;
-    font-size: 10px;
+    font-size: var(--mps-font-size-xs);
     font-weight: 700;
     color: #000;
     background: #ff8c00;

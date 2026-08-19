@@ -1,7 +1,6 @@
 //! Managed-state wrapper for the currently-open project's UUID registry.
 //!
-//! See [`TODO/uuid-file-registry.md`](../../../../TODO/uuid-file-registry.md)
-//! Part 2 — Managed State & Locking — for the full design.
+//! Design: managed-state wrapper with per-project locking.
 //!
 //! # Overview
 //!
@@ -16,9 +15,8 @@
 //!
 //! The *outer* RMW lock — held by commands that want to serialise a full
 //! read-modify-write cycle including the on-disk flush — is the existing
-//! [`crate::ProjectJsonLocks`] keyed on the project root path. Part 3
-//! layers that on top when commands begin mutating. Part 2 does not touch
-//! it.
+//! [`crate::ProjectJsonLocks`] keyed on the project root path. Mutating
+//! commands layer that on top when they begin.
 //!
 //! # Lifecycle
 //!
@@ -30,9 +28,9 @@
 //!   in a later part.)
 //! - Mutating commands go through [`ProjectRegistryState::with_loaded`]
 //!   to acquire `&mut LoadedRegistry`, mutate, set `dirty`, and either
-//!   flush immediately or debounce (see plan Part 2 debounce policy).
+//!   flush immediately or debounce.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
@@ -87,14 +85,14 @@ impl From<RegistryStateErr> for String
 
 /// In-memory registry for a single open project.
 ///
-/// Fields mirror the plan's Part 2 code block. `entries` is keyed by the
-/// in-memory `Uuid` type (converted to/from the on-disk `String` keys via
+/// `entries` is keyed by the in-memory `Uuid` type (converted to/from the
+/// on-disk `String` keys via
 /// [`to_registry_file`](LoadedRegistry::to_registry_file)).
 ///
 /// `native_id_index` and `path_index` are reverse lookups populated from
 /// `entries`; callers that mutate `entries` MUST call
 /// [`rebuild_indices`](LoadedRegistry::rebuild_indices) afterwards (or use
-/// helpers that do so — those land in Part 3).
+/// helpers that do so).
 pub struct LoadedRegistry
 {
     /// Stable UUID for the project itself. Duplicated from
@@ -105,11 +103,15 @@ pub struct LoadedRegistry
     /// `project_root` parameter on every open. Never read from disk.
     pub root_path: PathBuf,
 
-    /// Per-file / per-folder entries, keyed by UUID.
-    pub entries: HashMap<Uuid, RegistryEntry>,
+    /// Per-file / per-folder entries, keyed by UUID. `BTreeMap` (sorted-
+    /// by-key) so `to_registry_file()` writes deterministic on-disk
+    /// output and `scan_and_reconcile`'s tombstone-on-not-visited pass
+    /// picks the same winner on every launch. See also the note on the
+    /// on-disk `RegistryFile.entries` field in `store.rs`.
+    pub entries: BTreeMap<Uuid, RegistryEntry>,
 
     /// Reverse index: [`NativeId`] → owning UUID. Used by dedup + the
-    /// external-rename healing path (Part 3).
+    /// external-rename healing path.
     pub native_id_index: HashMap<NativeId, Uuid>,
 
     /// Reverse index: project-relative path (forward slashes) → owning
@@ -120,8 +122,7 @@ pub struct LoadedRegistry
     /// [`ProjectRegistryState::flush_if_dirty`].
     pub dirty: bool,
 
-    /// Instant of the last successful flush. Used by the debounce policy
-    /// in Part 3.
+    /// Instant of the last successful flush. Used by the debounce policy.
     pub last_save: Instant,
 }
 
@@ -130,11 +131,12 @@ impl LoadedRegistry
     /// Build the on-disk shape from the in-memory struct.
     ///
     /// The only structural difference is the `entries` key type: on-disk
-    /// uses `HashMap<String, RegistryEntry>` (so `serde_json` emits it as
-    /// a plain JSON object), in-memory uses `HashMap<Uuid, RegistryEntry>`.
+    /// uses `BTreeMap<String, RegistryEntry>` (so `serde_json` emits it as
+    /// a plain JSON object with deterministic key order), in-memory uses
+    /// `BTreeMap<Uuid, RegistryEntry>`.
     fn to_registry_file(&self) -> RegistryFile
     {
-        let entries: HashMap<String, RegistryEntry> = self
+        let entries: BTreeMap<String, RegistryEntry> = self
             .entries
             .iter()
             .map(|(uuid, entry)| (uuid.to_string(), entry.clone()))
@@ -149,8 +151,8 @@ impl LoadedRegistry
     }
 
     /// Clear + repopulate `native_id_index` and `path_index` from
-    /// `entries`. Cheap enough to run after every mutation batch; Part 3
-    /// helpers will call this at the tail of each RMW.
+    /// `entries`. Cheap enough to run after every mutation batch; mutation
+    /// helpers call this at the tail of each RMW.
     pub fn rebuild_indices(&mut self)
     {
         self.native_id_index.clear();
@@ -171,6 +173,7 @@ impl LoadedRegistry
 
     /// Flip the dirty flag. Small helper so call sites read as intent
     /// rather than a raw field poke.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn mark_dirty(&mut self)
     {
         self.dirty = true;
@@ -191,7 +194,7 @@ impl LoadedRegistry
         {
             project_uuid: Uuid::new_v4(),
             root_path,
-            entries: HashMap::new(),
+            entries: BTreeMap::new(),
             native_id_index: HashMap::new(),
             path_index: HashMap::new(),
             dirty: true,
@@ -203,7 +206,7 @@ impl LoadedRegistry
     /// `project_root` is the runtime-supplied path (never from disk).
     fn from_file(file: RegistryFile, project_root: PathBuf, dirty: bool) -> Self
     {
-        let mut entries: HashMap<Uuid, RegistryEntry> = HashMap::new();
+        let mut entries: BTreeMap<Uuid, RegistryEntry> = BTreeMap::new();
         for (k, v) in file.entries
         {
             match Uuid::parse_str(&k)
@@ -268,7 +271,7 @@ impl ProjectRegistryState
     /// - [`LoadErr::Corrupt`] → on corruption the inner state is cleared to
     ///   `None`; subsequent [`with_loaded`](Self::with_loaded) calls will
     ///   surface `no-project-open` until a successful `load_for` runs. A
-    ///   later command (Part 3) will trigger the rebuild-from-scan path.
+    ///   a later command will trigger the rebuild-from-scan path.
     pub fn load_for(&self, project_root: &Path) -> Result<(), String>
     {
         let loaded = match load_from_disk(project_root)
@@ -325,7 +328,7 @@ impl ProjectRegistryState
     /// the closure. Returns `Err("no-project-open")` when no project is
     /// loaded.
     ///
-    /// This is the RMW accessor Part 3 commands use — the caller is
+    /// This is the RMW accessor mutating commands use — the caller is
     /// responsible for setting `dirty` on mutation (or using a helper
     /// that does so).
     ///

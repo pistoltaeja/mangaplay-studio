@@ -1,6 +1,5 @@
 // ---------------------------------------------------------------------------
-// slidesLinks — per-script Google Slides link registry
-// (TODO/sync-existing-slides-prepare.md).
+// slidesLinks — per-script Google Slides link registry.
 //
 // slidesLinks is the authority for script→presentation linkage. Lives at
 // `project.json.slidesLinks`, keyed by SCRIPT UUID (not path — the path
@@ -48,6 +47,25 @@ pub struct SlidesLink
     pub last_prepared_at: String,
     #[serde(rename = "lastPrepareStatus")]
     pub last_prepare_status: String,
+
+    /// Drive `headRevisionId` captured at the last successful publish/sync.
+    /// Used by the JS-side background check to detect remote deck changes
+    /// without a full `presentations.get`. `None` for links created before
+    /// this field existed (backward-compatible via serde `default`).
+    #[serde(rename = "lastKnownRevisionId",
+            skip_serializing_if = "Option::is_none",
+            default)]
+    pub last_known_revision_id: Option<String>,
+
+    /// Runtime-only discriminator populated by the command layer to tell
+    /// the caller WHICH registry entry resolved. `Some("folder")` when the
+    /// folder-scoped key hit, `Some("file")` when the file-scope entry hit.
+    /// `None` for direct reads via the pure helper (persisted JSON never
+    /// carries this field — `skip_serializing_if` keeps it out on disk).
+    #[serde(rename = "scope",
+            skip_serializing_if = "Option::is_none",
+            default)]
+    pub scope: Option<String>,
 }
 
 /// Read the `SlidesLink` mapped to `script_uuid` from `project.json`'s
@@ -116,117 +134,5 @@ pub fn slides_link_drop(
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests
-{
-    use super::*;
-
-    fn sample_link() -> SlidesLink
-    {
-        SlidesLink
-        {
-            presentation_id: "1PqR".into(),
-            linked_at: "2026-07-12T14:00:00Z".into(),
-            last_prepared_at: "2026-07-12T14:03:22Z".into(),
-            last_prepare_status: "clean".into(),
-        }
-    }
-
-    #[test]
-    fn get_on_absent_registry()
-    {
-        let pj = serde_json::json!({});
-        assert!(slides_link_get(&pj, "abc").is_none());
-    }
-
-    #[test]
-    fn get_on_empty_registry()
-    {
-        let pj = serde_json::json!({ "slidesLinks": {} });
-        assert!(slides_link_get(&pj, "abc").is_none());
-    }
-
-    #[test]
-    fn set_then_get_round_trip()
-    {
-        let mut pj = serde_json::json!({});
-        let link = sample_link();
-        slides_link_set(&mut pj, "abc", &link);
-
-        let got = slides_link_get(&pj, "abc").expect("entry present");
-        assert_eq!(got.presentation_id, "1PqR");
-        assert_eq!(got.linked_at, "2026-07-12T14:00:00Z");
-        assert_eq!(got.last_prepared_at, "2026-07-12T14:03:22Z");
-        assert_eq!(got.last_prepare_status, "clean");
-    }
-
-    #[test]
-    fn set_twice_same_uuid_overwrites()
-    {
-        let mut pj = serde_json::json!({});
-        slides_link_set(&mut pj, "abc", &sample_link());
-
-        let second = SlidesLink
-        {
-            presentation_id: "2XyZ".into(),
-            linked_at: "2026-08-01T00:00:00Z".into(),
-            last_prepared_at: "2026-08-01T00:00:00Z".into(),
-            last_prepare_status: "with-warnings".into(),
-        };
-        slides_link_set(&mut pj, "abc", &second);
-
-        let got = slides_link_get(&pj, "abc").expect("entry present");
-        assert_eq!(got.presentation_id, "2XyZ");
-        assert_eq!(got.last_prepare_status, "with-warnings");
-    }
-
-    #[test]
-    fn drop_after_set_gets_none()
-    {
-        let mut pj = serde_json::json!({});
-        slides_link_set(&mut pj, "abc", &sample_link());
-        slides_link_drop(&mut pj, "abc");
-        assert!(slides_link_get(&pj, "abc").is_none());
-    }
-
-    #[test]
-    fn drop_on_absent_key_is_noop()
-    {
-        let mut pj = serde_json::json!({});
-        slides_link_drop(&mut pj, "abc"); // absent section
-        assert!(pj.is_object());
-
-        let mut pj2 = serde_json::json!({ "slidesLinks": {} });
-        slides_link_drop(&mut pj2, "abc"); // absent key
-        assert!(pj2["slidesLinks"].is_object());
-    }
-
-    #[test]
-    fn has_returns_correct_boolean()
-    {
-        let mut pj = serde_json::json!({});
-        assert!(!slides_link_has(&pj, "abc"));
-
-        slides_link_set(&mut pj, "abc", &sample_link());
-        assert!(slides_link_has(&pj, "abc"));
-        assert!(!slides_link_has(&pj, "other"));
-
-        slides_link_drop(&mut pj, "abc");
-        assert!(!slides_link_has(&pj, "abc"));
-    }
-
-    #[test]
-    fn mismatch_policy_never_persisted()
-    {
-        // The reconciliation policy is a per-publish choice; the saved
-        // entry never carries it — even if project.json on disk had a
-        // legacy `mismatchPolicy` field it would be ignored on deserialise.
-        let mut pj = serde_json::json!({});
-        slides_link_set(&mut pj, "abc", &sample_link());
-        let serialised = serde_json::to_string(&pj).unwrap();
-        assert!(
-            !serialised.contains("mismatchPolicy"),
-            "field should never appear in output: {}",
-            serialised
-        );
-    }
-}
+#[path = "slides_links_tests.rs"]
+mod tests;

@@ -16,14 +16,21 @@
  */
 
 import { icon } from "../panes/icons.js";
-import { getPlatformKey } from "../adapters/platform-key.js";
+import { getPlatformKey, getPlatformKeyCached } from "../adapters/platform-key.js";
 import { applySkin, listSkins } from "../boot/skins.js";
 import { applyScreenplayFont, applyEditorFont } from "../font/font-prefs.js";
 import { applySmoothMotion, applySmoothScrolling } from "../adapters/motion-prefs.js";
 import { t, subscribe as subscribeI18n, LANGUAGES } from "../adapters/tauri-i18n.js";
 import { saveUserSettings, getUserSetting } from "../project/user-settings.js";
+import { areAdsDisabled } from "../ads/ad-service.js";
 import { setSpellcheckState } from "../spellcheck/spellcheck-state.js";
 import { applySpellcheckToAllViews } from "../editor/mps-editor.js";
+import {
+    personalDictWords,
+    isPersonalDictWord,
+    addToPersonalDict,
+    removeFromPersonalDict,
+} from "../spellcheck/spellcheck-store.js";
 import {
     signIn as authSignIn,
     signOut as authSignOut,
@@ -38,6 +45,9 @@ import { classifyAuthError } from "../auth/error-classifier.js";
 import { isTauri } from "../util/index.js";
 import { debounce } from "../util/index.js";
 import { loadPublishLog } from "../google-docs-sync/publish-log.js";
+import { isMobileLike } from "../boot/ux-mode.js";
+import { isSkinUnlocked, hasPro, onEntitlementsChanged, setEntitlements } from "../iap/entitlements.js";
+import { SKIN_CATALOG } from "../boot/skins-catalog.generated.js";
 
 /** Tauri invoke helper — falls back to a rejected promise outside Tauri. */
 async function invoke(cmd, args)
@@ -53,6 +63,8 @@ let modalRoot = null;
 let detachKeydown = null;
 /** Releases the i18n subscription so the modal re-renders on language change. */
 let detachI18n = null;
+/** Releases the entitlements subscription at close time. */
+let entitlementsOff = null;
 
 /**
  * Minimal toast — fixed bottom-right, auto-dismisses after 4 s.
@@ -114,19 +126,21 @@ export async function openSettingsModal(initialTab = "general")
     const backdrop = document.createElement("div");
     backdrop.className = "settings-backdrop";
     backdrop.setAttribute("role", "presentation");
+    backdrop.classList.add("is-settings", "mps-sheet-backdrop");
 
     const dialog = document.createElement("div");
     dialog.className = "settings-dialog";
     dialog.setAttribute("role", "dialog");
     dialog.setAttribute("aria-modal", "true");
     dialog.setAttribute("aria-label", t("mangaplay-studio.settings.title"));
+    dialog.classList.add("is-settings", "mps-sheet");
 
     // Title bar (close button).
     const titlebar = document.createElement("div");
-    titlebar.className = "settings-titlebar";
+    titlebar.className = "settings-titlebar mps-sheet-titlebar";
     const closeBtn = document.createElement("button");
     closeBtn.type = "button";
-    closeBtn.className = "settings-close";
+    closeBtn.className = "settings-close mps-sheet-close";
     closeBtn.setAttribute("aria-label", t("mangaplay-studio.settings.close"));
     closeBtn.insertAdjacentHTML("afterbegin", icon("x", { size: 16 }));
     titlebar.appendChild(closeBtn);
@@ -136,7 +150,7 @@ export async function openSettingsModal(initialTab = "general")
     body.className = "settings-body";
 
     const sidebar = document.createElement("div");
-    sidebar.className = "settings-sidebar";
+    sidebar.className = "settings-sidebar mps-sheet-tabs";
     const sidebarHeading = document.createElement("div");
     sidebarHeading.className = "settings-sidebar-heading";
     sidebarHeading.textContent = t("mangaplay-studio.settings.options");
@@ -154,7 +168,7 @@ export async function openSettingsModal(initialTab = "general")
 
     // ── Sidebar tab entries ──
     const TABS = [
-        { id: "general", labelKey: "mangaplay-studio.settings.tabGeneral", iconName: "circle-user" },
+        { id: "general", labelKey: "mangaplay-studio.settings.tabGeneral", iconName: "settings" },
         { id: "text-editor", labelKey: "mangaplay-studio.settings.tabTextEditor", iconName: "file-text" },
         { id: "appearance", labelKey: "mangaplay-studio.settings.tabAppearance", iconName: "palette" },
         { id: "account", labelKey: "mangaplay-studio.settings.tabAccount", iconName: "circle-user" },
@@ -169,7 +183,7 @@ export async function openSettingsModal(initialTab = "general")
     {
         const btn = document.createElement("button");
         btn.type = "button";
-        btn.className = "settings-entry";
+        btn.className = "settings-entry mps-sheet-tab";
         btn.dataset.tab = tab.id;
         btn.insertAdjacentHTML("afterbegin", icon(tab.iconName, { size: 16 }));
         const label = document.createElement("span");
@@ -179,6 +193,192 @@ export async function openSettingsModal(initialTab = "general")
         sidebar.appendChild(btn);
         entryEls.set(tab.id, btn);
         tabLabelEls.set(tab.id, label);
+    }
+
+    // ── Sub-page (iOS drill-down) infrastructure ──────────────────────────────
+    // A per-open stack of overlay panels that slide in over `.settings-content`
+    // while the left rail stays put. Only Personal Dictionary uses it today.
+
+    /** @typedef {{ render: (panelEl: HTMLElement) => void }} Subpage */
+    /** @type {Subpage[]} */
+    const subpageStack = [];
+    /** @type {HTMLElement|null} */
+    let subpageTrack = null;
+    const REDUCED_MOTION = window.matchMedia
+        ? window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        : false;
+
+    /** Lazily create the overlay track that hosts sliding sub-pages. */
+    function ensureSubpageTrack()
+    {
+        if (subpageTrack && subpageTrack.isConnected) return subpageTrack;
+        subpageTrack = document.createElement("div");
+        subpageTrack.className = "settings-subpage-track";
+        content.appendChild(subpageTrack);
+        return subpageTrack;
+    }
+
+    /**
+     * Swap the titlebar button glyph + affordance to reflect the current
+     * drill depth: `‹` while a sub-page is open, `✕` at the root.
+     */
+    function updateCloseButtonGlyph()
+    {
+        const deep = subpageStack.length > 0;
+        closeBtn.replaceChildren();
+        closeBtn.insertAdjacentHTML("afterbegin", icon(deep ? "chevron-left" : "x", { size: 16 }));
+        closeBtn.classList.toggle("is-back", deep);
+        closeBtn.setAttribute(
+            "aria-label",
+            deep ? t("mangaplay-studio.settings.back") : t("mangaplay-studio.settings.close"),
+        );
+    }
+
+    /**
+     * Run the enter/leave slide, then invoke `done` after the transition ends
+     * (or a 400 ms fallback). Reduced-motion collapses to an instant swap.
+     * @param {HTMLElement} incoming — panel sliding into view
+     * @param {HTMLElement|null} outgoing — panel sliding out (may be null)
+     * @param {"forward"|"back"} dir
+     * @param {() => void} done
+     */
+    function runSlide(incoming, outgoing, dir, done)
+    {
+        if (REDUCED_MOTION)
+        {
+            incoming.classList.remove("is-entering-right", "is-entering-left", "is-leaving-left", "is-leaving-right");
+            incoming.classList.add("is-active");
+            if (outgoing)
+            {
+                outgoing.classList.remove("is-active", "is-leaving-left", "is-leaving-right", "is-entering-left", "is-entering-right");
+            }
+            done();
+            return;
+        }
+
+        // Start state: incoming enters from the right (forward) or left (back).
+        incoming.classList.remove("is-active", "is-leaving-left", "is-leaving-right");
+        incoming.classList.add(dir === "forward" ? "is-entering-right" : "is-entering-left");
+        void incoming.offsetWidth; // flush start transform before transitioning
+
+        let finished = false;
+        const finish = () =>
+        {
+            if (finished) return;
+            finished = true;
+            incoming.removeEventListener("transitionend", onEnd);
+            done();
+        };
+
+        /** @param {TransitionEvent} ev */
+        const onEnd = (ev) =>
+        {
+            if (ev.propertyName !== "transform") return;
+            finish();
+        };
+
+        requestAnimationFrame(() =>
+        {
+            incoming.classList.remove("is-entering-right", "is-entering-left");
+            incoming.classList.add("is-active");
+            if (outgoing)
+            {
+                outgoing.classList.remove("is-active");
+                outgoing.classList.add(dir === "forward" ? "is-leaving-left" : "is-leaving-right");
+            }
+            incoming.addEventListener("transitionend", onEnd);
+            setTimeout(finish, 400);
+        });
+    }
+
+    /**
+     * Push a new sub-page: build its panel, slide it in from the right over the
+     * current layer, and morph the close button to a back arrow.
+     * @param {Subpage} subpage
+     */
+    function pushSubpage(subpage)
+    {
+        const track = ensureSubpageTrack();
+        const prevEl = /** @type {HTMLElement|null} */ (subpageStack.length
+            ? track.lastElementChild
+            : null);
+
+        const panel = document.createElement("div");
+        panel.className = "settings-subpage mps-scrollbar";
+        subpage.render(panel);
+        track.appendChild(panel);
+        track.classList.add("is-active");
+
+        subpageStack.push(subpage);
+        updateCloseButtonGlyph();
+
+        runSlide(panel, prevEl, "forward", () =>
+        {
+            if (prevEl) prevEl.classList.remove("is-leaving-left", "is-leaving-right");
+        });
+    }
+
+    /** Pop the top sub-page, sliding it back out to the right. */
+    function popSubpage()
+    {
+        if (!subpageTrack || subpageStack.length === 0) return;
+        const track = subpageTrack;
+        const topEl = /** @type {HTMLElement|null} */ (track.lastElementChild);
+        subpageStack.pop();
+        const belowEl = /** @type {HTMLElement|null} */ (
+            subpageStack.length ? track.children[subpageStack.length - 1] : null
+        );
+
+        updateCloseButtonGlyph();
+
+        if (belowEl)
+        {
+            runSlide(belowEl, topEl, "back", () =>
+            {
+                if (topEl) topEl.remove();
+            });
+        }
+        else if (topEl)
+        {
+            // Last layer — slide it out to the right; the base content shows through.
+            if (REDUCED_MOTION)
+            {
+                topEl.remove();
+                track.classList.remove("is-active");
+            }
+            else
+            {
+                topEl.classList.remove("is-active");
+                topEl.classList.add("is-leaving-right");
+                let done = false;
+                const cleanup = () =>
+                {
+                    if (done) return;
+                    done = true;
+                    topEl.removeEventListener("transitionend", onEnd);
+                    topEl.remove();
+                    if (subpageStack.length === 0) track.classList.remove("is-active");
+                };
+                /** @param {TransitionEvent} ev */
+                const onEnd = (ev) =>
+                {
+                    if (ev.propertyName !== "transform") return;
+                    cleanup();
+                };
+                topEl.addEventListener("transitionend", onEnd);
+                setTimeout(cleanup, 400);
+            }
+        }
+    }
+
+    /** Pop every sub-page instantly (used when a left-rail tab is clicked). */
+    function popAllSubpages()
+    {
+        if (!subpageTrack || subpageStack.length === 0) return;
+        subpageStack.length = 0;
+        subpageTrack.replaceChildren();
+        subpageTrack.classList.remove("is-active");
+        updateCloseButtonGlyph();
     }
 
     /**
@@ -602,12 +802,175 @@ export async function openSettingsModal(initialTab = "general")
         teRow2.appendChild(langSelect);
         teCard.appendChild(teRow2);
 
+        // Row 3 — Personal Dictionary drill-in.
+        const teRow3 = document.createElement("button");
+        teRow3.type = "button";
+        teRow3.className = "mps-row mps-row-drill";
+        const teRow3Label = document.createElement("div");
+        teRow3Label.className = "mps-row-label";
+        const teT3 = document.createElement("div");
+        teT3.className = "mps-row-title";
+        teT3.textContent = t("mangaplay-studio.settings.textEditor.personalDictionaryTitle");
+        const teH3 = document.createElement("div");
+        teH3.className = "mps-row-help";
+        teH3.textContent = t("mangaplay-studio.settings.textEditor.personalDictionaryHelp");
+        teRow3Label.appendChild(teT3);
+        teRow3Label.appendChild(teH3);
+        const teChevron = document.createElement("span");
+        teChevron.className = "mps-row-chevron";
+        teChevron.insertAdjacentHTML("afterbegin", icon("chevron-right", { size: 16 }));
+        teRow3.appendChild(teRow3Label);
+        teRow3.appendChild(teChevron);
+        teRow3.addEventListener("click", () => pushSubpage({ render: renderPersonalDictionary }));
+        teCard.appendChild(teRow3);
+
         content.appendChild(teCard);
+    }
+
+    /**
+     * Personal Dictionary sub-page — an add-row (input + button) above a
+     * scrolling, case-insensitively-sorted list of words, each removable.
+     * @param {HTMLElement} panelEl
+     */
+    function renderPersonalDictionary(panelEl)
+    {
+        panelEl.replaceChildren();
+
+        const header = document.createElement("div");
+        header.className = "settings-section-heading settings-subpage-heading";
+        header.textContent = t("mangaplay-studio.settings.textEditor.personalDictionaryTitle");
+        panelEl.appendChild(header);
+
+        // ── Add-row: input + Add button ──
+        const addRow = document.createElement("div");
+        addRow.className = "pdict-add-row";
+
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "pdict-input";
+        input.placeholder = t("mangaplay-studio.settings.textEditor.personalDictionaryAddPlaceholder");
+        input.setAttribute("aria-label", t("mangaplay-studio.settings.textEditor.personalDictionaryAddPlaceholder"));
+        input.autocomplete = "off";
+        input.spellcheck = false;
+
+        const addBtn = document.createElement("button");
+        addBtn.type = "button";
+        addBtn.className = "mps-btn-primary pdict-add-btn";
+        addBtn.textContent = t("mangaplay-studio.settings.textEditor.personalDictionaryAddButton");
+        addBtn.disabled = true;
+
+        input.addEventListener("input", () =>
+        {
+            addBtn.disabled = input.value.trim().length === 0;
+        });
+
+        const listWrap = document.createElement("div");
+        listWrap.className = "pdict-list mps-scrollbar";
+
+        /** Rebuild the word list (or empty note) in place. */
+        function renderList()
+        {
+            listWrap.replaceChildren();
+            const words = personalDictWords().slice().sort((a, b) =>
+                a.localeCompare(b, undefined, { sensitivity: "base" }));
+
+            if (words.length === 0)
+            {
+                const empty = document.createElement("div");
+                empty.className = "pdict-empty";
+                empty.textContent = t("mangaplay-studio.settings.textEditor.personalDictionaryEmpty");
+                listWrap.appendChild(empty);
+                return;
+            }
+
+            for (const word of words)
+            {
+                const row = document.createElement("div");
+                row.className = "mps-row pdict-word-row";
+                const label = document.createElement("div");
+                label.className = "pdict-word";
+                label.textContent = word;
+                const del = document.createElement("button");
+                del.type = "button";
+                del.className = "pdict-remove";
+                del.setAttribute("aria-label",
+                    t("mangaplay-studio.settings.textEditor.personalDictionaryRemoveLabel", { word }));
+                del.insertAdjacentHTML("afterbegin", icon("trash-2", { size: 15 }));
+                del.addEventListener("click", async () =>
+                {
+                    del.disabled = true;
+                    try { await removeFromPersonalDict(word); }
+                    catch (e) { console.warn("[settings] removeFromPersonalDict failed:", e); }
+                    renderList();
+                });
+                row.appendChild(label);
+                row.appendChild(del);
+                listWrap.appendChild(row);
+            }
+        }
+
+        async function commitAdd()
+        {
+            const word = input.value.trim();
+            if (word.length === 0) return;
+
+            if (isPersonalDictWord(word))
+            {
+                showToast(t("mangaplay-studio.settings.textEditor.personalDictionaryDuplicate", { word }));
+                input.select();
+                return;
+            }
+
+            addBtn.disabled = true;
+            try { await addToPersonalDict(word); }
+            catch (e)
+            {
+                console.warn("[settings] addToPersonalDict failed:", e);
+                addBtn.disabled = input.value.trim().length === 0;
+                return;
+            }
+            input.value = "";
+            addBtn.disabled = true;
+            renderList();
+            showToast(t("mangaplay-studio.settings.textEditor.personalDictionaryAdded", { word }));
+            input.focus();
+        }
+
+        addBtn.addEventListener("click", commitAdd);
+        input.addEventListener("keydown", (ev) =>
+        {
+            if (ev.key === "Enter")
+            {
+                ev.preventDefault();
+                commitAdd();
+            }
+        });
+
+        addRow.appendChild(input);
+        addRow.appendChild(addBtn);
+        panelEl.appendChild(addRow);
+        panelEl.appendChild(listWrap);
+
+        renderList();
+        requestAnimationFrame(() => input.focus());
     }
 
     function renderSkins()
     {
         content.replaceChildren();
+
+        if (entitlementsOff)
+        {
+            entitlementsOff();
+            entitlementsOff = null;
+        }
+        entitlementsOff = onEntitlementsChanged(() => renderActiveTab());
+
+        async function openPaywall()
+        {
+            const { openPaywallModal } = await import("../iap/paywall-modal.js");
+            await openPaywallModal({ onEntitlementsChanged: (snap) => setEntitlements(snap) });
+        }
 
         // Card 1 — skin selection.
         const card1 = document.createElement("div");
@@ -626,33 +989,137 @@ export async function openSettingsModal(initialTab = "general")
         row1Label.appendChild(t1);
         row1Label.appendChild(h1);
 
-        // Dropdown driven by listSkins() from the registry so future
-        // marketplace-installed skins auto-appear without touching this
-        // file. First-party ids resolve to a localised label; unknown ids
-        // fall back to the manifest's displayName.
+        // Preview-swatch grid driven by listSkins() from the registry so
+        // future marketplace-installed skins auto-appear without touching
+        // this file. First-party ids resolve to a localised label; unknown
+        // ids fall back to the manifest's displayName. Mini-mockup geometry
+        // and palettes are ported from the native iOS swatch grid
+        // (MPSSettingsView+Swatch.m miniaturePreviewForSkin: /
+        // MPSSkinCatalog previewPaletteForSkin:).
         const SKIN_LABEL_KEY = {
-            "default": "mangaplay-studio.settings.skinDefault",
-            "night":   "mangaplay-studio.settings.skinNight",
+            "default":   "mangaplay-studio.settings.skinDefault",
+            "night":     "mangaplay-studio.settings.skinNight",
+            "oragepad":  "mangaplay-studio.settings.skinOragepad",
+            "cyberpunk": "mangaplay-studio.settings.skinCyberpunk",
+            "academia":  "mangaplay-studio.settings.skinAcademia",
         };
-        const select = document.createElement("select");
-        select.className = "mps-select";
+        /** Hardcoded per-skin preview palette — intentionally NOT the live
+         * CSS vars: each swatch previews its own skin's colors regardless
+         * of the active skin. Mirrors iOS previewPaletteForSkin:. */
+        const PREVIEW_PALETTE_FOR_SKIN = {
+            "default":   { bg: "#f6f6f6", toolbar: "#ffffff", card: "#ffffff", line: "#007aff" },
+            "night":     { bg: "#0e0e12", toolbar: "#17171d", card: "#1c1c24", line: "#5b8dff" },
+            "oragepad":  { bg: "#2a1c0e", toolbar: "#3a2712", card: "#f3e2c2", line: "#d98a2b" },
+            "cyberpunk": { bg: "#0d0a1f", toolbar: "#1a0f3a", card: "#160c2e", line: "#00e5ff" },
+            "academia":  { bg: "#2b241a", toolbar: "#3a3020", card: "#e8dcc0", line: "#9c7a3c" },
+        };
+        const os = getPlatformKeyCached() || "windows";
+        const grid = document.createElement("div");
+        grid.className = "skin-swatch-grid";
+        grid.setAttribute("role", "radiogroup");
+        grid.setAttribute("aria-label", t("mangaplay-studio.settings.skin"));
+
         for (const manifest of listSkins())
         {
-            const o = document.createElement("option");
-            o.value = manifest.id;
-            const labelKey = SKIN_LABEL_KEY[manifest.id];
-            o.textContent = labelKey ? t(labelKey) : manifest.displayName;
-            if (state.skin === manifest.id) o.selected = true;
-            select.appendChild(o);
+            const cat = SKIN_CATALOG[manifest.id];
+            if (cat && !cat.platforms.includes(os)) continue;   // premium off its store → hidden
+            if (!cat) console.debug("[settings] skin not in catalog, showing ungated:", manifest.id);
+
+            const id = manifest.id;
+            const p = PREVIEW_PALETTE_FOR_SKIN[id] || PREVIEW_PALETTE_FOR_SKIN["default"];
+            const labelKey = SKIN_LABEL_KEY[id];
+            const skinName = labelKey ? t(labelKey, manifest.displayName) : manifest.displayName;
+
+            const cell = document.createElement("button");
+            cell.type = "button";
+            cell.className = "skin-swatch-cell";
+            cell.dataset.skinId = id;
+            cell.setAttribute("role", "radio");
+
+            // Mini app mockup — bg fill, toolbar band, page card, 3 text bars.
+            const art = document.createElement("div");
+            art.className = "skin-swatch-art";
+            art.style.background = p.bg;
+
+            const toolbar = document.createElement("div");
+            toolbar.className = "skin-swatch-toolbar";
+            toolbar.style.background = p.toolbar;
+            art.appendChild(toolbar);
+
+            const pageCard = document.createElement("div");
+            pageCard.className = "skin-swatch-page";
+            pageCard.style.background = p.card;
+            for (const width of ["70%", "90%", "50%"])
+            {
+                const bar = document.createElement("div");
+                bar.className = "skin-swatch-bar";
+                bar.style.background = p.line;
+                bar.style.width = width;
+                pageCard.appendChild(bar);
+            }
+            art.appendChild(pageCard);
+
+            const badge = document.createElement("div");
+            badge.className = "skin-swatch-check";
+            badge.innerHTML = icon("check", { size: 12, strokeWidth: 3 });
+            art.appendChild(badge);
+
+            const name = document.createElement("div");
+            name.className = "skin-swatch-name";
+            name.textContent = skinName;
+
+            cell.appendChild(art);
+            cell.appendChild(name);
+            cell.setAttribute("aria-label", skinName);
+
+            const selected = state.skin === id;
+            cell.classList.toggle("is-selected", selected);
+            cell.setAttribute("aria-checked", selected ? "true" : "false");
+
+            cell.addEventListener("click", () =>
+            {
+                if (id === state.skin) return;
+                if (!isSkinUnlocked(id))   // unreachable on desktop; defensive
+                {
+                    openPaywall();
+                    return;
+                }
+                for (const c of grid.children)
+                {
+                    const on = c.dataset.skinId === id;
+                    c.classList.toggle("is-selected", on);
+                    c.setAttribute("aria-checked", on ? "true" : "false");
+                }
+                debouncedWriteSkin(id);
+            });
+
+            grid.appendChild(cell);
         }
-        select.addEventListener("change", () =>
-        {
-            debouncedWriteSkin(select.value);
-        });
 
         row1.appendChild(row1Label);
-        row1.appendChild(select);
         card1.appendChild(row1);
+        card1.appendChild(grid);
+
+        const isStore = (getPlatformKeyCached() === "android" || getPlatformKeyCached() === "ios");
+        if (isStore)
+        {
+            const unlockBtn = document.createElement("button");
+            unlockBtn.type = "button";
+            unlockBtn.className = "mps-btn-secondary";
+            unlockBtn.textContent = t("mangaplay-studio.settings.unlockSkins");
+            unlockBtn.addEventListener("click", () => { openPaywall(); });
+            card1.appendChild(unlockBtn);
+
+            if (!hasPro())
+            {
+                const upgradeBtn = document.createElement("button");
+                upgradeBtn.type = "button";
+                upgradeBtn.className = "mps-btn-primary";
+                upgradeBtn.textContent = t("mangaplay-studio.settings.upgradeTurbo");
+                upgradeBtn.addEventListener("click", () => { openPaywall(); });
+                card1.appendChild(upgradeBtn);
+            }
+        }
 
         // Font rows. screenplayFont offers Courier New as an alternative.
         // editorFont offers Courier Prime Sans. appFont is Default-only until an
@@ -981,7 +1448,6 @@ export async function openSettingsModal(initialTab = "general")
                 btn.textContent = t("mangaplay-studio.settings.account.signInButton");
                 btn.addEventListener("click", async () =>
                 {
-                    console.warn("[mps:auth:TRACE] settings-modal Sign-In button CLICKED → will call authSignIn({interactive:true})");
                     btn.disabled = true;
                     errorEl.textContent = "";
                     try
@@ -1141,6 +1607,89 @@ export async function openSettingsModal(initialTab = "general")
         }
 
         content.appendChild(card);
+
+        // ── ADS OPT-IN (iOS only, non-entitled only) ─────────────
+        if (getPlatformKeyCached() === "ios" && !areAdsDisabled())
+        {
+            const adsCard = document.createElement("div");
+            adsCard.className = "settings-card";
+
+            const adsRow = document.createElement("div");
+            adsRow.className = "mps-row";
+
+            const adsLabel = document.createElement("div");
+            adsLabel.className = "mps-row-label";
+
+            const adsTitle = document.createElement("div");
+            adsTitle.className = "mps-row-title";
+            adsTitle.textContent = t("mangaplay-studio.settings.account.adsOptIn");
+
+            const adsHelp = document.createElement("div");
+            adsHelp.className = "mps-row-help";
+
+            const adsToggle = document.createElement("button");
+            adsToggle.type = "button";
+            adsToggle.className = "mps-toggle";
+            adsToggle.setAttribute("role", "switch");
+            adsToggle.setAttribute("aria-label", t("mangaplay-studio.settings.account.adsOptIn"));
+            adsToggle.setAttribute("aria-checked", "false");
+            adsHelp.textContent = t("mangaplay-studio.settings.account.adsOptInHelp");
+
+            // Seed initial state from ATT status
+            (async () =>
+            {
+                try
+                {
+                    const status = await invoke("plugin:mps-admob|admob_get_att_status");
+                    const authorized = status === "authorized";
+                    adsToggle.setAttribute("aria-checked", String(authorized));
+                    if (status === "denied" || status === "restricted")
+                    {
+                        adsHelp.textContent = t("mangaplay-studio.settings.account.adsOptInDeniedHelp");
+                    }
+                }
+                catch
+                {
+                    // Already seeded to false/help above
+                }
+            })();
+
+            adsToggle.addEventListener("click", async () =>
+            {
+                const currentlyOn = adsToggle.getAttribute("aria-checked") === "true";
+                if (currentlyOn)
+                {
+                    // Cannot revoke ATT programmatically — direct user to iOS Settings
+                    adsHelp.textContent = t("mangaplay-studio.settings.account.adsOptInDeniedHelp");
+                    return;
+                }
+                // Attempt to request ATT
+                try
+                {
+                    const granted = await invoke("plugin:mps-admob|admob_request_att") === true;
+                    adsToggle.setAttribute("aria-checked", String(granted));
+                    if (!granted)
+                    {
+                        adsHelp.textContent = t("mangaplay-studio.settings.account.adsOptInDeniedHelp");
+                    }
+                    else
+                    {
+                        adsHelp.textContent = t("mangaplay-studio.settings.account.adsOptInHelp");
+                    }
+                }
+                catch
+                {
+                    adsHelp.textContent = t("mangaplay-studio.settings.account.adsOptInDeniedHelp");
+                }
+            });
+
+            adsLabel.appendChild(adsTitle);
+            adsLabel.appendChild(adsHelp);
+            adsRow.appendChild(adsLabel);
+            adsRow.appendChild(adsToggle);
+            adsCard.appendChild(adsRow);
+            content.appendChild(adsCard);
+        }
     }
 
     async function renderPublish()
@@ -1272,7 +1821,7 @@ export async function openSettingsModal(initialTab = "general")
     function refreshChrome()
     {
         dialog.setAttribute("aria-label", t("mangaplay-studio.settings.title"));
-        closeBtn.setAttribute("aria-label", t("mangaplay-studio.settings.close"));
+        updateCloseButtonGlyph();
         sidebarHeading.textContent = t("mangaplay-studio.settings.options");
         for (const tab of TABS)
         {
@@ -1283,10 +1832,18 @@ export async function openSettingsModal(initialTab = "general")
 
     function selectTab(id)
     {
+        // Switching tabs while drilled-in returns to that tab's root but keeps
+        // the modal open. The content pane is rebuilt below, so pop first.
+        popAllSubpages();
         activeTab = id;
         for (const [tabId, btn] of entryEls)
         {
             btn.classList.toggle("selected", tabId === id);
+        }
+        if (isMobileLike())
+        {
+            const selected = entryEls.get(id);
+            if (selected) selected.scrollIntoView({ inline: "nearest", block: "nearest" });
         }
         renderActiveTab();
     }
@@ -1310,6 +1867,11 @@ export async function openSettingsModal(initialTab = "general")
             detachI18n();
             detachI18n = null;
         }
+        if (entitlementsOff)
+        {
+            entitlementsOff();
+            entitlementsOff = null;
+        }
         try { document.removeEventListener("mps:authChanged", onAuthChangedListener); }
         catch (_) { /* best-effort */ }
         const r = modalRoot;
@@ -1320,7 +1882,11 @@ export async function openSettingsModal(initialTab = "general")
         }, 200);
     }
 
-    closeBtn.addEventListener("click", close);
+    closeBtn.addEventListener("click", () =>
+    {
+        if (subpageStack.length > 0) popSubpage();
+        else close();
+    });
     backdrop.addEventListener("click", (ev) =>
     {
         if (ev.target === backdrop) close();
@@ -1328,12 +1894,17 @@ export async function openSettingsModal(initialTab = "general")
 
     detachKeydown = (ev) =>
     {
-        if (ev.key === "Escape") close();
+        if (ev.key !== "Escape") return;
+        if (subpageStack.length > 0) popSubpage();
+        else close();
     };
     document.addEventListener("keydown", detachKeydown);
 
     detachI18n = subscribeI18n(() =>
     {
+        // A language switch rebuilds the content pane, which would strand an
+        // open sub-page; pop back to the tab root first so state stays sane.
+        popAllSubpages();
         refreshChrome();
         renderActiveTab();
     });

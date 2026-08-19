@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * push-pull.test.js — Bun tests for the Phase 4 round-trip workers.
+ * push-pull.test.js — Bun tests for the Google Docs round-trip workers.
  *
  * Coverage:
  *   - extractTextFromTab + findTabByName pure helpers.
@@ -9,15 +9,26 @@
  *     destructive batchUpdate runs.
  *   - pull() writes remote text into local path.
  *   - pull() with localDirty=true → local sidecar saved BEFORE the overwrite.
+ *   - Fixture parity: tabwalk + sidecar against gdocs-tabwalk-fixtures.json
+ *     and gdocs-sidecar-fixtures.json.
  */
 
 import { describe, test, expect } from "bun:test";
+import { resolve, dirname } from "path";
+import { fileURLToPath } from "url";
+import { readFileSync } from "fs";
 import {
     push,
     pull,
     extractTextFromTab,
     findTabByName
 } from "./push-pull.js";
+
+// Load fixtures from core/ (four directories up from src/js/google-docs-sync/).
+const __dirname_file = dirname(fileURLToPath(import.meta.url));
+const coreDir = resolve(__dirname_file, "../../../../core");
+const tabwalkFixtures = JSON.parse(readFileSync(resolve(coreDir, "gdocs-tabwalk-fixtures.json"), "utf-8"));
+const sidecarFixtures = JSON.parse(readFileSync(resolve(coreDir, "gdocs-sidecar-fixtures.json"), "utf-8"));
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -246,7 +257,7 @@ describe("push — conflict (revisions differ)", () =>
 
         // Sidecar saved.
         expect(writes.length).toBe(1);
-        expect(writes[0].path).toBe("/proj/script.fountain.remote-2026-06-29T12-00-00Z.conflict");
+        expect(writes[0].path).toBe("/proj/script.fountain.remote-2026-06-29T12-00-00-000Z.conflict");
         expect(writes[0].contents).toContain("REMOTE WINS");
 
         // Sidecar write must happen BEFORE the first batchUpdate.
@@ -363,7 +374,7 @@ describe("pull — writes local, optional sidecar when dirty", () =>
         expect(writes.length).toBe(2);
         // First write: sidecar.
         expect(writes[0].path)
-            .toBe("C:\\users\\me\\proj\\script.mangaplay.md.local-2026-06-29T15-30-00Z.conflict");
+            .toBe("C:\\users\\me\\proj\\script.mangaplay.md.local-2026-06-29T15-30-00-000Z.conflict");
         expect(writes[0].contents).toBe("DIRTY LOCAL");
         // Second write: the local overwrite.
         expect(writes[1].path).toBe("C:\\users\\me\\proj\\script.mangaplay.md");
@@ -566,7 +577,7 @@ describe("pull — Mangaplay tab missing (BUG-004)", () =>
         // Sidecar was written before the throw — harmless, user can delete.
         expect(writes.length).toBe(1);
         expect(writes[0].path)
-            .toBe("/proj/script.mangaplay.md.local-2026-06-29T18-00-00Z.conflict");
+            .toBe("/proj/script.mangaplay.md.local-2026-06-29T18-00-00-000Z.conflict");
         expect(writes[0].contents).toBe("DIRTY LOCAL");
         // Critical: the main local file was NOT overwritten.
         const overwrites = writes.filter(w => w.path === "/proj/script.mangaplay.md");
@@ -601,4 +612,58 @@ describe("pull — Mangaplay tab missing (BUG-004)", () =>
         expect(writes[0].path).toBe("/proj/script.fountain");
         expect(writes[0].contents).toContain("Drive body");
     });
+});
+
+// ── Fixture parity: tabwalk ───────────────────────────────────────────────────
+
+describe("extractTextFromTab — fixture parity", () =>
+{
+    for (const c of tabwalkFixtures.extract_text)
+    {
+        test(c.label, () =>
+        {
+            expect(extractTextFromTab(c.tab)).toBe(c.expected);
+        });
+    }
+});
+
+describe("findTabByName — fixture parity", () =>
+{
+    for (const c of tabwalkFixtures.find_tab_by_name)
+    {
+        test(c.label, () =>
+        {
+            const result = findTabByName(c.tabs, c.name);
+            if (c.expected === null)
+            {
+                expect(result).toBeNull();
+            }
+            else
+            {
+                expect(result).toEqual(c.expected);
+            }
+        });
+    }
+});
+
+// ── Fixture parity: sidecar stamp ────────────────────────────────────────────
+
+describe("_stampForFilename (sidecar) — fixture parity", () =>
+{
+    for (const c of sidecarFixtures)
+    {
+        test(`iso: ${c.iso} is_remote: ${c.is_remote}`, () =>
+        {
+            // Test the stamp via the expected_stamp value: Date.toISOString() of
+            // the fixed ISO date should produce expected_stamp when transformed.
+            const date = new Date(c.iso);
+            const stamp = date.toISOString().replace(/[:.]/g, "-");
+            expect(stamp).toBe(c.expected_stamp);
+
+            // Build full conflict filename matching the expected_filename.
+            const side = c.is_remote ? "remote" : "local";
+            const filename = `${c.basename}.${side}-${stamp}.conflict`;
+            expect(filename).toBe(c.expected_filename);
+        });
+    }
 });

@@ -118,6 +118,22 @@ function badgeFor(name)
 }
 
 /**
+ * Derive a file-type token for the leading type-icon (mobile explorer).
+ * Mirrors badgeFor's extension checks.
+ * @param {string} name
+ * @returns {"mangaplay"|"fountain"|"superscript"|"text"|"other"}
+ */
+function fileTypeFor(name)
+{
+    const lower = name.toLowerCase();
+    if (lower.endsWith(".sup.md")       || lower.endsWith(".sup"))       return "superscript";
+    if (lower.endsWith(".mangaplay.md") || lower.endsWith(".mangaplay")) return "mangaplay";
+    if (lower.endsWith(".fountain.md")  || lower.endsWith(".fountain"))  return "fountain";
+    if (lower.endsWith(".txt"))                                          return "text";
+    return "other";
+}
+
+/**
  * Compute the visible label: strip a known double-suffix when present,
  * otherwise strip everything after the last dot. Folders typically have
  * no dot in their basename and pass through unchanged — the rule is
@@ -248,9 +264,8 @@ function normalise(list)
  *     (rowEls, expanded, currentDrag, renaming).
  *   - `relPath` is preserved on the row DOM (`data-rel-path`) and passed
  *     through callbacks as a display hint. Do NOT use relPath for
- *     identity comparisons after 4d — callers should key on uuid.
- *   - `activeFile` accepts BOTH uuid and relPath during the transition
- *     (Part 4d makes it uuid-only).
+ *     identity comparisons — callers should key on uuid.
+ *   - `activeFile` accepts BOTH uuid and relPath; uuid is authoritative.
  *
  * @param {HTMLElement} container
  * @param {Array<string|TreeEntry>} files
@@ -258,6 +273,7 @@ function normalise(list)
  *   activeFile?: string|null,
  *   initialExpanded?: string[],
  *   projectRoot?: string,
+ *   typeIcons?: boolean,
  *   onRename?: (path: string, newBasename: string) => Promise<string|void>,
  *   onRenameByUuid?: (uuid: string, newBasename: string, relPath: string) => Promise<string|void>,
  *   onToggleExpand?: (relPath: string, expanded: boolean) => void,
@@ -266,12 +282,12 @@ function normalise(list)
  *   onMoveByUuid?: (srcUuid: string, newParentUuid: string|null, srcRelPath: string, newParentRelPath: string) => Promise<void>|void,
  * }} [opts]
  *
- * NOTE (Part 4b): New UUID-first callbacks (`onRenameByUuid`,
- * `onToggleExpandByUuid`, `onMoveByUuid`) are provided alongside the OLD
- * path-first callbacks. When both are present the UUID variant wins. When
- * only the OLD callback is provided the internal dispatch reconstructs the
- * pre-4b shape (absPath / relPath / newParentAbs). Part 4d rips out the OLD
- * path-first callbacks once the caller-side migration lands.
+ * NOTE: UUID-first callbacks (`onRenameByUuid`, `onToggleExpandByUuid`,
+ * `onMoveByUuid`) are provided alongside the OLD path-first callbacks.
+ * When both are present the UUID variant wins. When only the OLD callback
+ * is provided the internal dispatch reconstructs the legacy shape
+ * (absPath / relPath / newParentAbs). The OLD path-first callbacks will be
+ * removed once the caller-side migration lands.
  */
 export function mountFolderList(container, files, opts = {})
 {
@@ -302,6 +318,9 @@ export function mountFolderList(container, files, opts = {})
     const onMove = typeof opts.onMove === "function" ? opts.onMove : null;
     const onMoveByUuid = typeof opts.onMoveByUuid === "function" ? opts.onMoveByUuid : null;
     const projectRoot = typeof opts.projectRoot === "string" ? opts.projectRoot : "";
+    const typeIcons = opts.typeIcons === true;
+    const tooltips = opts.tooltips !== false;
+    const dnd = opts.dnd !== false;
 
     let activeFile = opts.activeFile ?? null;
 
@@ -354,8 +373,8 @@ export function mountFolderList(container, files, opts = {})
         const row = document.createElement("div");
         row.className = "folder-list-row";
         row.dataset.index = String(idx);
-        // UUID is authoritative. relPath + path stay for now — Part 4d will
-        // rip them out once the broker + slot manager go UUID-only.
+        // UUID is authoritative. relPath + path stay for now — will be
+        // removed once the broker + slot manager go UUID-only.
         row.dataset.uuid = node.uuid;
         row.dataset.relPath = node.relPath;
         row.dataset.kind = node.kind;
@@ -364,10 +383,14 @@ export function mountFolderList(container, files, opts = {})
         // dispatcher and the rename plumbing in app.js.
         row.dataset.filename = node.kind === "file" ? node.name : node.relPath;
         row.dataset.path = absPathFor(node);
-        row.dataset.tooltip = buildTooltip(node);
-        row.dataset.tooltipSide = "right";
-        row.draggable = true;
+        if (tooltips)
+        {
+            row.dataset.tooltip = buildTooltip(node);
+            row.dataset.tooltipSide = "right";
+        }
+        if (dnd) row.draggable = true;
         row.style.paddingLeft = (10 + node.depth * 16) + "px";
+        row.style.setProperty("--mps-row-depth", String(node.depth));
 
         if (node.kind === "folder")
         {
@@ -387,6 +410,15 @@ export function mountFolderList(container, files, opts = {})
         // expand/collapse interaction); the visual offset between folder
         // names and file names is acceptable since folders are uncommon at
         // depth 0 in this project layout.
+
+        if (typeIcons && node.kind === "file")
+        {
+            const typeIconEl = document.createElement("span");
+            typeIconEl.className = "folder-list-type-icon";
+            typeIconEl.dataset.filetype = fileTypeFor(node.name);
+            typeIconEl.setAttribute("aria-hidden", "true");
+            row.append(typeIconEl);
+        }
 
         const nameEl = document.createElement("span");
         nameEl.className = "folder-list-name";
@@ -1143,11 +1175,14 @@ export function mountFolderList(container, files, opts = {})
 
     container.addEventListener("keydown", onKeyDown);
     container.addEventListener("click", onClick);
-    container.addEventListener("dragstart", onDragStart);
-    container.addEventListener("dragend", onDragEnd);
-    container.addEventListener("dragover", onDragOver);
-    container.addEventListener("dragleave", onDragLeave);
-    container.addEventListener("drop", onDrop);
+    if (dnd)
+    {
+        container.addEventListener("dragstart", onDragStart);
+        container.addEventListener("dragend", onDragEnd);
+        container.addEventListener("dragover", onDragOver);
+        container.addEventListener("dragleave", onDragLeave);
+        container.addEventListener("drop", onDrop);
+    }
 
     const ro = new ResizeObserver(() => { /* no-op — flow layout self-sizes */ });
     ro.observe(container);

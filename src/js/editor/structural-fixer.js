@@ -211,7 +211,8 @@ function collectMangaplayOps(src)
     // 1. Page renumbering (preserve suffix groups).
     if (ast && Array.isArray(ast.pages))
     {
-        let nextBase = 1;
+        const firstBase = ast.pages[0]?.baseNumber;
+        let nextBase = (typeof firstBase === "number") ? firstBase : 1;
         let prevOldBase = null;
         let prevNewBase = null;
         for (const page of ast.pages)

@@ -27,6 +27,12 @@ import { t, subscribe as i18nSubscribe } from "../adapters/tauri-i18n.js";
 
 const GOOGLE_SLIDES_ICON_SRC = "./img/Google_Slides_logo_(2014-2020).svg";
 
+const FORMAT_LABEL = {
+    fountain: "Fountain",
+    superscript: "SuperScript",
+    "superscript-bin": "SuperScript"
+};
+
 /**
  * @typedef {Object} PublishSlidesPillController
  * @property {() => void} refresh
@@ -38,10 +44,10 @@ const GOOGLE_SLIDES_ICON_SRC = "./img/Google_Slides_logo_(2014-2020).svg";
 /**
  * Mount the Publish Slides pill into an existing host button element.
  *
- * @param {{ host: HTMLElement, getScriptFormat: () => string|null|undefined, getIsLinked?: () => boolean, getIsStoryboardFolder?: () => boolean }} opts
+ * @param {{ host: HTMLElement, getScriptFormat: () => string|null|undefined, getIsLinked?: () => boolean, getIsStoryboardFolder?: () => boolean, getSyncStatus?: () => string|null }} opts
  * @returns {PublishSlidesPillController}
  */
-export function mountPublishSlidesPill({ host, getScriptFormat, getIsLinked, getIsStoryboardFolder })
+export function mountPublishSlidesPill({ host, getScriptFormat, getIsLinked, getIsStoryboardFolder, getSyncStatus })
 {
     if (!host)
     {
@@ -79,6 +85,18 @@ export function mountPublishSlidesPill({ host, getScriptFormat, getIsLinked, get
         host.dataset.state = state;
         host.innerHTML = `<img class="footer-pill-img" src="${GOOGLE_SLIDES_ICON_SRC}" alt="" width="16" height="16" draggable="false">`;
 
+        // Sync-status badge — overlaid via CSS ::after pseudo-element.
+        // Only meaningful when state === "linked".
+        const syncStatus = state === "linked" ? (getSyncStatus?.() || null) : null;
+        if (syncStatus)
+        {
+            host.dataset.syncStatus = syncStatus;
+        }
+        else
+        {
+            delete host.dataset.syncStatus;
+        }
+
         /** @type {string} */
         let tooltipKey;
         /** @type {string} */
@@ -87,6 +105,8 @@ export function mountPublishSlidesPill({ host, getScriptFormat, getIsLinked, get
         let tooltipFallback = "";
         /** @type {string} */
         let ariaFallback = "";
+        /** @type {Record<string, string> | null} */
+        let tooltipParams = null;
         if (state === "no-account")
         {
             tooltipKey = "mangaplay-studio.chrome.pills.publishSlides.tooltip.noAccount";
@@ -94,14 +114,30 @@ export function mountPublishSlidesPill({ host, getScriptFormat, getIsLinked, get
         }
         else if (state === "unsupported-fmt")
         {
+            const fmt = getScriptFormat?.();
+            const friendly = FORMAT_LABEL[fmt] || "this file";
             tooltipKey = "mangaplay-studio.chrome.pills.publishSlides.tooltip.unsupportedFmt";
             ariaKey = "mangaplay-studio.chrome.pills.publishSlides.ariaLabel.unsupportedFmt";
+            tooltipFallback = "Google Slides not available for {fmt}";
+            tooltipParams = { fmt: friendly };
         }
         else if (state === "linked")
         {
             tooltipKey = "mangaplay-studio.chrome.pills.publishSlides.tooltip.linked";
             ariaKey = "mangaplay-studio.chrome.pills.publishSlides.ariaLabel.linked";
-            tooltipFallback = "Linked to a Google Slides™ presentation.";
+            const sync = getSyncStatus?.();
+            if (sync === "remote-changed")
+            {
+                tooltipFallback = "Linked — remote deck has changed since last sync.";
+            }
+            else if (sync === "synced")
+            {
+                tooltipFallback = "Linked — synced and up to date.";
+            }
+            else
+            {
+                tooltipFallback = "Linked to a Google Slides\u2122 presentation.";
+            }
             ariaFallback = "Sync linked Google Slides presentation";
         }
         else if (state === "ready-group")
@@ -113,17 +149,18 @@ export function mountPublishSlidesPill({ host, getScriptFormat, getIsLinked, get
         }
         else
         {
-            tooltipKey = "";
+            tooltipKey = "mangaplay-studio.chrome.pills.publishSlides.tooltip.ready";
             ariaKey = "mangaplay-studio.chrome.pills.publishSlides.ariaLabel.ready";
+            tooltipFallback = "Publish to Google Slides™";
         }
 
-        if (tooltipKey)
+        if (tooltipParams)
         {
-            host.setAttribute("data-tooltip", tooltipFallback ? t(tooltipKey, tooltipFallback) : t(tooltipKey));
+            host.setAttribute("data-tooltip", t(tooltipKey, tooltipFallback, tooltipParams));
         }
         else
         {
-            host.removeAttribute("data-tooltip");
+            host.setAttribute("data-tooltip", tooltipFallback ? t(tooltipKey, tooltipFallback) : t(tooltipKey));
         }
         host.setAttribute("aria-label", ariaFallback ? t(ariaKey, ariaFallback) : t(ariaKey));
     }

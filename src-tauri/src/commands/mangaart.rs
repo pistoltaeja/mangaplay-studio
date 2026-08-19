@@ -9,9 +9,38 @@
 use crate::{
     art_map_drop, art_map_find_script_by_uuid, art_map_set, atomic_write_impl,
     commands::project::storyboard_dir, fs_helpers, locks::ProjectJsonLocks,
-    read_project_json, resolve_art_path, script_map_get_or_mint,
+    read_project_json, resolve_art_path, script_map_drop, script_map_get_or_mint,
     script_map_get_with_legacy_pullforward, write_project_json,
 };
+
+/// Acquire the per-project `project.json` lock, read the file, and run `f`
+/// while the guard is held. Centralises the lock-acquire + read preamble
+/// shared by the RMW command helpers. Panic semantics on a poisoned mutex
+/// are preserved byte-identically (`.expect("project-json mutex poisoned")`).
+fn with_project_json<T, F>(
+    project_dir: &std::path::Path,
+    f: F,
+) -> Result<T, String>
+where
+    F: FnOnce(&mut serde_json::Value) -> Result<T, String>,
+{
+    let locks = ProjectJsonLocks::global();
+    let lock = locks.lock_for(project_dir);
+    let _guard = lock.lock().expect("project-json mutex poisoned");
+    let mut pj = read_project_json(project_dir)?;
+    f(&mut pj)
+}
+
+/// Read a `.mangaart` file at `path` and parse it as a JSON value. Error
+/// mapping matches the inline call sites this replaces: both the read and
+/// the parse map their error via `|e| e.to_string()`.
+fn read_art_json(path: &std::path::Path) -> Result<serde_json::Value, String>
+{
+    let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    Ok(parsed)
+}
 
 /// Return the on-disk path for `<storyboard_root>/<uuid>.mangaart`. The
 /// UUID-first layout stores every art file flat under the storyboard root,
@@ -79,37 +108,35 @@ pub fn mangaart_resolve_path_impl(
     use std::path::Path;
 
     let project_dir = Path::new(project_path);
-    let locks = ProjectJsonLocks::global();
-    let lock = locks.lock_for(project_dir);
-    let _guard = lock.lock().expect("project-json mutex poisoned");
-
-    let mut pj = read_project_json(project_dir)?;
-    let pre = pj.clone();
-    match script_map_get_with_legacy_pullforward(&mut pj, script_file)
+    with_project_json(project_dir, |pj|
     {
-        Some(uuid) =>
+        let pre = pj.clone();
+        match script_map_get_with_legacy_pullforward(pj, script_file)
         {
-            if pj != pre
+            Some(uuid) =>
             {
-                // Pulled forward from artMap — persist the new scriptMap entry.
-                write_project_json(project_dir, &pj)?;
+                if *pj != pre
+                {
+                    // Pulled forward from artMap — persist the new scriptMap entry.
+                    write_project_json(project_dir, pj)?;
+                }
+                let path = resolve_art_path(project_dir, script_file, &uuid);
+                if path.exists()
+                {
+                    return Ok(Some(path.to_string_lossy().to_string()));
+                }
+                // identity fallback: file may have been left behind by a single-file
+                // move — search by UUID under the storyboard root before giving up.
+                let storyboard_root = storyboard_dir(project_dir);
+                if let Some(found) = find_art_by_uuid(&storyboard_root, &uuid)
+                {
+                    return Ok(Some(found.to_string_lossy().to_string()));
+                }
+                Ok(Some(path.to_string_lossy().to_string()))
             }
-            let path = resolve_art_path(project_dir, script_file, &uuid);
-            if path.exists()
-            {
-                return Ok(Some(path.to_string_lossy().to_string()));
-            }
-            // identity fallback: file may have been left behind by a single-file
-            // move — search by UUID under the storyboard root before giving up.
-            let storyboard_root = storyboard_dir(project_dir);
-            if let Some(found) = find_art_by_uuid(&storyboard_root, &uuid)
-            {
-                return Ok(Some(found.to_string_lossy().to_string()));
-            }
-            Ok(Some(path.to_string_lossy().to_string()))
+            None => Ok(None),
         }
-        None => Ok(None),
-    }
+    })
 }
 
 // Recursively walk `root` looking for a file named `<uuid>.mangaart`. Returns
@@ -180,32 +207,49 @@ pub fn mangaart_scaffold_impl(
         .to_string();
 
     let project_dir = Path::new(project_path);
-    let locks = ProjectJsonLocks::global();
-    let lock = locks.lock_for(project_dir);
-    let _guard = lock.lock().expect("project-json mutex poisoned");
-
-    let mut project_json = read_project_json(project_dir)?;
-    let (uuid, minted) = script_map_get_or_mint(&mut project_json, script_file);
-
-    // Keep legacy artMap in sync — old code paths may still read from it
-    // until the migration completes naturally on every project's next touch.
-    art_map_set(&mut project_json, script_file, &uuid);
-
-    if minted
+    with_project_json(project_dir, |project_json|
     {
-        write_project_json(project_dir, &project_json)?;
-    }
+        let (uuid, minted) = script_map_get_or_mint(project_json, script_file);
 
-    let art_path = resolve_art_path(project_dir, script_file, &uuid);
-    if art_path.exists()
-    {
-        let raw = std::fs::read_to_string(&art_path).map_err(|e| e.to_string())?;
-        let parsed: serde_json::Value =
-            serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-        return Ok(parsed);
-    }
+        // Keep legacy artMap in sync — old code paths may still read from it
+        // until the migration completes naturally on every project's next touch.
+        art_map_set(project_json, script_file, &uuid);
 
-    write_fresh_art_file(&art_path, &uuid, &basename, script_file)
+        if minted
+        {
+            write_project_json(project_dir, project_json)?;
+        }
+
+        let art_path = resolve_art_path(project_dir, script_file, &uuid);
+        if art_path.exists()
+        {
+            return read_art_json(&art_path);
+        }
+
+        write_fresh_art_file(&art_path, &uuid, &basename, script_file)
+    })
+}
+
+/// Build an empty `.mangaart` scaffold body in memory. Shared between the
+/// write path ([`write_fresh_art_file`]) and the load-only path
+/// ([`mangaart_load_impl`] / [`mangaart_load_by_uuid_impl`]) so both produce
+/// byte-identical JSON. No I/O.
+fn build_empty_scaffold(
+    uuid: &str,
+    basename: &str,
+    script_file: &str,
+) -> serde_json::Value
+{
+    let now = chrono::Utc::now().to_rfc3339();
+    serde_json::json!({
+        "format": "mangaart:v1",
+        "uuid": uuid,
+        "name": basename,
+        "scriptFile": script_file,
+        "createdAt": now,
+        "updatedAt": now,
+        "pages": Vec::<serde_json::Value>::new(),
+    })
 }
 
 /// Write a fresh empty `.mangaart` scaffold to `art_path` and return its
@@ -223,17 +267,7 @@ fn write_fresh_art_file(
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    let now = chrono::Utc::now().to_rfc3339();
-    let scaffold = serde_json::json!({
-        "format": "mangaart:v1",
-        "uuid": uuid,
-        "name": basename,
-        "scriptFile": script_file,
-        "createdAt": now,
-        "updatedAt": now,
-        "pages": Vec::<serde_json::Value>::new(),
-    });
-
+    let scaffold = build_empty_scaffold(uuid, basename, script_file);
     let pretty = serde_json::to_string_pretty(&scaffold).map_err(|e| e.to_string())?;
     atomic_write_impl(&art_path.to_string_lossy(), &pretty)?;
     Ok(scaffold)
@@ -342,14 +376,324 @@ pub fn mangaart_scaffold_by_uuid_impl(
 
     if let Some(path) = existing
     {
-        let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        let parsed: serde_json::Value =
-            serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-        return Ok(parsed);
+        return read_art_json(&path);
     }
 
     let basename = display_name.unwrap_or(uuid);
     write_fresh_art_file(&flat, uuid, basename, basename)
+}
+
+// ---------------------------------------------------------------------------
+// mangaart_load / mangaart_load_by_uuid — load-only variants. Return the
+// on-disk `.mangaart` body if present, otherwise return an in-memory empty
+// scaffold WITHOUT writing to disk. UUID minting into scriptMap still
+// happens in `mangaart_load_impl` so a subsequent save has a stable target.
+// The physical `.mangaart` file first lands on disk from `saveMangaart*` on
+// first stroke commit via `mangaart_scaffold_by_uuid`.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn mangaart_load(
+    project_path: String,
+    script_file: String,
+) -> Result<serde_json::Value, String>
+{
+    mangaart_load_impl(&project_path, &script_file)
+}
+
+/// Pure helper backing the `mangaart_load` Tauri command. Load-only mirror
+/// of [`mangaart_scaffold_impl`] — UUID mint stays eager (a `project.json`
+/// shallow-write), but the physical `.mangaart` file is NOT created when
+/// absent. Returns an in-memory empty scaffold instead.
+pub fn mangaart_load_impl(
+    project_path: &str,
+    script_file: &str,
+) -> Result<serde_json::Value, String>
+{
+    use std::path::Path;
+
+    let basename = script_file
+        .strip_suffix(".md")
+        .unwrap_or(script_file)
+        .to_string();
+
+    let project_dir = Path::new(project_path);
+    with_project_json(project_dir, |project_json|
+    {
+        let (uuid, minted) = script_map_get_or_mint(project_json, script_file);
+
+        // Keep legacy artMap in sync — old code paths may still read from it.
+        art_map_set(project_json, script_file, &uuid);
+
+        if minted
+        {
+            write_project_json(project_dir, project_json)?;
+        }
+
+        let art_path = resolve_art_path(project_dir, script_file, &uuid);
+        if art_path.exists()
+        {
+            return read_art_json(&art_path);
+        }
+
+        Ok(build_empty_scaffold(&uuid, &basename, script_file))
+    })
+}
+
+#[tauri::command]
+pub fn mangaart_load_by_uuid(
+    project_path: String,
+    uuid: String,
+    display_name: Option<String>,
+) -> Result<serde_json::Value, String>
+{
+    mangaart_load_by_uuid_impl(&project_path, &uuid, display_name.as_deref())
+}
+
+/// Pure helper backing the `mangaart_load_by_uuid` Tauri command. Load-only
+/// mirror of [`mangaart_scaffold_by_uuid_impl`]. When no existing file is
+/// found (neither at the flat UUID path nor via the legacy mirrored-dir
+/// scan), returns an in-memory empty scaffold WITHOUT writing to disk. Does
+/// NOT touch `project.json`.
+pub fn mangaart_load_by_uuid_impl(
+    project_path: &str,
+    uuid: &str,
+    display_name: Option<&str>,
+) -> Result<serde_json::Value, String>
+{
+    let project_dir = std::path::Path::new(project_path);
+
+    let flat = flat_uuid_art_path(project_dir, uuid);
+    let existing = if flat.exists()
+    {
+        Some(flat)
+    }
+    else
+    {
+        let storyboard_root = storyboard_dir(project_dir);
+        find_art_by_uuid(&storyboard_root, uuid)
+    };
+
+    if let Some(path) = existing
+    {
+        return read_art_json(&path);
+    }
+
+    let basename = display_name.unwrap_or(uuid);
+    Ok(build_empty_scaffold(uuid, basename, basename))
+}
+
+// ---------------------------------------------------------------------------
+// mangaart_sweep_empty — startup sweep. Scans the top-level of
+// `<project>/_mangaplaystudio/storyboard/` for `.mangaart` files whose
+// `pages` array is empty (or missing) and deletes them (via trash on desktop,
+// hard-remove on mobile). Drops matching `artMap.scripts` + `scriptMap`
+// entries so the on-disk state stays consistent. Best-effort throughout —
+// per-file failures log and continue.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn mangaart_sweep_empty(project_path: String) -> Result<usize, String>
+{
+    mangaart_sweep_empty_impl(&project_path)
+}
+
+/// Pure helper backing the `mangaart_sweep_empty` Tauri command. Returns the
+/// count of files swept (useful for tests + boot-log telemetry).
+pub fn mangaart_sweep_empty_impl(project_path: &str) -> Result<usize, String>
+{
+    let project_dir = std::path::Path::new(project_path);
+    let storyboard_root = storyboard_dir(project_dir);
+    if !storyboard_root.exists()
+    {
+        return Ok(0);
+    }
+
+    // Step 1: enumerate top-level `.mangaart` files (folders/ is out of scope).
+    let entries = match std::fs::read_dir(&storyboard_root)
+    {
+        Ok(e) => e,
+        Err(e) =>
+        {
+            eprintln!(
+                "[mangaart_sweep_empty] read_dir {} failed: {}",
+                storyboard_root.display(), e,
+            );
+            return Ok(0);
+        }
+    };
+
+    let mut swept_uuids: Vec<String> = Vec::new();
+
+    for entry in entries.flatten()
+    {
+        let file_type = match entry.file_type()
+        {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if !file_type.is_file() { continue; }
+
+        let path = entry.path();
+        let file_name = match path.file_name().and_then(|s| s.to_str())
+        {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        if !file_name.ends_with(".mangaart") { continue; }
+
+        let raw = match std::fs::read_to_string(&path)
+        {
+            Ok(r) => r,
+            Err(e) =>
+            {
+                eprintln!(
+                    "[mangaart_sweep_empty] read {} failed: {}",
+                    path.display(), e,
+                );
+                continue;
+            }
+        };
+        let parsed: serde_json::Value = match serde_json::from_str(&raw)
+        {
+            Ok(v) => v,
+            Err(e) =>
+            {
+                eprintln!(
+                    "[mangaart_sweep_empty] parse {} failed: {}",
+                    path.display(), e,
+                );
+                continue;
+            }
+        };
+
+        let format_ok = parsed
+            .get("format")
+            .and_then(|v| v.as_str())
+            == Some("mangaart:v1");
+        if !format_ok { continue; }
+
+        let is_empty = match parsed.get("pages")
+        {
+            None => true,
+            Some(v) => v.as_array().map(|a| a.is_empty()).unwrap_or(false),
+        };
+        if !is_empty { continue; }
+
+        let uuid = parsed
+            .get("uuid")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // Delete the file. Best-effort.
+        if let Err(e) = fs_helpers::trash_or_remove(&path)
+        {
+            eprintln!(
+                "[mangaart_sweep_empty] trash {} failed: {}",
+                path.display(), e,
+            );
+            continue;
+        }
+
+        if let Some(u) = uuid
+        {
+            swept_uuids.push(u);
+        }
+    }
+
+    let count = swept_uuids.len();
+    if count == 0
+    {
+        return Ok(0);
+    }
+
+    // Step 2: drop matching artMap.scripts + scriptMap entries. Held under
+    // the per-project lock for the RMW cycle.
+    let locks = ProjectJsonLocks::global();
+    let lock = locks.lock_for(project_dir);
+    let _guard = lock.lock().expect("project-json mutex poisoned");
+
+    let mut pj = match read_project_json(project_dir)
+    {
+        Ok(pj) => pj,
+        Err(e) =>
+        {
+            eprintln!(
+                "[mangaart_sweep_empty] project.json unreadable at {}: {} — files trashed, maps unchanged",
+                project_dir.display(), e,
+            );
+            return Ok(count);
+        }
+    };
+
+    let mut dropped = false;
+    for uuid in &swept_uuids
+    {
+        // artMap.scripts: keys whose value == uuid.
+        let art_keys: Vec<String> = pj
+            .get("artMap")
+            .and_then(|m| m.get("scripts"))
+            .and_then(|s| s.as_object())
+            .map(|obj|
+            {
+                obj.iter()
+                    .filter_map(|(k, v)|
+                    {
+                        if v.as_str() == Some(uuid.as_str())
+                        {
+                            Some(k.clone())
+                        }
+                        else
+                        {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for k in art_keys
+        {
+            art_map_drop(&mut pj, &k);
+            dropped = true;
+        }
+
+        // scriptMap: keys whose entry.uuid == uuid.
+        let script_keys: Vec<String> = pj
+            .get("scriptMap")
+            .and_then(|m| m.as_object())
+            .map(|obj|
+            {
+                obj.iter()
+                    .filter_map(|(k, v)|
+                    {
+                        let hit = v
+                            .get("uuid")
+                            .and_then(|u| u.as_str())
+                            == Some(uuid.as_str());
+                        if hit { Some(k.clone()) } else { None }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for k in script_keys
+        {
+            script_map_drop(&mut pj, &k);
+            dropped = true;
+        }
+    }
+
+    if dropped
+    {
+        if let Err(e) = write_project_json(project_dir, &pj)
+        {
+            eprintln!(
+                "[mangaart_sweep_empty] write project.json failed: {}",
+                e,
+            );
+        }
+    }
+
+    Ok(count)
 }
 
 // ---------------------------------------------------------------------------

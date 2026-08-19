@@ -5,12 +5,12 @@
  *
  *   - CodeMirror (Source / Text editor modes) — decorations painted
  *     directly on the EditorView via `../editor/find-engine.js`.
- *   - Visual Editor (`<mps-visual-editor>`) — `.panel-card` rectangle
+ *   - Easy Editor (`<mps-easy-editor>`) — `.panel-card` rectangle
  *     highlights + native input selection via
- *     `../components/visual-editor-find.js`.
+ *     `../components/easy-editor-find.js`.
  *
  * Target selection at `openFind()` time:
- *   1. If `<mps-visual-editor>` is present and visible (display !== "none"),
+ *   1. If `<mps-easy-editor>` is present and visible (display !== "none"),
  *      the visual engine wins.
  *   2. Otherwise the currently-focused CM6 view (via focused-view-registry)
  *      is bound.
@@ -27,7 +27,7 @@ import {
     runFindOn as veRunFindOn,
     step as veStep,
     clearFind as veClearFind
-} from "../components/visual-editor-find.js";
+} from "../components/easy-editor-find.js";
 
 /** @type {HTMLElement | null} */
 let widgetEl = null;
@@ -47,7 +47,7 @@ let lastQuery = "";
 function findVisualEditor()
 {
     const el = /** @type {HTMLElement | null} */ (
-        document.querySelector("mps-visual-editor")
+        document.querySelector("mps-easy-editor")
     );
     if (!el) return null;
     if (el.style.display === "none") return null;

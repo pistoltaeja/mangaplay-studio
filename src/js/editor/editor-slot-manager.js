@@ -17,6 +17,7 @@
 
 import { buildEditor } from "./mps-editor.js";
 import { formatForFilename } from "./lang-registry.js";
+import { setFocused, unregisterView } from "./focused-view-registry.js";
 
 /**
  * @typedef {object} EditorSlot
@@ -176,6 +177,7 @@ export class EditorSlotManager
         {
             // Different format: destroy the view and rebuild in the same
             // container so the language extensions reflect the new format.
+            unregisterView(slot.view);
             slot.view.destroy();
             const view = buildEditor(slot.container, {
                 doc: text,
@@ -253,11 +255,12 @@ export class EditorSlotManager
         next.lastActivatedAt = Date.now();
         this.activeTabId = tabId;
 
-        // Mirror the active view onto the legacy global so editor-clipboard /
-        // context menu / existing smoke tests that query `__mpsActiveEditorView`
-        // continue to see the current slot's view, not the most-recently-mounted
-        // one.
-        /** @type {any} */ (window).__mpsActiveEditorView = next.view;
+        // Publish the active view via the focused-view registry. The registry
+        // mirror-writes `window.__mpsActiveEditorView` so editor-clipboard /
+        // context menu / existing smoke tests that query the legacy global
+        // continue to see the current slot's view, not the most-recently-
+        // mounted one.
+        setFocused(next.view);
 
         // CM6 measure code is lazy — a view in display:none has a zero rect.
         // Defer the remeasure to after layout has flushed.
@@ -295,6 +298,8 @@ export class EditorSlotManager
         const wasActive = this.activeTabId === tabId;
 
         // Tear down view + container.
+        try { unregisterView(slot.view); }
+        catch (_e) { /* defensive */ }
         try { slot.view.destroy(); }
         catch (_e) { /* defensive: already destroyed */ }
         if (slot.container.parentNode)

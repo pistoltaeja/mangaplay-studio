@@ -1,6 +1,7 @@
 //! Tauri commands for the per-script Google Slides link registry.
 //!
-//! Three commands: `slides_link_get`, `slides_link_save`, `slides_link_drop`.
+//! Commands: `slides_link_get`, `slides_link_save`, `slides_link_drop`,
+//! `slides_link_drop_scoped`.
 //! JS callers pass `script_rel_path` — the UUID lookup + persistence happens
 //! Rust-side so the JS layer never sees the internal UUID.
 //!
@@ -8,8 +9,10 @@
 //! mutex from [`ProjectJsonLocks`] so a JS-side save can't race a
 //! script-rename or a delete-cleanup.
 
+use serde::Serialize;
 use std::path::Path;
 
+use crate::commands::slides_validation::{validate_slug, validate_opaque};
 use crate::fs_helpers::chrono_iso_now;
 use crate::locks::ProjectJsonLocks;
 use crate::script_map::{script_map_get, script_map_get_or_mint, script_map_get_with_legacy_pullforward};
@@ -24,21 +27,9 @@ use crate::{read_project_json, write_project_json};
 
 // ── Validation ──────────────────────────────────────────────────────────
 
-/// Reject presentation IDs that are empty, over-long, or contain path or
-/// null characters. Defence in depth — the ID originates from a
-/// user-pasted URL parsed on the JS side.
 fn validate_presentation_id(id: &str) -> Result<(), String>
 {
-    if id.is_empty()
-        || id.len() > 200
-        || id.contains('/')
-        || id.contains('\\')
-        || id.contains("..")
-        || id.contains('\0')
-    {
-        return Err("bad-presentation-id".into());
-    }
-    Ok(())
+    validate_slug(id, "bad-presentation-id", 200)
 }
 
 fn validate_prepare_status(status: &str) -> Result<(), String>
@@ -52,20 +43,18 @@ fn validate_prepare_status(status: &str) -> Result<(), String>
 
 // ── Commands ────────────────────────────────────────────────────────────
 
-/// Reject folder UUIDs that are empty, over-long, or contain path or null
-/// characters. Same defence pattern as `validate_presentation_id`.
 fn validate_folder_uuid(uuid: &str) -> Result<(), String>
 {
-    if uuid.is_empty()
-        || uuid.len() > 200
-        || uuid.contains('/')
-        || uuid.contains('\\')
-        || uuid.contains("..")
-        || uuid.contains('\0')
-    {
-        return Err("bad-folder-uuid".into());
-    }
-    Ok(())
+    validate_slug(uuid, "bad-folder-uuid", 200)
+}
+
+/// Validate a folder UUID and format its discriminated `slidesLinks` key.
+/// Folder-scoped links live under `folder:<uuid>`; file-scoped links use a
+/// bare script UUID.
+fn folder_key(f: &str) -> Result<String, String>
+{
+    validate_folder_uuid(f)?;
+    Ok(format!("folder:{f}"))
 }
 
 /// Return the `SlidesLink` for `script_rel_path`, or `None` if the script
@@ -105,10 +94,10 @@ pub fn slides_link_get_impl(
     // Folder scope — try `folder:<uuid>` key first.
     if let Some(f) = folder_uuid
     {
-        validate_folder_uuid(f)?;
-        let key = format!("folder:{f}");
-        if let Some(link) = pure_slides_link_get(&pj, &key)
+        let key = folder_key(f)?;
+        if let Some(mut link) = pure_slides_link_get(&pj, &key)
         {
+            link.scope = Some("folder".into());
             return Ok(Some(link));
         }
     }
@@ -127,7 +116,11 @@ pub fn slides_link_get_impl(
         write_project_json(project_dir, &pj)?;
     }
 
-    Ok(pure_slides_link_get(&pj, &uuid))
+    Ok(pure_slides_link_get(&pj, &uuid).map(|mut link|
+    {
+        link.scope = Some("file".into());
+        link
+    }))
 }
 
 /// Persist a `SlidesLink` for `script_rel_path`. Mints a script UUID if
@@ -142,6 +135,7 @@ pub async fn slides_link_save(
     presentation_id: String,
     prepare_status: String,
     folder_uuid: Option<String>,
+    revision_id: Option<String>,
 ) -> Result<SlidesLink, String>
 {
     slides_link_save_impl(
@@ -151,6 +145,7 @@ pub async fn slides_link_save(
         &presentation_id,
         &prepare_status,
         folder_uuid.as_deref(),
+        revision_id.as_deref(),
     )
 }
 
@@ -161,10 +156,15 @@ pub fn slides_link_save_impl(
     presentation_id: &str,
     prepare_status: &str,
     folder_uuid: Option<&str>,
+    revision_id: Option<&str>,
 ) -> Result<SlidesLink, String>
 {
     validate_presentation_id(presentation_id)?;
     validate_prepare_status(prepare_status)?;
+    if let Some(r) = revision_id
+    {
+        validate_opaque(r, "bad-revision-id", 200)?;
+    }
 
     let project_dir = Path::new(project_path);
     let lock = locks.lock_for(project_dir);
@@ -177,11 +177,7 @@ pub fn slides_link_save_impl(
     // mint entirely — folders are their own registry entities.
     let key = match folder_uuid
     {
-        Some(f) =>
-        {
-            validate_folder_uuid(f)?;
-            format!("folder:{f}")
-        }
+        Some(f) => folder_key(f)?,
         None =>
         {
             let (uuid, _minted) = script_map_get_or_mint(&mut pj, script_rel_path);
@@ -190,10 +186,11 @@ pub fn slides_link_save_impl(
     };
 
     let now = chrono_iso_now();
-    let linked_at = match pure_slides_link_get(&pj, &key)
+    let existing = pure_slides_link_get(&pj, &key);
+    let linked_at = match &existing
     {
         // Overwrite: preserve the original linkedAt.
-        Some(existing) => existing.linked_at,
+        Some(e) => e.linked_at.clone(),
         None => now.clone(),
     };
 
@@ -203,6 +200,12 @@ pub fn slides_link_save_impl(
         linked_at,
         last_prepared_at: now,
         last_prepare_status: prepare_status.to_string(),
+        last_known_revision_id: match revision_id
+        {
+            Some(r) => Some(r.to_string()),
+            None => existing.as_ref().and_then(|e| e.last_known_revision_id.clone()),
+        },
+        scope: None,
     };
 
     slides_link_set(&mut pj, &key, &entry);
@@ -217,6 +220,10 @@ pub fn slides_link_save_impl(
 ///
 /// Read-only UUID lookup (no legacy pullforward) — if the script has no
 /// UUID at all, there can't be a link entry either.
+///
+/// Registered but currently unused from bundled JS — reserved for a future
+/// "Unlink Slides deck" UI action. Wired now so the JS side can adopt
+/// without a Rust release. Revisit and remove if left unused indefinitely.
 #[tauri::command]
 pub async fn slides_link_drop(
     locks: tauri::State<'_, ProjectJsonLocks>,
@@ -242,11 +249,7 @@ pub fn slides_link_drop_impl(
     let mut pj = read_project_json(project_dir)?;
     let key = match folder_uuid
     {
-        Some(f) =>
-        {
-            validate_folder_uuid(f)?;
-            format!("folder:{f}")
-        }
+        Some(f) => folder_key(f)?,
         None =>
         {
             match script_map_get(&pj, script_rel_path)
@@ -265,212 +268,107 @@ pub fn slides_link_drop_impl(
     Ok(true)
 }
 
+// ── Scoped drop ─────────────────────────────────────────────────────────
+
+/// Result of a scope-aware drop. `scope` reports which registry entry
+/// (or entries) were removed (or `"none"` if there was nothing to remove).
+#[derive(Serialize, Debug, PartialEq, Eq)]
+pub struct SlidesLinkDropScopedResult
+{
+    /// `"both"`, `"folder"`, `"file"`, or `"none"`.
+    pub scope: &'static str,
+    /// `true` when at least one entry was actually removed.
+    pub cleared: bool,
+}
+
+/// Scope-aware unlink.
+///
+/// Drops BOTH scopes when both exist so a coexisting file-scope entry
+/// can't silently resurface after a folder-scope unlink. Behaviour:
+/// 1. If `folder_uuid` is Some, drop the folder-scoped entry if present.
+/// 2. Also drop the file-scoped entry for `script_rel_path` if present.
+/// 3. Report `scope`:
+///    - `"both"`  — folder AND file entries were both present and dropped.
+///    - `"folder"` — only folder was present.
+///    - `"file"`  — only file was present (also the sole outcome when
+///                 `folder_uuid` is None and a file entry exists).
+///    - `"none"`  — neither was present. `cleared: false`.
+///
+/// The single-entry `slides_link_drop` command remains for callers that
+/// know exactly which scope they mean; this variant is for the JS "Unlink"
+/// action where the UI wants "remove whichever link(s) are in effect".
+#[tauri::command]
+pub async fn slides_link_drop_scoped(
+    locks: tauri::State<'_, ProjectJsonLocks>,
+    project_path: String,
+    script_rel_path: String,
+    folder_uuid: Option<String>,
+) -> Result<SlidesLinkDropScopedResult, String>
+{
+    slides_link_drop_scoped_impl(
+        &locks,
+        &project_path,
+        &script_rel_path,
+        folder_uuid.as_deref(),
+    )
+}
+
+pub fn slides_link_drop_scoped_impl(
+    locks: &ProjectJsonLocks,
+    project_path: &str,
+    script_rel_path: &str,
+    folder_uuid: Option<&str>,
+) -> Result<SlidesLinkDropScopedResult, String>
+{
+    let project_dir = Path::new(project_path);
+    let lock = locks.lock_for(project_dir);
+    let _guard = lock.lock().expect("project-json mutex poisoned");
+
+    let mut pj = read_project_json(project_dir)?;
+
+    let mut folder_dropped = false;
+    let mut file_dropped = false;
+
+    // Folder scope — drop if present.
+    if let Some(f) = folder_uuid
+    {
+        let key = folder_key(f)?;
+        if slides_link_has(&pj, &key)
+        {
+            pure_slides_link_drop(&mut pj, &key);
+            folder_dropped = true;
+        }
+    }
+
+    // File scope — drop if present, regardless of whether folder dropped.
+    if let Some(uuid) = script_map_get(&pj, script_rel_path)
+    {
+        if slides_link_has(&pj, &uuid)
+        {
+            pure_slides_link_drop(&mut pj, &uuid);
+            file_dropped = true;
+        }
+    }
+
+    let scope = match (folder_dropped, file_dropped)
+    {
+        (true, true)   => "both",
+        (true, false)  => "folder",
+        (false, true)  => "file",
+        (false, false) => "none",
+    };
+    let cleared = folder_dropped || file_dropped;
+
+    if cleared
+    {
+        write_project_json(project_dir, &pj)?;
+    }
+
+    Ok(SlidesLinkDropScopedResult { scope, cleared })
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests
-{
-    use super::*;
-    use tempfile::TempDir;
-
-    use crate::commands::project::app_dir;
-
-    fn make_project() -> TempDir
-    {
-        let td = TempDir::new().unwrap();
-        // Scaffold _mangaplaystudio/ + a minimal project.json.
-        std::fs::create_dir_all(app_dir(td.path())).unwrap();
-        let pj = serde_json::json!({
-            "id": "test-project",
-        });
-        let path = crate::commands::project_mutations::read_project_json(td.path())
-            .err(); // sanity: ensure not present yet
-        let _ = path;
-        crate::commands::project_mutations::write_project_json(td.path(), &pj).unwrap();
-        td
-    }
-
-    fn locks() -> ProjectJsonLocks
-    {
-        ProjectJsonLocks::new()
-    }
-
-    #[test]
-    fn get_when_no_scriptmap_entry_returns_none()
-    {
-        let td = make_project();
-        let l = locks();
-        let got = slides_link_get_impl(
-            &l,
-            td.path().to_str().unwrap(),
-            "foo.mangaplay",
-            None,
-        )
-        .unwrap();
-        assert!(got.is_none());
-    }
-
-    #[test]
-    fn save_mints_uuid_and_get_returns_entry()
-    {
-        let td = make_project();
-        let l = locks();
-        let pp = td.path().to_str().unwrap();
-        let rel = "foo.mangaplay";
-
-        let saved = slides_link_save_impl(&l, pp, rel, "1PqR", "clean", None).unwrap();
-        assert_eq!(saved.presentation_id, "1PqR");
-        assert_eq!(saved.last_prepare_status, "clean");
-        assert!(!saved.linked_at.is_empty());
-        assert_eq!(saved.linked_at, saved.last_prepared_at);
-
-        let got = slides_link_get_impl(&l, pp, rel, None).unwrap().expect("entry");
-        assert_eq!(got.presentation_id, "1PqR");
-        assert_eq!(got.linked_at, saved.linked_at);
-    }
-
-    #[test]
-    fn save_twice_preserves_linked_at_updates_prepared_at()
-    {
-        let td = make_project();
-        let l = locks();
-        let pp = td.path().to_str().unwrap();
-        let rel = "foo.mangaplay";
-
-        let first = slides_link_save_impl(&l, pp, rel, "1PqR", "clean", None).unwrap();
-        // chrono_iso_now() has sub-second resolution — ensure the second
-        // call resolves to a distinct timestamp.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        let second = slides_link_save_impl(
-            &l,
-            pp,
-            rel,
-            "1PqR",
-            "with-warnings",
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(second.linked_at, first.linked_at, "linkedAt is sticky");
-        assert_ne!(second.last_prepared_at, first.last_prepared_at);
-        assert_eq!(second.last_prepare_status, "with-warnings");
-    }
-
-    #[test]
-    fn bad_presentation_id_rejected()
-    {
-        let td = make_project();
-        let l = locks();
-        let pp = td.path().to_str().unwrap();
-
-        let e = slides_link_save_impl(&l, pp, "foo.mangaplay", "", "clean", None).unwrap_err();
-        assert_eq!(e, "bad-presentation-id");
-
-        let e = slides_link_save_impl(&l, pp, "foo.mangaplay", "../evil", "clean", None).unwrap_err();
-        assert_eq!(e, "bad-presentation-id");
-
-        let e = slides_link_save_impl(&l, pp, "foo.mangaplay", "a/b", "clean", None).unwrap_err();
-        assert_eq!(e, "bad-presentation-id");
-    }
-
-    #[test]
-    fn bad_prepare_status_rejected()
-    {
-        let td = make_project();
-        let l = locks();
-        let pp = td.path().to_str().unwrap();
-
-        let e = slides_link_save_impl(&l, pp, "foo.mangaplay", "1PqR", "nonsense", None).unwrap_err();
-        assert_eq!(e, "bad-status");
-    }
-
-    #[test]
-    fn drop_after_save_returns_true_then_false()
-    {
-        let td = make_project();
-        let l = locks();
-        let pp = td.path().to_str().unwrap();
-        let rel = "foo.mangaplay";
-
-        slides_link_save_impl(&l, pp, rel, "1PqR", "clean", None).unwrap();
-        let first = slides_link_drop_impl(&l, pp, rel, None).unwrap();
-        assert!(first);
-        let second = slides_link_drop_impl(&l, pp, rel, None).unwrap();
-        assert!(!second);
-
-        // Confirm get returns None post-drop.
-        let got = slides_link_get_impl(&l, pp, rel, None).unwrap();
-        assert!(got.is_none());
-    }
-
-    #[test]
-    fn folder_scope_save_get_drop_uses_folder_key()
-    {
-        let td = make_project();
-        let l = locks();
-        let pp = td.path().to_str().unwrap();
-        let rel = "Chapter_1/Act_V.mangaplay";
-        let folder = "folder-uuid-123";
-
-        let saved = slides_link_save_impl(
-            &l, pp, rel, "PRES-XYZ", "clean", Some(folder),
-        ).unwrap();
-        assert_eq!(saved.presentation_id, "PRES-XYZ");
-
-        // Reading with the same folder_uuid returns the folder-scoped entry.
-        let got = slides_link_get_impl(&l, pp, rel, Some(folder))
-            .unwrap()
-            .expect("folder entry");
-        assert_eq!(got.presentation_id, "PRES-XYZ");
-
-        // Reading without a folder scope falls back to the file lookup —
-        // there's no file entry, so None.
-        let no_file = slides_link_get_impl(&l, pp, rel, None).unwrap();
-        assert!(no_file.is_none(), "file scope shouldn't see folder-scoped entry");
-
-        // Drop with folder scope clears the folder-scoped entry.
-        let dropped = slides_link_drop_impl(&l, pp, rel, Some(folder)).unwrap();
-        assert!(dropped);
-        let after = slides_link_get_impl(&l, pp, rel, Some(folder)).unwrap();
-        assert!(after.is_none());
-    }
-
-    #[test]
-    fn folder_scope_and_file_scope_coexist()
-    {
-        let td = make_project();
-        let l = locks();
-        let pp = td.path().to_str().unwrap();
-        let rel = "Chapter_1/Act_V.mangaplay";
-        let folder = "folder-uuid-abc";
-
-        // Save a file-scoped entry first, then a folder-scoped one against
-        // the same relPath. Both must be independently retrievable.
-        slides_link_save_impl(&l, pp, rel, "FILE-DECK", "clean", None).unwrap();
-        slides_link_save_impl(&l, pp, rel, "FOLDER-DECK", "clean", Some(folder)).unwrap();
-
-        let folder_link = slides_link_get_impl(&l, pp, rel, Some(folder)).unwrap().unwrap();
-        assert_eq!(folder_link.presentation_id, "FOLDER-DECK");
-
-        let file_link = slides_link_get_impl(&l, pp, rel, None).unwrap().unwrap();
-        assert_eq!(file_link.presentation_id, "FILE-DECK");
-    }
-
-    #[test]
-    fn bad_folder_uuid_rejected()
-    {
-        let td = make_project();
-        let l = locks();
-        let pp = td.path().to_str().unwrap();
-
-        let e = slides_link_save_impl(
-            &l, pp, "foo.mangaplay", "1PqR", "clean", Some(""),
-        ).unwrap_err();
-        assert_eq!(e, "bad-folder-uuid");
-
-        let e = slides_link_save_impl(
-            &l, pp, "foo.mangaplay", "1PqR", "clean", Some("../evil"),
-        ).unwrap_err();
-        assert_eq!(e, "bad-folder-uuid");
-    }
-}
+#[path = "slides_link_tests.rs"]
+mod tests;

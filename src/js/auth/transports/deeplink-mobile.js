@@ -136,7 +136,7 @@ const transport = {
             // launch primitive on iOS will break sign-in for users who are
             // already signed into Google in Safari (they'll be forced to
             // re-enter credentials, defeating the whole indefinite-session
-            // promise from TODO/AuthRefreshToken).
+            // promise of the long-lived-session model).
             //
             // Refresh token grants (POST /v2/oauth/refresh) do NOT need a
             // browser at all — they're just a JSON POST. So only the

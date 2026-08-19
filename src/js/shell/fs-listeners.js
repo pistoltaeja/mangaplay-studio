@@ -6,6 +6,96 @@ import { showBanner } from "../boot/toast.js";
 import { getBroker } from "../project/active-script-broker.js";
 import { registryListTree } from "../adapters/tauri-storage.js";
 import { refreshExplorer, consumeSelfChange, peekSelfChange } from "./explorer.js";
+import { getActiveAggregate } from "../editor/aggregate-view.js";
+import { confirmModal } from "../modals/confirm-modal.js";
+
+// ── aggregate-view fs-event fan-out ──────────────────────────────────────
+//
+// When an aggregate is mounted, fs-listeners forwards folder-scoped events
+// (rename/move/delete/create + modified-with-buffer) into the handle.
+// Modified events on a file with pending buffer edits fire an interactive
+// prompt (Keep buffer / Reload from disk). Prompt state is guarded per
+// fileUuid to avoid stacking modals on burst events.
+//
+// Debounce: fs bursts (atomic-write rename → deleted+created+modified)
+// arrive in-order; we coalesce per-uuid via a 100ms trailing timer so the
+// aggregate handle sees at most one call per uuid per burst window.
+
+/** @type {Map<string, number>} */
+const aggregateFsDebounce = new Map();
+
+/** @type {Set<string>} */
+const reconcileInFlight = new Set();
+
+/**
+ * Fire-and-forget: schedule a debounced dispatch of `event` into the
+ * active aggregate. Coalesced by uuid so 8 events for the same file
+ * within 100ms produce one handler call.
+ * @param {import("../editor/aggregate-view.js").FsChangeEvent} event
+ */
+function scheduleAggregateFsChange(event)
+{
+    const active = getActiveAggregate();
+    if (!active) return;
+    const key = event.uuid || event.newPath || event.oldPath || String(Math.random());
+    const existing = aggregateFsDebounce.get(key);
+    if (existing !== undefined)
+    {
+        clearTimeout(existing);
+    }
+    const handle = setTimeout(async () =>
+    {
+        aggregateFsDebounce.delete(key);
+        const stillActive = getActiveAggregate();
+        if (!stillActive) return;
+        try { await stillActive.onFsChange(event); }
+        catch (e) { console.warn("[fs-listeners] aggregate.onFsChange threw:", e); }
+    }, 100);
+    aggregateFsDebounce.set(key, /** @type {any} */ (handle));
+}
+
+/**
+ * If the aggregate has a mounted view for `fileUuid` AND that view has
+ * unsaved edits, prompt the user (Keep buffer / Reload). Otherwise treat
+ * the modification as a silent buffer-reload — the CM6 view has no dirty
+ * state to lose. Guarded per uuid to prevent modal-stacking on bursts.
+ * @param {string} fileUuid
+ */
+async function promptReconcileIfNeeded(fileUuid)
+{
+    const active = getActiveAggregate();
+    if (!active) return;
+    if (!active.isFileMounted(fileUuid)) return;
+    if (reconcileInFlight.has(fileUuid)) return;
+    reconcileInFlight.add(fileUuid);
+    try
+    {
+        if (active.hasUnsavedBufferForFile(fileUuid))
+        {
+            // Modal: block until user picks. English literals for now —
+            // adding 4 new keys × 14 locales for one prompt is out of
+            // scope for Round B; migrate when the locale bundle grows.
+            const reload = await confirmModal({
+                title: "External change detected",
+                body: "This file changed on disk while you had unsaved edits. Reload from disk (discards your edits) or keep your buffer?",
+                confirm: "Reload from disk",
+                cancel: "Keep buffer",
+                danger: true,
+            });
+            await active.reconcileExternal(fileUuid, reload ? "reload" : "keep");
+        }
+        else
+        {
+            // Silent reload — nothing to conflict.
+            await active.reconcileExternal(fileUuid, "reload");
+        }
+    }
+    catch (e) { console.warn("[fs-listeners] reconcile prompt threw:", e); }
+    finally
+    {
+        reconcileInFlight.delete(fileUuid);
+    }
+}
 
 /**
  * Wire the cross-window `project-fs-changed` listener. Each Tauri window
@@ -155,10 +245,10 @@ export async function wireProjectFsChangedListener()
 
 /**
  * UUID-identity sibling of `wireProjectFsChangedListener`. Runs in parallel
- * with the legacy path-based listener during Part 4c of the UUID file
- * registry migration; the legacy listener is removed in 4d once the broker
- * migrates off paths. Both listeners peek — but do not consume — the same
- * `__mpsSelfChanges` TTL marks so neither races the other's cleanup.
+ * with the legacy path-based listener during the UUID file registry migration;
+ * the legacy listener is removed once the broker migrates off paths. Both
+ * listeners peek — but do not consume — the same `__mpsSelfChanges` TTL marks
+ * so neither races the other's cleanup.
  */
 export async function wireRegistryFsChangedListener()
 {
@@ -196,6 +286,31 @@ export async function wireRegistryFsChangedListener()
 
                 const broker = getBroker();
                 const variant = change.change;
+
+                // Fan the event into the active aggregate BEFORE the
+                // legacy variant handlers (they surface banners + close
+                // the tab, so ordering matters — the aggregate must see
+                // the event on its terms first).
+                if (change.uuid)
+                {
+                    const mapped = variant === "renamed" || variant === "moved" || variant === "deleted" || variant === "created"
+                        ? variant : null;
+                    if (mapped)
+                    {
+                        scheduleAggregateFsChange({
+                            type: mapped,
+                            uuid: change.uuid,
+                            oldPath: derivedPath,
+                            newPath: null,
+                        });
+                    }
+                    else if (variant === "modified")
+                    {
+                        // Modified with buffer — prompt path. Fire-and-forget;
+                        // the guard set makes this idempotent per-uuid.
+                        void promptReconcileIfNeeded(change.uuid);
+                    }
+                }
 
                 if (variant === "renamed")
                 {

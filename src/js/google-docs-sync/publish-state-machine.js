@@ -2,8 +2,7 @@
 /**
  * publish-state-machine.js — drives the three-panel Publish modal.
  *
- * Per TODO/mangaplay-studio-google-docs-sync.md §3a "Implementation
- * skeleton". The machine is pure orchestration — every side effect (every
+ * Pure orchestration state machine — every side effect (every
  * Drive / Docs API call) is injected as a worker function. That lets the
  * tests run with no network and no Tauri.
  *
@@ -244,19 +243,14 @@ export class PublishStateMachine
             let lastKnownRevisionId = null;
             if (isCollaborate && this.workers.fetchHeadRevisionId)
             {
-                console.warn("[mps:auth:TRACE] PublishStateMachine → collaborate: fetching headRevisionId post-publish");
                 try
                 {
                     lastKnownRevisionId = await this.workers.fetchHeadRevisionId({
                         token: this.token,
                         docId
                     });
-                    console.warn("[mps:auth:TRACE] PublishStateMachine → fetchHeadRevisionId returned=", lastKnownRevisionId);
                 }
-                catch (e)
-                {
-                    console.warn("[mps:auth:TRACE] PublishStateMachine → fetchHeadRevisionId THREW", e);
-                }
+                catch (_) { /* best-effort — lastKnownRevisionId stays null */ }
             }
 
             if (isCollaborate
@@ -264,16 +258,6 @@ export class PublishStateMachine
                 && this.values.projectPath
                 && this.values.scriptRelPath)
             {
-                console.warn("[mps:auth:TRACE] PublishStateMachine → persistCacheEntry writing",
-                    {
-                        projectPath: this.values.projectPath,
-                        scriptRelPath: this.values.scriptRelPath,
-                        docId,
-                        rootTabId: !!rootTabId,
-                        screenplayTabId: !!screenplayTabId,
-                        lastKnownRevisionId,
-                        lastKnownLockToken: lockResult && lockResult.lockToken ? "present" : "null"
-                    });
                 try
                 {
                     await this.workers.persistCacheEntry({
@@ -292,25 +276,8 @@ export class PublishStateMachine
                             format: this.values.format
                         }
                     });
-                    console.warn("[mps:auth:TRACE] PublishStateMachine → persistCacheEntry succeeded");
                 }
-                catch (e)
-                {
-                    console.warn("[mps:auth:TRACE] PublishStateMachine → persistCacheEntry THREW", e);
-                }
-            }
-            else if (!isCollaborate)
-            {
-                console.warn("[mps:auth:TRACE] PublishStateMachine → intent=publish, skipping cache write");
-            }
-            else
-            {
-                console.warn("[mps:auth:TRACE] PublishStateMachine → collab cache write SKIPPED — missing worker/projectPath/scriptRelPath",
-                    {
-                        hasWorker: !!this.workers.persistCacheEntry,
-                        hasProjectPath: !!this.values.projectPath,
-                        hasScriptRelPath: !!this.values.scriptRelPath
-                    });
+                catch (_) { /* best-effort */ }
             }
 
             // Post-publish log entry — best-effort, both intents. A failure

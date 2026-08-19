@@ -9,7 +9,7 @@
  * modal only has to build its own dialog body.
  */
 
-/** @typedef {{ resolve: (v: any) => void, cancelValue: any, onKeydown?: (ev: KeyboardEvent) => void }} ModalState */
+/** @typedef {{ resolve: (v: any) => void, cancelValue: any, onKeydown?: (ev: KeyboardEvent) => void, busy?: boolean }} ModalState */
 
 /** @type {{ root: HTMLElement, state: ModalState } | null} */
 let active = null;
@@ -44,7 +44,7 @@ export function openModal(opts)
         backdrop.className = `settings-backdrop ${opts.variantClass}`;
         backdrop.setAttribute("role", "presentation");
 
-        const state = /** @type {ModalState} */ ({ resolve, cancelValue: opts.cancelValue });
+        const state = /** @type {ModalState} */ ({ resolve, cancelValue: opts.cancelValue, busy: false });
         active = { root: backdrop, state };
 
         /** @type {(v: any) => void} */
@@ -58,16 +58,25 @@ export function openModal(opts)
         const cancel = () => resolveWith(opts.cancelValue);
 
         // Backdrop click → cancel (clicks inside the dialog don't bubble cancel).
+        // Busy modals swallow the click so an accidental backdrop-tap during an
+        // in-flight operation doesn't abort it.
         backdrop.addEventListener("click", (ev) =>
         {
+            if (state.busy) return;
             if (ev.target === backdrop) cancel();
         });
 
         // Esc → cancel. Stored on state so teardown removes it cleanly.
+        // Busy modals ignore Escape entirely — non-Escape keys still forward
+        // to the caller-supplied onKeydown so busy mode doesn't wedge input.
         /** @type {(ev: KeyboardEvent) => void} */
         const onKey = (ev) =>
         {
-            if (ev.key === "Escape") cancel();
+            if (ev.key === "Escape")
+            {
+                if (state.busy) return;
+                cancel();
+            }
             else if (state.onKeydown) state.onKeydown(ev);
         };
         document.addEventListener("keydown", onKey);
@@ -93,6 +102,20 @@ export function openModal(opts)
 export function setModalKeydown(fn)
 {
     if (active) active.state.onKeydown = fn;
+}
+
+/**
+ * Toggle busy mode on the active modal. While busy, backdrop-clicks and
+ * Escape are ignored — the caller must provide its own in-dialog exit.
+ * Adds/removes an `is-busy` class on the backdrop for CSS hooks.
+ *
+ * @param {boolean} busy
+ */
+export function setModalBusy(busy)
+{
+    if (!active) return;
+    active.state.busy = !!busy;
+    active.root.classList.toggle("is-busy", !!busy);
 }
 
 function teardown()

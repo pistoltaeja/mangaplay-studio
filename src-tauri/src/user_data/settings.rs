@@ -23,10 +23,13 @@ fn default_user_settings() -> serde_json::Value
         "lastProjectPath": serde_json::Value::Null,
         "onboardingCompleted": false,
         "lastSettingsTab": "general",
+        "lastMobileExplorerTab": "files",
+        "mobileExplorerSwipeHintShown": false,
         "editorMode": serde_json::Value::Null,
         "editorTabBehavior": serde_json::Value::Null,
         "spellcheckEnabled": true,
         "spellcheckLanguage": serde_json::Value::Null,
+        "personalDictionary": serde_json::json!([]),
         "googleProfile": serde_json::Value::Null,
         "googleScopeVersion": 0,
         "projectSessions": serde_json::json!({})
@@ -43,10 +46,13 @@ const USER_SETTINGS_KNOWN: &[&str] = &[
     "lastProjectPath",
     "onboardingCompleted",
     "lastSettingsTab",
+    "lastMobileExplorerTab",
+    "mobileExplorerSwipeHintShown",
     "editorMode",
     "editorTabBehavior",
     "spellcheckEnabled",
     "spellcheckLanguage",
+    "personalDictionary",
     "googleProfile",
     "googleScopeVersion",
     "projectSessions",
@@ -224,6 +230,46 @@ pub fn user_settings_save_impl(
 {
     let _g = SETTINGS_WRITE_LOCK.lock().map_err(|e| e.to_string())?;
     user_settings_write_unlocked(dir, partial)
+}
+
+/// Remove `projectSessions[id]` from user-settings.json.
+///
+/// The shallow-merge `user_settings_save_impl` path can only add / replace
+/// per-uuid entries — it has no "delete" primitive. Delete-project flows
+/// need to actually drop the entry, so this helper does a direct
+/// read-modify-atomic-write while holding `SETTINGS_WRITE_LOCK`.
+///
+/// Idempotent: missing file, missing `projectSessions` map, or missing `id`
+/// are all no-ops that return `Ok(())`.
+pub fn drop_project_session_impl(
+    dir: &PathBuf,
+    id: &str,
+) -> Result<(), String>
+{
+    let _g = SETTINGS_WRITE_LOCK.lock().map_err(|e| e.to_string())?;
+    let path = user_settings_path(dir);
+    if !path.exists()
+    {
+        return Ok(());
+    }
+    let body = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut value: serde_json::Value = match serde_json::from_str(&body)
+    {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+    let removed = value
+        .get_mut("projectSessions")
+        .and_then(|v| v.as_object_mut())
+        .and_then(|m| m.remove(id))
+        .is_some();
+    if !removed
+    {
+        return Ok(());
+    }
+    let body = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+    let path_str = path.to_str().ok_or("non-utf8 path")?;
+    atomic_write_impl(path_str, &body)
 }
 
 #[tauri::command]

@@ -1,16 +1,13 @@
 //! Structured error taxonomy for UUID-boundary Tauri commands.
 //!
-//! See [`TODO/uuid-file-registry.md`](../../../../TODO/uuid-file-registry.md)
-//! Part 3 — Error taxonomy additions.
-//!
 //! `#[tauri::command]` handlers ultimately return `Result<T, String>` — the
 //! JSON marshalling of a rich error type isn't automatic. To keep the JS
 //! side single-parser, we serialise [`FsErr`] to JSON and prefix it with the
 //! `"fs-err:"` marker so the JS boundary can `startsWith("fs-err:")` /
 //! `JSON.parse(err.slice(7))` without ambiguity against legacy string errors.
 //!
-//! `SafGrantRevoked` (Android) is intentionally NOT in this enum yet — see
-//! Part 6 of the plan.
+//! `SafGrantRevoked` (Android) is intentionally NOT in this enum yet —
+//! it requires the Android SAF backend to land first.
 
 use serde::Serialize;
 
@@ -18,8 +15,7 @@ use serde::Serialize;
 ///
 /// The `#[serde(tag = "kind", rename_all = "kebab-case")]` attribute means
 /// each variant serialises as `{ "kind": "unknown-uuid", "uuid": "..." }`
-/// etc. Match the plan's Part 3 error list exactly — the JS side parses
-/// these values verbatim.
+/// etc. The JS side parses these values verbatim.
 ///
 /// Serde's `rename_all` on a `#[serde(tag = ...)]` enum applies to VARIANT
 /// TAGS only, not to fields inside variants. Payload fields with

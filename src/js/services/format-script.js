@@ -5,7 +5,7 @@
  * indent style is preserved across the Source → Visual → Source round
  * trip.  Without `{ indentStyle: ast.metadata.indentStyle ?? 'mixed' }`
  * the formatter normalises style B/C documents to style A on first
- * toggle (Round-trip risk #3 in TODO/mps-visual-panel-editor.md).
+ * toggle (known round-trip risk: style normalises on first toggle without this).
  */
 
 import { formatMangaplay } from '@mangaplay-studio/core';

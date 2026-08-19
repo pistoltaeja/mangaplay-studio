@@ -36,12 +36,7 @@ import {
     ForcedActionTok,
     blank,
 } from "./fountain.grammar.terms.js";
-
-function isUpper(c) { return c >= 65 && c <= 90; }
-function isLower(c) { return c >= 97 && c <= 122; }
-function isLetter(c) { return isUpper(c) || isLower(c); }
-function isDigit(c) { return c >= 48 && c <= 57; }
-function isSpace(c) { return c === 32 || c === 9; }
+import { isUpper, isLower, isLetter, isDigit, isSpace } from "./char-classes.js";
 
 /**
  * Returns true when the line is a Fountain title-page entry:

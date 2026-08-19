@@ -19,6 +19,14 @@
  *
  * Indent is measured from `.cm-content`'s padded left edge; the CSS is
  * appended to the `EditorView.theme` block in `mangaplay-highlight.js`.
+ *
+ * In Text mode the 4 leading spaces on cue/dialogue lines would otherwise
+ * render as visible whitespace before the text-indent band. A non-atomic
+ * `Decoration.mark` with class `cm-mp-indent-collapsed` is emitted over
+ * exactly those 4 chars; `mangaplay-highlight.js` sets `font-size: 0` on
+ * that class so the spaces cost zero width while remaining fully navigable
+ * (caret traversal and click-to-place are unaffected). Source Editor mode
+ * never applies that CSS so the raw spaces remain visible there.
  */
 
 import { RangeSetBuilder } from "@codemirror/state";
@@ -44,6 +52,14 @@ const cueLine = Decoration.line({ class: "cm-mp-line-cue" });
 const dialogueLine = Decoration.line({ class: "cm-mp-line-dialogue" });
 
 /**
+ * Non-atomic mark covering the 4 leading spaces of a cue or dialogue line.
+ * Rendered at zero width in Text mode (font-size:0 in mangaplay-highlight.js)
+ * so the spaces do not produce a visible gap before the text-indent band.
+ * Non-atomic = caret and mouse click traverse the range normally.
+ */
+const indentCollapsedMark = Decoration.mark({ class: "cm-mp-indent-collapsed" });
+
+/**
  * Walk visible lines, classify each indented line, emit a `Decoration.line`
  * with the cue/dialogue class.
  *
@@ -66,12 +82,18 @@ function buildIndentDecorations(view)
             {
                 if (CUE_LINE_RE.test(text))
                 {
+                    // Line deco first (zero-length at line.from, very low
+                    // startSide) then the mark — ascending order for builder.
                     builder.add(line.from, line.from, cueLine);
                 }
                 else
                 {
                     builder.add(line.from, line.from, dialogueLine);
                 }
+                // Collapse the 4 leading spaces to zero width in Text mode.
+                // Guard: INDENTED_LINE_RE already asserts a non-space char at
+                // col 4, so text.length >= 5; the slice is always safe.
+                builder.add(line.from, line.from + 4, indentCollapsedMark);
             }
             pos = line.to + 1;
             if (line.to >= state.doc.length) break;
@@ -109,6 +131,25 @@ const lineIndentPlugin = ViewPlugin.fromClass(
 );
 
 /**
+ * Copy event handler: writes `sliceDoc` text to the clipboard so the browser
+ * cannot use its visual selection (which excludes the zero-width `cm-mp-indent-
+ * collapsed` span, stripping the 4 leading spaces from cue/dialogue lines).
+ */
+const copyHandler = EditorView.domEventHandlers(
+    {
+        copy(event, view)
+        {
+            const sel = view.state.selection.main;
+            if (sel.empty) { return false; }
+            const text = view.state.sliceDoc(sel.from, sel.to);
+            event.clipboardData?.setData("text/plain", text);
+            event.preventDefault();
+            return true;
+        }
+    }
+);
+
+/**
  * Build the indent extension. Returned as an array so `lang-registry.js` can
  * spread it inline next to the other language extensions.
  *
@@ -116,5 +157,5 @@ const lineIndentPlugin = ViewPlugin.fromClass(
  */
 export function editorLineIndent()
 {
-    return [lineIndentPlugin];
+    return [lineIndentPlugin, copyHandler];
 }

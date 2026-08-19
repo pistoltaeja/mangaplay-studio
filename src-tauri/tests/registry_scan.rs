@@ -1,10 +1,9 @@
-//! Integration tests for `scan_and_reconcile`
-//! (TODO/uuid-file-registry.md — Part 3b).
+//! Integration tests for `scan_and_reconcile`.
 //!
 //! Focus: the mint/heal/tombstone cascade. The Tauri command wrapping
 //! (`registry_list_tree`) is thin plumbing over this helper.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
@@ -27,7 +26,7 @@ fn empty_registry_at(root: &Path) -> LoadedRegistry
     {
         project_uuid: Uuid::new_v4(),
         root_path: root.to_path_buf(),
-        entries: HashMap::new(),
+        entries: BTreeMap::new(),
         native_id_index: HashMap::new(),
         path_index: HashMap::new(),
         dirty: false,

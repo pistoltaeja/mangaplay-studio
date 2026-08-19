@@ -16,6 +16,7 @@ fn create_new_scaffolds_v2_layout()
     let path = project_create_new_impl(
         &tmp.path().to_string_lossy(),
         "My Comic",
+        true,
     )
     .expect("create ok");
     let root = std::path::Path::new(&path);
@@ -52,7 +53,7 @@ fn create_new_rejects_missing_parent()
 {
     let tmp = TempDir::new().expect("tempdir");
     let ghost = tmp.path().join("ghost");
-    let err = project_create_new_impl(&ghost.to_string_lossy(), "x")
+    let err = project_create_new_impl(&ghost.to_string_lossy(), "x", true)
         .expect_err("must err");
     assert!(err.contains("not a directory"), "got: {}", err);
 }

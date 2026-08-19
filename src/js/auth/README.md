@@ -2,6 +2,23 @@
 
 Cross-platform Google OAuth 2.0 + PKCE for the desktop and (future) mobile app.
 
+## Auth entry points
+
+There is **no standalone "Sign in with Google" flow** — auth is bundled
+with the two features that need it.
+
+| Entry point            | Transport        | Consent           | Identity source       |
+|------------------------|------------------|-------------------|-----------------------|
+| Publish Google Doc     | Loopback OAuth   | One-time, first-run | Drive `about.get`   |
+| Publish Google Slides Sync | Picker OAuth (via bridge) | Per-pick (Google mandates) | Drive `about.get` |
+
+The Publish Doc modal keeps its inline "Sign in" gate — that's the
+loopback OAuth entry. The Publish Slides modal has NO gate: clicking
+"Choose from Google Drive™" triggers the Picker OAuth which
+auto-authenticates on the same round-trip. Google's `trigger_onepick`
+beta requires `drive.file` to be the ONLY scope, which is why identity
+now comes from Drive rather than `/oauth2/v3/userinfo`.
+
 ## Architecture
 
 ```
@@ -46,7 +63,7 @@ Cross-platform Google OAuth 2.0 + PKCE for the desktop and (future) mobile app.
 | 3  | AWAITING_REDIRECT  | 60s Rust deadline; 65s JS timeout buffer.                |
 | 4  | PARSING_REDIRECT   | State nonce CSRF check.                                  |
 | 5  | EXCHANGING         | POST to BFF `/v2/oauth/token` w/ PKCE.                   |
-| 6  | FETCHING_PROFILE   | GET `userinfo`.                                          |
+| 6  | FETCHING_PROFILE   | GET Drive `about.get` (displayName, emailAddress, photoLink, permissionId). |
 | 7  | PERSISTING         | Keyring (access + refresh + id token) + user-settings.   |
 | 8  | AUTHENTICATED      | Steady state; refresh fires ~60s before expiry.          |
 | 9  | REFRESHING         | Refresh-token grant via BFF `/v2/oauth/refresh`.         |
@@ -135,8 +152,9 @@ gifting them long-lived credentials they have no path to store securely.
    `prompt=consent` re-forces consent every time.
 3. **No Gmail scopes** in `OAUTH_SCOPES`. Mixing `mail.google.com` or
    `gmail.*` with other scopes causes Google to revoke the refresh
-   token on any password change. Current scopes (`userinfo.profile`,
-   `drive.file`, `documents`) are mail-free.
+   token on any password change. Current scope (`drive.file`) is
+   mail-free — and `drive.file` is the ONLY scope, which is what
+   Google's Picker `trigger_onepick` beta requires.
 
 If all three hold, refresh tokens are effectively indefinite (per
 [Google's OAuth 2.0 expiration docs](https://developers.google.com/identity/protocols/oauth2#expiration)).
@@ -162,14 +180,15 @@ BEFORE the UI declares "signed in." Three outcomes:
 Network errors keep the refresh_token intact so users offline at boot
 (plane, captive portal) don't lose their session.
 
-### id_token.sub verification
+### id_token.sub verification (best-effort)
 
-On every restore AND every refresh, `_extractIdTokenSub(idToken)` parses
-the JWT payload (signature trust delegated to the BFF, which itself
-trusts Google) and confirms `sub` matches the cached profile. Mismatch
-clears storage and forces re-auth — defends against keyring tampering
-and cross-account confusion when the same machine has multiple Google
-accounts.
+Since `openid` is no longer requested (only `drive.file` is), Google
+returns `id_token: null` on every exchange and refresh. The
+`_extractIdTokenSub` verification path is gated behind
+`if (idToken != null)` and is a no-op in steady state; the code stays
+in place so a future scope change that re-introduces `openid` picks up
+the check automatically. Stable per-account identity is now
+`permissionId` from Drive `about.get`.
 
 ### Single-flight coordination
 
@@ -266,4 +285,4 @@ is truncated to 200 chars.
 
 - NO access tokens, NO refresh tokens.
 - NO email addresses, NO doc IDs, NO doc content.
-- `sub` (opaque Google per-account ID) IS allowed.
+- `permissionId` (opaque Drive per-account ID, stable) IS allowed.

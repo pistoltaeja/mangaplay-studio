@@ -1,5 +1,4 @@
-//! Durable pending-pick storage for the Google Drive Picker
-//! (`android-prereq-durable-pending` in TODO/drive-picker-desktop-mobile.md).
+//! Durable pending-pick storage for the Google Drive Picker.
 //!
 //! Android may kill the app while the user is completing the picker in
 //! the browser (memory pressure, battery optimisation). When the deep-link
@@ -44,8 +43,8 @@ pub struct PendingPick
     /// PKCE verifier — needed for the JS-side `/v2/picker/exchange` call.
     pub code_verifier: String,
     /// `mangaplay://picker-callback` on mobile; `http://127.0.0.1:<port>/...`
-    /// on desktop. Persisted so Phase 5 can validate that the incoming
-    /// deep-link's origin matches the expected return URI.
+    /// on desktop. Persisted so the resurrection path can validate that the
+    /// incoming deep-link's origin matches the expected return URI.
     pub return_uri: String,
     /// Informational — used by analytics + the JS side when resurrecting
     /// to route the picked file back into the right modal.

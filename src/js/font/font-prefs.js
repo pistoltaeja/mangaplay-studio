@@ -38,6 +38,7 @@ export function applyScreenplayFont(name)
         SCREENPLAY_STACKS[key]
     );
     document.documentElement.setAttribute("data-screenplay-font", key);
+    dispatchFontChange("screenplay", key);
 }
 
 /**
@@ -54,4 +55,30 @@ export function applyEditorFont(name)
         EDITOR_STACKS[key]
     );
     document.documentElement.setAttribute("data-editor-font", key);
+    dispatchFontChange("editor", key);
+}
+
+/**
+ * Notify observers (currently the aggregate view's height-cache generation
+ * bumper) that a font stack changed. Fires on window so listeners scoped
+ * to a specific pane can attach without walking the DOM tree.
+ *
+ * Suppressed during boot before `document.body` exists (font-prefs is
+ * called from the pre-body inline stamper in `index.html`); listeners
+ * that need to hear those pre-body applies are expected to poll on
+ * connect. Currently only aggregate-view.js listens and it can't mount
+ * before the DOM is ready anyway, so the pre-body silence is fine.
+ * @param {"editor"|"screenplay"} kind
+ * @param {string} value
+ */
+function dispatchFontChange(kind, value)
+{
+    if (typeof window === "undefined" || !document.body) return;
+    try
+    {
+        window.dispatchEvent(new CustomEvent("mps:font-change", {
+            detail: { kind, value }
+        }));
+    }
+    catch (_) { /* CustomEvent unavailable — non-fatal */ }
 }

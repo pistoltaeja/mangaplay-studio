@@ -3,7 +3,7 @@
  * render-preference.js — Per-page render preference: which layer paints on
  * the storyboard canvas for a given page.
  *
- * Contract (see TODO/sync-existing-slides-prepare.md):
+ * Contract:
  *
  *   Every page-NNN.json file MAY carry a "renderPreference" field with one
  *   of these values:

@@ -8,9 +8,8 @@ import { EditorView } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 
 const mangaplayHighlightStyle = HighlightStyle.define([
-    // Page headings: H1-scale, bold, black. Colour themable via
-    // --cm-mp-page-color (default #000000). Declared in the mangaplayLintTheme
-    // baseTheme `&` block below.
+    // Page headings: H1-scale, bold. Colour themable via --cm-mp-page-color,
+    // declared per-skin in default-skins/*/*.css.
     //
     // No `marginTop` here: an extra top margin on the line gets added/removed
     // as the chevron mounts/unmounts mid-typing, causing layout jitter. The
@@ -26,7 +25,7 @@ const mangaplayHighlightStyle = HighlightStyle.define([
     { tag: tags.heading2, color: "var(--cm-mp-panel-color)" },
 
     // Title cards: italic, accent purple
-    { tag: tags.heading3, fontStyle: "italic", color: "#6a1b9a" },
+    { tag: tags.heading3, fontStyle: "italic", color: "var(--cm-mp-title-card-color)" },
 
     // Character cues: NO styling from the tokenizer-driven highlight —
     // it fires on any column-0 ALL-CAPS line, including mid-typed ones
@@ -38,31 +37,31 @@ const mangaplayHighlightStyle = HighlightStyle.define([
     { tag: tags.keyword, textTransform: "uppercase" },
 
     // Dialogue: dark grey
-    { tag: tags.string, color: "#212121" },
+    { tag: tags.string, color: "var(--cm-mp-dialogue-color)" },
 
     // Parenthetical: italic mid-grey
-    { tag: tags.meta, fontStyle: "italic", color: "#616161" },
+    { tag: tags.meta, fontStyle: "italic", color: "var(--cm-mp-parenthetical-color)" },
 
     // Action: dark grey
-    { tag: tags.content, color: "#212121" },
+    { tag: tags.content, color: "var(--cm-mp-action-color)" },
 
     // SFX: red caps (themable via --cm-mp-sfx-color).
     { tag: tags.emphasis, color: "var(--cm-mp-sfx-color)", textTransform: "uppercase", fontWeight: "600" },
 
     // Transitions: subtle slate
-    { tag: tags.controlKeyword, color: "#455a64", fontStyle: "italic" },
+    { tag: tags.controlKeyword, color: "var(--cm-mp-transition-color)", fontStyle: "italic" },
 
     // Notes: muted
-    { tag: tags.comment, color: "#9e9e9e", fontStyle: "italic" },
+    { tag: tags.comment, color: "var(--cm-mp-note-color)", fontStyle: "italic" },
 
     // Centered / lyrics
-    { tag: tags.contentSeparator, color: "#546e7a", fontStyle: "italic" },
+    { tag: tags.contentSeparator, color: "var(--cm-mp-centered-color)", fontStyle: "italic" },
 
     // Page breaks: subtle
-    { tag: tags.lineComment, color: "#bdbdbd" },
+    { tag: tags.lineComment, color: "var(--cm-mp-page-break-color)" },
 
     // Title page keys: bold amber
-    { tag: tags.definitionKeyword, color: "#b8860b", fontWeight: "600" },
+    { tag: tags.definitionKeyword, color: "var(--cm-mp-title-page-key-color)", fontWeight: "600" },
 ]);
 
 /**
@@ -73,24 +72,11 @@ const mangaplayHighlightStyle = HighlightStyle.define([
  *   .cm-mp-style  — orange dotted underline (case/style nit)
  *   .cm-mp-hint   — green wavy underline (low-priority canonical-form hint)
  *
- * Light + dark variants via CSS custom properties on `.cm-content`. The dark
- * dark variant kicks in when the host page sets [data-skin="night"] on
- * either <html> or the editor root.
+ * All colour tokens (--cm-mp-*) are declared per-skin in
+ * default-skins/*\/*.css. This baseTheme reads them via var() so adding or
+ * removing a skin is a CSS-only change — no edits here required.
  */
 const mangaplayLintTheme = EditorView.baseTheme({
-    "&": {
-        "--cm-mp-error": "#E03E3E",
-        "--cm-mp-style": "#E08600",
-        "--cm-mp-hint": "#8BC34A",
-        "--cm-mp-tooltip-bg": "#ffffff",
-        "--cm-mp-tooltip-fg": "#1a1a1a",
-        "--cm-mp-tooltip-border": "#d0d4dc",
-        "--cm-mp-page-color": "#000000",
-        "--cm-mp-panel-color": "#000000",
-        "--cm-mp-sfx-color": "#c62828",
-        "--cm-mp-chevron-color": "#9ca3af"
-    },
-
     // Reserve a left strip in the content column so the chevron can sit in
     // it without pushing real text right. All non-indented lines (Page,
     // Panel, Action) share the same left edge inside this padded column.
@@ -133,14 +119,6 @@ const mangaplayLintTheme = EditorView.baseTheme({
         lineHeight: "1.3"
     },
 
-    // Caret colour. CM6's default caret uses border-left with currentColor,
-    // which on a light background can render near-white from dampened body
-    // text. Force black so the cursor is always visible against the page.
-    // Dark variant overrides this in `mangaplayLintThemeDark` below.
-    ".cm-cursor, .cm-dropCursor": {
-        borderLeftColor: "#000000",
-        borderLeftWidth: "2px"
-    },
     ".cm-mp-error": {
         textDecoration: "wavy underline",
         textDecorationColor: "var(--cm-mp-error)",
@@ -178,7 +156,7 @@ const mangaplayLintTheme = EditorView.baseTheme({
     // Green to match the wavy hint squiggle.
     ".cm-diagnostic-info .cm-diagnosticAction": {
         backgroundColor: "var(--cm-mp-hint)",
-        color: "#ffffff",
+        color: "var(--cm-mp-diagnostic-action-fg)",
         border: "none",
         borderRadius: "4px",
         padding: "2px 10px",
@@ -243,22 +221,23 @@ const mangaplayLintTheme = EditorView.baseTheme({
 
     // Character cue / dialogue body whole-line indents. Emitted by
     // editor-line-indent.js as `Decoration.line` so they apply to the
-    // entire line box (not just the inline text). Anchored from the
-    // .cm-content padded edge — the 4-space prefix is preserved in the
-    // doc; the padding-left simply shifts the line visually further in.
+    // entire line box. Uses text-indent (not padding-left) because CM6's
+    // cursor positioning uses Range.getClientRects() on text nodes —
+    // per-line paddingLeft shifts the box but not the glyph rects, so
+    // the cursor blinks at the wrong position. text-indent shifts the
+    // inline formatting context, keeping cursor and glyphs aligned.
     ".cm-mp-line-cue": {
-        paddingLeft: "2.5em"
+        textIndent: "2.5em"
     },
     ".cm-mp-line-dialogue": {
-        paddingLeft: "1.5em"
+        textIndent: "1.5em"
     },
 
-    // Bracketed Panel tags (`[BLEED]`, `[L]`, `[H]`...). Painted purple
-    // from editor-panel-tag-style.js. Weight 600 keeps the tags legible
-    // against the Panel-heading scale.
-    ".cm-mp-panel-tag": {
-        color: "#7c4dff",
-        fontWeight: "600"
+    // Collapse the 4 leading spaces on cue/dialogue lines to zero width in
+    // Text mode so they don't produce a visible gap before the text-indent
+    // band. Non-atomic mark — caret traversal and click-to-place unaffected.
+    ".cm-mp-indent-collapsed": {
+        fontSize: "0 !important"
     },
 
     // Page-region borders. Emitted by editor-page-region.js as line
@@ -342,7 +321,7 @@ const mangaplayLintTheme = EditorView.baseTheme({
     // typing flow.
     ".cm-mp-cue-confirmed": {
         fontWeight: "bold",
-        color: "#1a1a1a"
+        color: "var(--cm-mp-cue-color)"
     },
     // Inter-card gutter — blank line(s) AFTER the last non-blank line of a
     // page region, before the next `# Page` heading. Painted as a fixed
@@ -433,45 +412,26 @@ const mangaplayLintTheme = EditorView.baseTheme({
         letterSpacing: "0"
     },
     ".cm-mp-emph-marker-visible": {
-        color: "#b0b7c3"
+        color: "var(--cm-mp-emph-marker-color)"
+    },
+    ".cm-mp-style-tag-hidden": {
+        fontSize: "0",
+        letterSpacing: "0"
+    },
+    ".cm-mp-style-tag-visible": {
+        color: "var(--cm-mp-emph-marker-color)"
     }
 });
 
-// Night-skin overrides. Defined as a baseTheme scoped via `[data-skin="night"]`
-// on the host <html>/<body>. CM6's `EditorView.theme(..., { dark: true })` flag
-// does NOT auto-gate the rules to the host's data-skin attribute — it merely
-// marks the theme as dark. Without an explicit host-attribute selector, both
-// Default and Night vars would coexist and the later-defined dark vars would
-// overwrite the light vars unconditionally (the bug that left Panel headings
-// painted #e8e8e8 grey instead of #000000 black in the Default skin).
-const mangaplayLintThemeDark = EditorView.baseTheme({
-    "html[data-skin=\"night\"] &, body[data-skin=\"night\"] &": {
-        "--cm-mp-error": "#FF6B6B",
-        "--cm-mp-style": "#FFB454",
-        "--cm-mp-hint": "#AED581",
-        "--cm-mp-tooltip-bg": "#1f2228",
-        "--cm-mp-tooltip-fg": "#e8e8e8",
-        "--cm-mp-tooltip-border": "#3a3f48",
-        "--cm-mp-page-color": "#e8e8e8",
-        "--cm-mp-panel-color": "#e8e8e8",
-        "--cm-mp-sfx-color": "#FF6B6B",
-        "--cm-mp-chevron-color": "#6b7280"
-    },
-    "html[data-skin=\"night\"] & .cm-cursor, body[data-skin=\"night\"] & .cm-cursor, html[data-skin=\"night\"] & .cm-dropCursor, body[data-skin=\"night\"] & .cm-dropCursor": {
-        borderLeftColor: "#e8e8e8"
-    },
-    // Revealed emphasis markers (caret on the run) — dimmer against the
-    // Night background than the Default skin's #b0b7c3.
-    "html[data-skin=\"night\"] & .cm-mp-emph-marker-visible, body[data-skin=\"night\"] & .cm-mp-emph-marker-visible": {
-        color: "#5a616b"
-    }
-});
+
+// Caret colour lives in default-skins/*/*.css as plain CSS. See the
+// long comment on the caret block in mps-editor.js for why an
+// EditorView.theme / baseTheme approach loses to CM6's own base rule.
 
 
 export function mangaplayHighlighting() {
     return [
         syntaxHighlighting(mangaplayHighlightStyle),
-        mangaplayLintTheme,
-        mangaplayLintThemeDark
+        mangaplayLintTheme
     ];
 }

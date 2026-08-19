@@ -1,5 +1,4 @@
-//! Integration tests for the Part 3c.ii `registry-fs-changed` payload
-//! (TODO/uuid-file-registry.md — Part 3 "Watcher event payload").
+//! Integration tests for the `registry-fs-changed` event payload.
 //!
 //! Focus: the pure `resolve_path_to_registry_change` helper. It does the
 //! interesting mapping work — the `emit_registry_fs_changed` wrapper is
@@ -7,7 +6,7 @@
 //! Tauri runtime, so we validate the payload shape via the helper here
 //! and rely on the smoke test to cover the emit-through-Tauri path.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -27,7 +26,7 @@ fn empty_registry_at(root: PathBuf) -> LoadedRegistry
     {
         project_uuid: Uuid::new_v4(),
         root_path: root,
-        entries: HashMap::new(),
+        entries: BTreeMap::new(),
         native_id_index: HashMap::new(),
         path_index: HashMap::new(),
         dirty: false,
@@ -233,11 +232,10 @@ fn resolve_renamed_known_old_path_returns_renamed()
 #[test]
 fn renamed_from_watcher_input_shape_resolves_uuid()
 {
-    // KEY test: feeds the resolver EXACTLY what `map_notify_event` now
-    // produces after the Part 3c.ii fix — `path = OLD_absolute_path`,
-    // `change = FsChange::Renamed { to: NEW_absolute_path }`. Before the
-    // fix, the watcher emitted NEW in the outer slot, so this call would
-    // have gone to the `Unknown` fallback because `path_index` is keyed
+    // KEY test: feeds the resolver EXACTLY what `map_notify_event` produces —
+    // `path = OLD_absolute_path`, `change = FsChange::Renamed { to: NEW_absolute_path }`.
+    // Before the fix, the watcher emitted NEW in the outer slot, so this call
+    // would have gone to the `Unknown` fallback because `path_index` is keyed
     // by OLD paths and had no entry at NEW.
     let root = PathBuf::from("/tmp/project-watcher-shape");
     let mut reg = empty_registry_at(root.clone());

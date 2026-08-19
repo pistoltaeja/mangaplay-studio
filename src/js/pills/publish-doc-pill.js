@@ -3,11 +3,11 @@
  * publish-doc-pill.js — Footer pill reflecting the publish/sync state of
  * the *currently active script*.
  *
- * Three resolved states, each rendering a tinted lucide sticky-note / file
- * icon:
- *   - no-account → sticky-note-off (grey)   — not signed in to Google
- *   - not-sync   → sticky-note     (grey)   — signed in, doc not linked
- *   - sync       → file-check      (blue)   — signed in, doc linked
+ * Renders the official Google Docs logo (img/Google_Docs_logo_(2014-2020).svg)
+ * regardless of state. State is conveyed via opacity + tooltip/aria strings:
+ *   - no-account → dim opacity — not signed in to Google
+ *   - not-sync   → normal      — signed in, doc not linked
+ *   - sync       → normal      — signed in, doc linked
  *
  * Resolution rule:
  *   1. isAuthenticated() === false                              → no-account
@@ -27,7 +27,6 @@
  *     lock-step).
  */
 
-import { icon } from "../panes/icons.js";
 import { isAuthenticated, onAuthChanged } from "../auth/google-oauth.js";
 import { openSettingsModal } from "../modals/settings-modal.js";
 import { t, subscribe as i18nSubscribe } from "../adapters/tauri-i18n.js";
@@ -36,13 +35,7 @@ import { t, subscribe as i18nSubscribe } from "../adapters/tauri-i18n.js";
 /** @typedef {"unsynced"|"unlocked"|"locked-by-me"|"locked-by-other"|"stale"} LockState */
 /** @typedef {"no-account"|"not-sync"|"sync"|"sync-dirty"} PublishDocPillState */
 
-/** @type {Record<PublishDocPillState, string>} */
-const ICON_FOR = {
-    "no-account": "sticky-note-off",
-    "not-sync":   "sticky-note",
-    "sync":       "file-check",
-    "sync-dirty": "file-check"
-};
+const GOOGLE_DOCS_ICON_SRC = "./img/Google_Docs_logo_(2014-2020).svg";
 
 /**
  * @typedef {Object} PublishDocPillController
@@ -99,25 +92,22 @@ export function mountPublishDocPill({ host })
     {
         const state = evaluate();
         host.dataset.state = state;
-        host.innerHTML = icon(ICON_FOR[state], { size: 16 });
+        host.innerHTML = `<img class="footer-pill-img" src="${GOOGLE_DOCS_ICON_SRC}" alt="" width="16" height="16" draggable="false">`;
 
-        if (state === "no-account")
-        {
-            host.setAttribute(
-                "data-tooltip",
-                t("mangaplay-studio.chrome.pills.publishDoc.tooltip.noAccount"));
-            host.setAttribute(
-                "aria-label",
-                t("mangaplay-studio.chrome.pills.publishDoc.ariaLabel.noAccount"));
-        }
-        else
-        {
-            host.removeAttribute("data-tooltip");
-            const ariaKey = state === "not-sync" ? "notSync" : "sync";
-            host.setAttribute(
-                "aria-label",
-                t(`mangaplay-studio.chrome.pills.publishDoc.ariaLabel.${ariaKey}`));
-        }
+        /** @type {Record<PublishDocPillState, string>} */
+        const keyByState = {
+            "no-account": "noAccount",
+            "not-sync": "notSync",
+            "sync": "sync",
+            "sync-dirty": "syncDirty"
+        };
+        const key = keyByState[state];
+        host.setAttribute(
+            "data-tooltip",
+            t(`mangaplay-studio.chrome.pills.publishDoc.tooltip.${key}`));
+        host.setAttribute(
+            "aria-label",
+            t(`mangaplay-studio.chrome.pills.publishDoc.ariaLabel.${key}`));
     }
 
     function onClick(ev)

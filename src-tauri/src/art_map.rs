@@ -1,10 +1,10 @@
 use crate::commands::project::storyboard_dir;
 
 // ---------------------------------------------------------------------------
-// Storyboard art relocation helpers (TODO/mangaart-storyboard-relocation.md).
-// Wired up by `mangaart_scaffold_impl` (Phase 2) and `rename_file_impl`
-// (Phase 3). Phases 4-6 will hook in `app_delete_file`, `app_rename_folder`,
-// and folder delete; the helpers below are designed for those callers too.
+// Storyboard art relocation helpers.
+// Wired up by `mangaart_scaffold_impl` and `rename_file_impl`.
+// Also hooks into `app_delete_file`, `app_rename_folder`, and folder delete;
+// the helpers below are designed for those callers too.
 //
 // Layout target:
 //   <project_root>/_mangaplaystudio/storyboard/<mirrored_script_dir>/<uuid>.mangaart
@@ -157,8 +157,6 @@ pub fn art_map_rewrite_prefix(
     new_prefix: &str,
 )
 {
-    if old_prefix == new_prefix { return; }
-
     let Some(root) = project_json.as_object_mut() else { return; };
     let Some(art_map) = root.get_mut("artMap").and_then(|v| v.as_object_mut())
     else
@@ -170,26 +168,7 @@ pub fn art_map_rewrite_prefix(
     {
         return;
     };
-
-    let old_with_slash = format!("{}/", old_prefix.trim_end_matches('/'));
-    let new_trimmed = new_prefix.trim_end_matches('/');
-
-    // Collect keys first to avoid mutating while iterating.
-    let keys_to_rewrite: Vec<String> = scripts
-        .keys()
-        .filter(|k| k.starts_with(&old_with_slash))
-        .cloned()
-        .collect();
-
-    for old_key in keys_to_rewrite
-    {
-        let suffix = &old_key[old_with_slash.len()..];
-        let new_key = format!("{}/{}", new_trimmed, suffix);
-        if let Some(value) = scripts.remove(&old_key)
-        {
-            scripts.insert(new_key, value);
-        }
-    }
+    crate::util::json_prefix::map_rewrite_prefix(scripts, old_prefix, new_prefix);
 }
 
 /// Remove every `scripts` key under `<prefix>/`. Used by folder delete.
@@ -210,18 +189,7 @@ pub fn art_map_drop_prefix(
     {
         return;
     };
-
-    let with_slash = format!("{}/", prefix.trim_end_matches('/'));
-    let keys_to_drop: Vec<String> = scripts
-        .keys()
-        .filter(|k| k.starts_with(&with_slash))
-        .cloned()
-        .collect();
-
-    for key in keys_to_drop
-    {
-        scripts.remove(&key);
-    }
+    crate::util::json_prefix::map_drop_prefix(scripts, prefix);
 }
 
 /// Read `project.json` and return its `artMap.scripts` object as an owned
@@ -229,7 +197,7 @@ pub fn art_map_drop_prefix(
 /// unparseable, has no `artMap` section, has no `scripts` submap, or the
 /// submap isn't an object.
 ///
-/// Used by the Part 5 migration hook in `project_open` to fold legacy
+/// Used by the migration hook in `project_open` to fold legacy
 /// script→UUID mappings into the UUID file registry so existing projects
 /// keep their script → mangaart continuity.
 pub fn read_all_scripts(

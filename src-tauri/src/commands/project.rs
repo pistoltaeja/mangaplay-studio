@@ -58,16 +58,16 @@ pub fn project_open(
     state.set(project_dir);
 
     // Best-effort registry load — never blocks project open. On corrupt
-    // failure the error is logged and a follow-up Part 3 command triggers
-    // rebuild-from-scan. See TODO/uuid-file-registry.md Part 2.
+    // failure the error is logged and a follow-up command triggers
+    // rebuild-from-scan.
     if let Err(e) = registry_state.load_for(project_dir) {
         eprintln!("[project_open] registry load failed: {}", e);
     }
 
-    // Part 5 migration: fold `project.json.artMap.scripts` UUIDs into the
+    // Migration: fold `project.json.artMap.scripts` UUIDs into the
     // registry so existing projects keep their script → mangaart continuity.
     // Idempotent — subsequent opens re-run scan (cheap) and the fold no-ops
-    // on already-aligned entries. See TODO/uuid-file-registry.md Part 5.
+    // on already-aligned entries.
     let art_map_scripts = crate::art_map::read_all_scripts(project_dir)
         .unwrap_or_default();
     if !art_map_scripts.is_empty() {
@@ -137,6 +137,13 @@ pub fn project_open(
     // Mint or read project.json.
     let (project_id, shared_display_name) = project_open_or_mint_id(project_dir);
 
+    // Register projectId → project_dir so the `mps-storyboard://` scheme
+    // handler can resolve URLs of the form
+    // `mps-storyboard://<projectId>/<presentationId>/<pageId>.png` back to
+    // `<project_dir>/_mangaplaystudio/storyboard/...`.
+    #[cfg(desktop)]
+    crate::storyboard_uri::registry::register_project(&project_id, project_dir);
+
     // Read meta.json from the app dir.
     let mut meta = serde_json::json!({});
     let meta_path = meta_json_path(project_dir);
@@ -196,6 +203,7 @@ pub fn project_open(
             "meta": meta,
             "id": project_id,
             "displayName": shared_display_name,
+            "locked": read_project_json_locked(project_dir),
         },
     }))
 }
@@ -314,8 +322,13 @@ pub fn project_create_new(
     state: tauri::State<ProjectRoot>,
     path: String,
     name: String,
+    as_sub_folder: Option<bool>,
+    display_name: Option<String>,
+    description: Option<String>,
+    locked: Option<bool>,
 ) -> Result<String, String> {
-    let created = project_create_new_impl(&path, &name)?;
+    let as_sub_folder = as_sub_folder.unwrap_or(true);
+    let created = project_create_new_impl(&path, &name, as_sub_folder, display_name, description, locked)?;
     // Eagerly seed ProjectRoot so a subsequent atomic_write_project_file
     // from the JS "save seeded Untitled" path doesn't race against the
     // user's project_open call. JS still calls project_open afterward,
@@ -333,13 +346,46 @@ pub fn project_create_new(
 ///         meta.json
 ///         project.json                 — id + null displayName
 ///     Untitled.mangaplay.md            — seeded with "# Page 1\nPanel 1\nAction line.\n"
-pub fn project_create_new_impl(path: &str, name: &str) -> Result<String, String> {
+pub fn project_create_new_impl(
+    path: &str,
+    name: &str,
+    as_sub_folder: bool,
+    display_name: Option<String>,
+    description: Option<String>,
+    locked: Option<bool>,
+) -> Result<String, String> {
     use std::path::Path;
     let dir = Path::new(path);
     if !dir.is_dir() {
         return Err("Parent path is not a directory".into());
     }
-    let project_dir = dir.join(name);
+
+    let (project_dir, seed_script_name, display_name_value) = if as_sub_folder {
+        let pd = dir.join(name);
+        (pd, "Untitled.mangaplay.md".to_string(), serde_json::Value::Null)
+    } else {
+        // Name is used as both the seed script filename and the displayName;
+        // reject anything that would produce an illegal filename before we
+        // touch the filesystem.
+        let trimmed = name.trim();
+        if trimmed.is_empty() || trimmed.contains('/') || trimmed.contains('\\') || trimmed.contains('\0') {
+            return Err("E_INVALID_NAME".into());
+        }
+        // The browsed folder itself becomes the project root — refuse when
+        // its basename is one the app reserves (e.g. `_mangaplaystudio`).
+        if let Some(basename) = dir.file_name().and_then(|s| s.to_str()) {
+            if crate::validate_basename::validate_basename(basename).is_err() {
+                return Err("E_INVALID_NAME".into());
+            }
+        }
+        let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
+        if entries.count() > 0 {
+            return Err("E_NOT_EMPTY".into());
+        }
+        let seed = format!("{}.mangaplay.md", trimmed);
+        (dir.to_path_buf(), seed, serde_json::Value::String(trimmed.to_string()))
+    };
+
     std::fs::create_dir_all(&project_dir).map_err(|e| e.to_string())?;
     // create_dir_all is recursive — both subdir creates pull the parent
     // `_mangaplaystudio/` into existence along with them.
@@ -348,9 +394,9 @@ pub fn project_create_new_impl(path: &str, name: &str) -> Result<String, String>
     std::fs::create_dir_all(storyboard_dir(&project_dir))
         .map_err(|e| e.to_string())?;
 
-    // Seed an untitled script at the project root so the user has a non-empty
-    // editor on open.
-    let seed_script = project_dir.join("Untitled.mangaplay.md");
+    // Seed a script at the project root so the user has a non-empty
+    // editor on open. Name depends on as_sub_folder.
+    let seed_script = project_dir.join(&seed_script_name);
     std::fs::write(&seed_script, "# Page 1\nPanel 1\nAction line.\n").map_err(|e| e.to_string())?;
 
     let meta = serde_json::json!({
@@ -362,17 +408,44 @@ pub fn project_create_new_impl(path: &str, name: &str) -> Result<String, String>
     )
     .map_err(|e| e.to_string())?;
 
-    // project.json — id + null displayName, written via atomic helper to
-    // match the read path in project_open_or_mint_id.
-    let pj = serde_json::json!({
-        "id": uuid::Uuid::new_v4().to_string(),
-        "displayName": serde_json::Value::Null,
+    // project.json — id + displayName (null when scaffolding under a
+    // subfolder; the entered name when adopting the browsed folder),
+    // written via atomic helper to match the read path in
+    // project_open_or_mint_id.
+    // Optional `description` and `locked` are inserted only when supplied
+    // so that existing callers produce byte-identical output (backward compat).
+    let project_id = uuid::Uuid::new_v4().to_string();
+    let resolved_display_name = match display_name {
+        Some(s) => serde_json::Value::String(s),
+        None => display_name_value,
+    };
+    let mut pj = serde_json::json!({
+        "id": project_id,
+        "displayName": resolved_display_name,
         "createdAt": chrono_iso_now(),
     });
+    if let Some(obj) = pj.as_object_mut() {
+        if let Some(desc) = description {
+            if !desc.is_empty() {
+                obj.insert("description".into(), serde_json::Value::String(desc));
+            }
+        }
+        if locked == Some(true) {
+            obj.insert("locked".into(), serde_json::Value::Bool(true));
+        }
+    }
     atomic_write_impl(
         &project_json_path(&project_dir).to_string_lossy(),
         &serde_json::to_string_pretty(&pj).unwrap(),
     )?;
+
+    // Register with the `mps-storyboard://` URI scheme registry. JS calls
+    // `project_open` immediately after create in every existing code path,
+    // so the register call there also runs — but registering here too
+    // means any future caller that skips the follow-up open still gets a
+    // usable scheme.
+    #[cfg(desktop)]
+    crate::storyboard_uri::registry::register_project(&project_id, &project_dir);
 
     Ok(project_dir.to_string_lossy().to_string())
 }
@@ -583,18 +656,14 @@ fn walk_scripts(
 
 // ── Project tree listing (folders + scripts) ─────────────────────────────
 
-#[tauri::command]
-pub fn app_list_project_tree(dir: String) -> Result<Vec<serde_json::Value>, String>
-{
-    list_project_tree_impl(std::path::Path::new(&dir))
-}
-
-/// Pure helper backing the `app_list_project_tree` Tauri command.
+/// Test-only helper (exercised by `tests/list_project_tree.rs`). No live
+/// Tauri command binds to it — the runtime tree is built by the registry /
+/// UUID scan path in `registry/scan.rs`, which supersedes this walker.
 ///
-/// Walks `<dir>` recursively (same rules as `list_project_scripts_impl`) but
-/// emits BOTH folder and file entries. Folders are only emitted when they
-/// contain at least one script (directly or transitively) — empty folders
-/// that hold nothing useful are excluded so the explorer stays readable.
+/// Walks `<dir>` recursively (same rules as `list_project_scripts_impl`) and
+/// emits BOTH folder and file entries. Every on-disk folder is emitted,
+/// including empty ones — the walker does not filter by content. The walk
+/// is depth-first.
 ///
 /// Entry shape: `{ name, kind, path, modifiedAt, createdAt }` where `name`
 /// is the forward-slash relative path from `<dir>`.
@@ -615,23 +684,21 @@ pub fn list_project_tree_impl(
     Ok(entries)
 }
 
-/// Recursive walker for `list_project_tree_impl`. Returns `true` when the
-/// current subtree contains at least one script — used by the caller to
-/// decide whether to emit the folder row.
+/// Recursive walker for `list_project_tree_impl`. Emits every on-disk
+/// folder and every script file discovered under `cur`.
 fn walk_tree(
     root: &std::path::Path,
     cur: &std::path::Path,
     depth: u32,
     out: &mut Vec<serde_json::Value>,
-) -> bool
+)
 {
-    if depth > MAX_SCRIPT_WALK_DEPTH { return false; }
+    if depth > MAX_SCRIPT_WALK_DEPTH { return; }
     let read = match std::fs::read_dir(cur)
     {
         Ok(r) => r,
-        Err(_) => return false,
+        Err(_) => return,
     };
-    let mut subtree_has_script = false;
     for entry in read.flatten()
     {
         let name_os = entry.file_name();
@@ -678,8 +745,7 @@ fn walk_tree(
                 "modifiedAt": modified_at,
                 "createdAt": created_at,
             }));
-            let has_script = walk_tree(root, &entry.path(), depth + 1, out);
-            if has_script { subtree_has_script = true; }
+            walk_tree(root, &entry.path(), depth + 1, out);
             continue;
         }
         if !lmeta.is_file() { continue; }
@@ -697,9 +763,7 @@ fn walk_tree(
             "modifiedAt": modified_at,
             "createdAt": created_at,
         }));
-        subtree_has_script = true;
     }
-    subtree_has_script
 }
 
 /// Read `<project_dir>/_mangaplaystudio/project.json` and return the named
@@ -711,4 +775,15 @@ pub(crate) fn read_project_json_field(project_dir: &std::path::Path, field: &str
     let raw = std::fs::read_to_string(&pj).ok()?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
     v.get(field).and_then(|x| x.as_str()).map(|s| s.to_string())
+}
+
+/// Read `<project_dir>/_mangaplaystudio/project.json` and return the `locked`
+/// field as a bool. Returns `false` on missing file, parse failure, absent
+/// field, or non-bool value. Read-only; never writes.
+pub(crate) fn read_project_json_locked(project_dir: &std::path::Path) -> bool
+{
+    let pj = project_json_path(project_dir);
+    let Ok(raw) = std::fs::read_to_string(&pj) else { return false; };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else { return false; };
+    v.get("locked").and_then(|x| x.as_bool()).unwrap_or(false)
 }

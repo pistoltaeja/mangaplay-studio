@@ -33,7 +33,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { saveUserSettings, getUserSetting } from "../project/user-settings.js";
 
-export const SCOPE_VERSION = 4;
+export const SCOPE_VERSION = 7;
 
 const KEYRING_ACCOUNT_TOKEN = "google.access_token";
 // id_token (Google's JWT) is 1.2-1.8 KB and would push the combined blob
@@ -265,8 +265,16 @@ export function loadProfile()
     {
         const v = /** @type {any} */ (getUserSetting("googleProfile", null));
         if (!v || typeof v !== "object") return null;
+        // Reader tolerates both `permissionId` (SCOPE_VERSION 7+) and the
+        // legacy `sub` field (SCOPE_VERSION 6 and earlier) so a user whose
+        // token blob survived the scope migration doesn't get a null id
+        // on first boot. Drop the `sub` fallback the next time
+        // SCOPE_VERSION advances.
+        const permissionId = typeof v.permissionId === "string"
+            ? v.permissionId
+            : (typeof v.sub === "string" ? v.sub : null);
         return {
-            sub: typeof v.sub === "string" ? v.sub : null,
+            sub: permissionId,
             name: typeof v.name === "string" ? v.name : null,
             email: typeof v.email === "string" ? v.email : null,
             picture: typeof v.picture === "string" ? v.picture : null,
@@ -289,7 +297,7 @@ export async function saveProfile(profile)
     if (_testBackend) return _testBackend.saveProfile(profile);
     await saveUserSettings({
         googleProfile: {
-            sub: profile.sub || null,
+            permissionId: profile.sub || null,
             name: profile.name || null,
             email: profile.email || null,
             picture: profile.picture || null,

@@ -29,101 +29,19 @@ import {
 } from "./storage.js";
 import { loadTransport } from "./transports/platform-detect.js";
 import { logAuthEvent } from "../analytics/google-auth.js";
-import { getUserSetting } from "../project/user-settings.js";
-
-// ─────────────────────────────────────────────────────────────────────────
-// Constants
-// ─────────────────────────────────────────────────────────────────────────
-
-// Mangaplay Studio Desktop OAuth client (mangaplaystudio GCP project,
-// type = "Desktop app" / "installed"). Distinct from the extension's
-// Web-type client (661305516089-d6par5grippq2t9639c4tmc03li6jrmb) but
-// SAME GCP project, so the OAuth consent screen is shared — sign-in
-// on either surface silently authorises the other.
-//
-// Why Desktop type matters: Google auto-permits ANY loopback port at
-// runtime per RFC 8252 §7.3, and is lenient about trailing slashes in
-// the redirect URI. Web-type clients enforced byte-exact match, which
-// forced us to ship the trailing-slash shim in _extractRedirectUri.
-// That shim is still in place as defence-in-depth, but the Desktop
-// client makes it largely unnecessary.
-const OAUTH_CLIENT_ID = "661305516089-6qik4efn40d583eondupgbbgl98vj772.apps.googleusercontent.com";
-
-// ─────────────────────────────────────────────────────────────────────────
-// OAuth scope justification (for Google verification reviewer)
-// ─────────────────────────────────────────────────────────────────────────
-//
-//   userinfo.profile — Display the signed-in user's name + avatar in the
-//     app footer so collaborators can see whose account is publishing /
-//     locking a shared Google Doc. Non-sensitive.
-//
-//   drive.file — Per-file access to Google Docs the app creates on the
-//     user's behalf (via documents.create) or that the user explicitly
-//     hands to the app via the Google Picker. Used for:
-//       • Reading the file's headRevisionId to detect concurrent edits
-//         (files.get).
-//       • Writing appProperties for our collaborative-lock protocol —
-//         mpsLockToken / mpsLockedBy / mpsLockedBySub (files.update).
-//       • Applying and lifting contentRestrictions.readOnly so only one
-//         Mangaplay Studio user edits at a time (files.update).
-//       • Sharing the doc with collaborators the user names in the
-//         Publish modal (permissions.create).
-//     Non-sensitive.
-//
-//   documents — required so the app can create, read, and mutate the
-//     body of a Google Doc.
-//
-//     When the user clicks Publish, the app creates a brand-new Google
-//     Doc that is already pre-populated with their paginated manga
-//     script. There is no way to do this through the Drive API — only
-//     the Docs API's documents.create endpoint can produce a Doc whose
-//     body already contains our structured content in a single call.
-//
-//     When the user clicks Push after editing offline, the app rewrites
-//     the Doc's tabbed body — the screenplay tab and the notes tab — to
-//     match their updated local file. The only endpoint that can
-//     atomically clear the old body and reinsert paragraphs, tabs, and
-//     inline styling is documents.batchUpdate. Drive's files.update with
-//     a raw media upload does not work on Google Doc mime types, so this
-//     call cannot be replaced with a Drive equivalent.
-//
-//     When the user clicks Pull, the app reads the Doc's tabbed body
-//     back so it can reconcile any remote edits into the local
-//     .mangaplay file. This uses documents.get with
-//     includeTabsContent=true because Drive's files.export to text or
-//     HTML flattens the tab tree and drops the inline structure the app
-//     needs to round-trip the content faithfully.
-//
-//     Although Google classifies `documents` as sensitive because it
-//     grants access to every Doc the user could open, our app only ever
-//     targets doc IDs it received either from documents.create (owned by
-//     the app on the user's behalf) or from an explicit Google Picker
-//     selection — the same narrow surface that drive.file already
-//     restricts writes to. We never enumerate the user's Doc library.
-//
-// openid + userinfo.email are intentionally NOT requested — profile
-// alone gives us the display fields we need and keeps the consent
-// screen one line shorter.
-//
-// When editing this list, bump SCOPE_VERSION in ./storage.js so existing
-// signed-in users are re-consented with the new scope set.
-const OAUTH_SCOPES = [
-    "https://www.googleapis.com/auth/userinfo.profile",
-    "https://www.googleapis.com/auth/drive.file",
-    "https://www.googleapis.com/auth/documents",
-];
-
-const AUTH_URL_BASE = "https://accounts.google.com/o/oauth2/v2/auth";
-const USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo";
-// v2 BFF endpoints — desktop/mobile path. v1 (api.absolutelyskint.com/v1/oauth/*)
-// is the extension-only surface that strips refresh_token. Per
-// TODO/AuthRefreshToken/INDEX.md, native apps use v2 so they can establish
-// long-lived sessions via refresh_token. Revoke is RFC 7009; client_secret
-// injected server-side.
-const BFF_TOKEN_URL = "https://api.absolutelyskint.com/v2/oauth/token";
-const BFF_REFRESH_URL = "https://api.absolutelyskint.com/v2/oauth/refresh";
-const BFF_REVOKE_URL = "https://api.absolutelyskint.com/v2/oauth/revoke";
-const EXPIRES_IN_MARGIN_MS = 60 * 1000;
+import {
+    OAUTH_CLIENT_ID,
+    BFF_REFRESH_URL,
+    BFF_REVOKE_URL,
+    EXPIRES_IN_MARGIN_MS,
+} from "./oauth-config.js";
+import {
+    _buildAuthUrl,
+    _parseRedirect,
+    _extractRedirectUri,
+    _extractIdTokenSub,
+} from "./oauth-url.js";
+import { _exchangeCodeForToken, _fetchDriveAbout } from "./oauth-bff.js";
 
 // ─────────────────────────────────────────────────────────────────────────
 // In-memory cache
@@ -248,186 +166,6 @@ export function onAuthChanged(handler)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Locale → Google `hl` / `ui_locales` mapper
-// ─────────────────────────────────────────────────────────────────────────
-
-/**
- * @returns {string}
- */
-function _googleLocale()
-{
-    try
-    {
-        const lang = getUserSetting("defaultLanguage", "en") || "en";
-        const lower = String(lang).toLowerCase();
-        if (lower === "zh-tw" || lower === "zh-hant") return "zh-TW";
-        if (lower === "zh-cn" || lower === "zh-hans") return "zh-CN";
-        const base = lower.split(/[-_]/)[0];
-        const supported = new Set(["en", "ko", "ja", "id", "es", "fr", "it", "ru", "pt", "th", "zh", "de", "vi"]);
-        if (base === "zh") return "zh-CN";
-        if (supported.has(base)) return base;
-        return "en";
-    }
-    catch (_)
-    {
-        return "en";
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// URL builders + parsers
-// ─────────────────────────────────────────────────────────────────────────
-
-/**
- * Builds the Google authorize URL for the interactive sign-in flow. The
- * silent (prompt-none) path is gone (ticket 02) — refresh now happens via
- * the BFF refresh-token endpoint, not by re-running authorize silently.
- * Callers MUST pass `interactive: true`; non-interactive calls are caller
- * misuse and throw.
- *
- * @param {{ interactive: boolean, redirectUri: string, state: string, challenge: string }} opts
- * @returns {string}
- */
-function _buildAuthUrl({ interactive, redirectUri, state, challenge })
-{
-    if (interactive !== true)
-    {
-        throw new Error("_buildAuthUrl: interactive must be true — silent path removed");
-    }
-
-    const params = new URLSearchParams({
-        client_id: OAUTH_CLIENT_ID,
-        response_type: "code",
-        redirect_uri: redirectUri,
-        scope: OAUTH_SCOPES.join(" "),
-        include_granted_scopes: "true",
-        // `access_type=offline` asks Google to issue a refresh_token alongside
-        // the access_token. Required for the long-lived-session model
-        // (TODO/AuthRefreshToken). Installed-app clients return a refresh
-        // token on every sign-in; web-app clients only on first consent.
-        access_type: "offline",
-        state,
-        code_challenge: challenge,
-        code_challenge_method: "S256",
-    });
-
-    // `select_account consent` forces BOTH the account chooser AND the
-    // scope-consent screen on every interactive sign-in. Without `consent`,
-    // Google can short-circuit consent for an account that previously
-    // authorised some scopes — returning a token that silently lacks
-    // drive.file. See fps-auth.js:240-249.
-    params.set("prompt", "select_account consent");
-
-    const locale = _googleLocale();
-    params.set("hl", locale);
-    params.set("ui_locales", locale);
-
-    return `${AUTH_URL_BASE}?${params.toString()}`;
-}
-
-/**
- * Parse the redirect URL.
- * @param {string} redirectUrl
- * @returns {{ code: string|null, error: string|null, state: string|null }}
- */
-function _parseRedirect(redirectUrl)
-{
-    const out = { code: null, error: null, state: null };
-    if (!redirectUrl || typeof redirectUrl !== "string") return out;
-
-    let query = "";
-    const hashIdx = redirectUrl.indexOf("#");
-    const qIdx = redirectUrl.indexOf("?");
-    if (qIdx >= 0)
-    {
-        const end = hashIdx > qIdx ? hashIdx : redirectUrl.length;
-        query = redirectUrl.slice(qIdx + 1, end);
-    }
-    let fragment = "";
-    if (hashIdx >= 0) fragment = redirectUrl.slice(hashIdx + 1);
-
-    /** @param {string} str */
-    const parseInto = (str) =>
-    {
-        if (!str) return;
-        const p = new URLSearchParams(str);
-        if (p.get("code") && !out.code) out.code = p.get("code");
-        if (p.get("error") && !out.error) out.error = p.get("error");
-        if (p.get("state") && !out.state) out.state = p.get("state");
-    };
-    parseInto(query);
-    parseInto(fragment);
-    return out;
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// BFF token exchange + userinfo
-// ─────────────────────────────────────────────────────────────────────────
-
-/**
- * @param {{ code: string, codeVerifier: string, redirectUri: string }} opts
- * @returns {Promise<{ access_token: string, expires_in: number, refresh_token: string|null, id_token: string|null }>}
- */
-async function _exchangeCodeForToken({ code, codeVerifier, redirectUri })
-{
-    console.log("[mps:auth] exchange POST", { redirectUri });
-    const resp = await fetch(BFF_TOKEN_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            code,
-            code_verifier: codeVerifier,
-            redirect_uri: redirectUri,
-            client_id: OAUTH_CLIENT_ID,
-        }),
-    });
-    if (!resp.ok)
-    {
-        const errData = await resp.json().catch(() => ({}));
-        const errCode = errData?.error || `http_${resp.status}`;
-        const errDesc = errData?.error_description || "";
-        console.warn("[mps:auth] exchange failed:", { errCode, errDesc, redirectUri });
-        const err = new Error(errCode);
-        err.name = errCode;
-        throw err;
-    }
-    const data = await resp.json();
-    return {
-        access_token: data.access_token,
-        expires_in: data.expires_in || 3600,
-        refresh_token: typeof data.refresh_token === "string" ? data.refresh_token : null,
-        id_token: typeof data.id_token === "string" ? data.id_token : null,
-    };
-}
-
-/**
- * @param {string} token
- * @returns {Promise<{ sub: string|null, name: string|null, email: string|null, picture: string|null }>}
- */
-async function _fetchUserInfo(token)
-{
-    const resp = await fetch(USERINFO_URL, {
-        headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!resp.ok)
-    {
-        const body = await resp.text().catch(() => "");
-        console.warn(`[mps:auth] userinfo http_${resp.status}:`, body.slice(0, 200));
-        const err = new Error(`userinfo http_${resp.status}`);
-        err.name = `http_${resp.status}`;
-        throw err;
-    }
-    const data = await resp.json();
-    console.log("[mps:auth] userinfo response keys:", Object.keys(data || {}));
-    return {
-        sub: data?.sub || null,
-        name: data?.name || data?.given_name || null,
-        email: data?.email || null,
-        picture: data?.picture || null,
-    };
-}
-
-// ─────────────────────────────────────────────────────────────────────────
 // Public API
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -486,7 +224,7 @@ export function ensureRehydrated()
             // mismatch. This fixes the observed "user signs in, then
             // one second later the app deletes both keyring entries and
             // restarts" symptom.
-            if (token && token.idToken && _lastSub)
+            if (token && token.idToken != null && _lastSub)
             {
                 const restoredSub = _extractIdTokenSub(token.idToken);
                 if (restoredSub && restoredSub !== _lastSub)
@@ -635,16 +373,31 @@ export function isAuthenticated()
 
 /**
  * Sync — cached profile from the last sign-in. May be null pre-rehydrate.
- * @returns {{ sub: string|null, name: string|null, email: string|null, picture: string|null }}
+ * `sub` is retained as an alias of `permissionId` for callers that
+ * haven't been renamed yet — the underlying value is the Drive
+ * about.get `permissionId` (stable per Google account).
+ * @returns {{ sub: string|null, permissionId: string|null, name: string|null, email: string|null, picture: string|null }}
  */
 export function getCurrentProfile()
 {
     return {
         sub: _lastSub,
+        permissionId: _lastSub,
         name: _lastName,
         email: _lastEmail,
         picture: _lastPicture,
     };
+}
+
+/**
+ * Sync — the cached emailAddress, if any. Used as the `login_hint` passed
+ * to Drive Picker OAuth so Google skips its account chooser when the
+ * user has a prior sign-in on this machine.
+ * @returns {string|null}
+ */
+export function getStoredEmail()
+{
+    return _lastEmail;
 }
 
 /**
@@ -1020,7 +773,7 @@ async function _refreshViaBff()
     // `auth.id_token.sub_mismatch` event, but the user-visible outcome
     // (signed out, must reauth) is identical so the status collapses to
     // "revoked" for the caller.
-    if (newIdToken && _lastSub)
+    if (newIdToken != null && _lastSub)
     {
         const sub = _extractIdTokenSub(newIdToken);
         if (sub && sub !== _lastSub)
@@ -1046,6 +799,148 @@ async function _refreshViaBff()
 
     logAuthEvent("auth.refresh.success", { ttlSec: newExpiresIn });
     return { status: "alive", token: newAccessToken };
+}
+
+/**
+ * Merge tokens returned by the Google Drive Picker exchange into the
+ * live auth session. Three cases, matching the plan `js-picker-token-store`
+ * contract and the shape of `_refreshViaBff` above:
+ *
+ *   (a) `!isAuthenticated()` — the picker doubled as a sign-in. Seed
+ *       `_cachedToken`, decode `id_token` if present to seed
+ *       `_lastSub` / `_lastName` / `_lastPicture`, persist to keyring,
+ *       emit `auth.picker.signed_in`.
+ *   (b) `isAuthenticated()` AND picker returned `refresh_token` — save
+ *       the fresh refresh_token (NEVER overwrite the stored one with
+ *       null / undefined) and update in-memory access_token + expiry.
+ *   (c) `isAuthenticated()` AND no `refresh_token` — refresh in-memory
+ *       access_token + expiry only; call `saveToken` to update the
+ *       persisted access_token slot but preserve the existing
+ *       refresh_token from disk.
+ *
+ * @param {{
+ *   token: string,
+ *   refreshToken?: string,
+ *   expiresIn?: number,
+ *   idToken?: string,
+ * }} pickerResult
+ * @returns {Promise<void>}
+ */
+export async function mergePickerTokens(pickerResult)
+{
+    if (!pickerResult || typeof pickerResult.token !== "string" || !pickerResult.token)
+    {
+        return;
+    }
+
+    const expiresIn = Number.isFinite(pickerResult.expiresIn)
+        ? /** @type {number} */ (pickerResult.expiresIn)
+        : 3600;
+    const expiresAt = Date.now() + (expiresIn * 1000) - EXPIRES_IN_MARGIN_MS;
+    const idToken = typeof pickerResult.idToken === "string" && pickerResult.idToken
+        ? pickerResult.idToken
+        : null;
+    const freshRefreshToken = typeof pickerResult.refreshToken === "string"
+            && pickerResult.refreshToken
+        ? pickerResult.refreshToken
+        : null;
+
+    if (!isAuthenticated())
+    {
+        // Case (a) — sign-in via picker. Populate _cachedToken FIRST so
+        // Drive about.get below can use it. Identity now comes from Drive
+        // about.get (drive.file scope only — no id_token since openid was
+        // dropped). id_token decode remains as a fast-path fallback for
+        // any future flow that does include it.
+        _cachedToken = pickerResult.token;
+        _tokenExpiresAt = expiresAt;
+
+        if (idToken)
+        {
+            const parts = String(idToken).split(".");
+            if (parts.length === 3)
+            {
+                try
+                {
+                    const padded = parts[1] + "===".slice((parts[1].length + 3) % 4);
+                    const decoded = atob(padded.replace(/-/g, "+").replace(/_/g, "/"));
+                    const payload = JSON.parse(decoded);
+                    if (typeof payload?.sub === "string") _lastSub = payload.sub;
+                    if (typeof payload?.name === "string") _lastName = payload.name;
+                    if (typeof payload?.email === "string") _lastEmail = payload.email;
+                    if (typeof payload?.picture === "string") _lastPicture = payload.picture;
+                }
+                catch (_) { /* best-effort */ }
+            }
+        }
+
+        // Drive about.get — the identity source for the drive.file-only
+        // era. Runs when id_token didn't fully populate identity (i.e.
+        // the normal case now that openid scope is gone).
+        if (!_lastEmail || !_lastSub)
+        {
+            try
+            {
+                const info = await _fetchDriveAbout(pickerResult.token);
+                if (!_lastSub && info.permissionId) _lastSub = info.permissionId;
+                if (!_lastName && info.name) _lastName = info.name;
+                if (!_lastEmail && info.email) _lastEmail = info.email;
+                if (!_lastPicture && info.picture) _lastPicture = info.picture;
+            }
+            catch (e)
+            {
+                console.warn("[mps:auth] mergePickerTokens: drive.about failed (non-fatal):", e);
+            }
+        }
+
+        await saveToken({
+            accessToken: pickerResult.token,
+            expiresAt,
+            refreshToken: freshRefreshToken,
+            idToken,
+        });
+        if (_lastSub || _lastName || _lastEmail || _lastPicture)
+        {
+            await saveProfile({
+                sub: _lastSub,
+                name: _lastName,
+                email: _lastEmail,
+                picture: _lastPicture,
+            });
+        }
+        sm.transition(STATES.AUTHENTICATED);
+        _emitAuthChanged();
+        logAuthEvent("auth.picker.signed_in", { hadIdToken: !!idToken });
+        return;
+    }
+
+    // Cases (b) + (c) — signed-in already. Preserve stored refresh_token
+    // when the picker exchange did not return a fresh one; Google only
+    // issues refresh_tokens on first-consent / `prompt=consent`, so the
+    // absence is expected on subsequent picks and MUST NOT wipe the
+    // stored one (that would force re-consent every session).
+    _cachedToken = pickerResult.token;
+    _tokenExpiresAt = expiresAt;
+
+    const stored = await loadToken();
+    const preservedRefreshToken = freshRefreshToken
+        || (stored && stored.refreshToken)
+        || null;
+    const preservedIdToken = idToken
+        || (stored && stored.idToken)
+        || null;
+
+    await saveToken({
+        accessToken: pickerResult.token,
+        expiresAt,
+        refreshToken: preservedRefreshToken,
+        idToken: preservedIdToken,
+    });
+
+    logAuthEvent("auth.picker.token_merged", {
+        had_session: true,
+        got_refresh_token: !!freshRefreshToken,
+    });
 }
 
 /**
@@ -1081,10 +976,8 @@ async function _clearSessionState(ctx)
     }
     else
     {
-        const trace = new Error("_clearSessionState trace").stack || "";
-        console.warn("[mps:auth] _clearSessionState fired — reason=" + reason
-            + (ageMs !== null ? " ageMs=" + ageMs : "")
-            + "\n" + trace);
+        console.log("[mps:auth] Clearing stored Google session — reason=" + reason
+            + (ageMs !== null ? " ageMs=" + ageMs : ""));
     }
 
     _cachedToken = null;
@@ -1105,27 +998,6 @@ async function _clearSessionState(ctx)
     _rehydratePromise = null;
     try { await clearToken(); } catch (_) { /* best-effort */ }
     try { await clearProfile(); } catch (_) { /* best-effort */ }
-}
-
-/**
- * Extract `sub` from a JWT id_token. Does NOT verify signature — that
- * happens server-side at the BFF; here we only need the claim for
- * client-side account-drift detection. Returns null on any parse failure.
- * @param {string} idToken
- * @returns {string|null}
- */
-function _extractIdTokenSub(idToken)
-{
-    try
-    {
-        const parts = String(idToken).split(".");
-        if (parts.length !== 3) return null;
-        const padded = parts[1] + "===".slice((parts[1].length + 3) % 4);
-        const decoded = atob(padded.replace(/-/g, "+").replace(/_/g, "/"));
-        const payload = JSON.parse(decoded);
-        return typeof payload?.sub === "string" ? payload.sub : null;
-    }
-    catch (_) { return null; }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1330,24 +1202,23 @@ async function _runFlow()
         _cachedToken = tokens.access_token;
         _tokenExpiresAt = Date.now() + (tokens.expires_in * 1000) - EXPIRES_IN_MARGIN_MS;
 
-        // ── Step 6 — userinfo ────────────────────────────────────────
+        // ── Step 6 — identity via Drive about.get ────────────────────
         sm.transition(STATES.FETCHING_PROFILE);
-        const info = await _fetchUserInfo(_cachedToken);
-        _lastSub = info.sub;
+        const info = await _fetchDriveAbout(_cachedToken);
+        _lastSub = info.permissionId;
         _lastName = info.name;
         _lastEmail = info.email;
         _lastPicture = info.picture;
 
-        // Ticket 13 — sanity-check id_token.sub against userinfo.sub on
-        // first sign-in. They should always match (same upstream Google
-        // call), so a mismatch here is logged-but-non-fatal: there is no
-        // prior sub on this machine to drift from.
-        if (tokens.id_token && _lastSub)
+        // id_token is no longer requested (openid not in OAUTH_SCOPES);
+        // Google returns null in that case. Verification stays best-effort
+        // — skipped entirely when idToken is absent.
+        if (tokens.id_token != null && _lastSub)
         {
             const idSub = _extractIdTokenSub(tokens.id_token);
             if (idSub && idSub !== _lastSub)
             {
-                console.warn("[mps:auth] id_token.sub != userinfo.sub on sign-in (non-fatal)");
+                console.warn("[mps:auth] id_token.sub != permissionId on sign-in (non-fatal)");
                 logAuthEvent("auth.id_token.sub_mismatch", { phase: "signin" });
             }
         }
@@ -1407,42 +1278,6 @@ async function _runFlow()
         sm.transition(STATES.IDLE, { class: cls.class });
         if (cls.class === "auth.user_cancelled") return null;
         throw e;
-    }
-}
-
-/**
- * Strip the query string off the redirect URL so the exchange sends the
- * same `redirect_uri` Google saw at authorize time.
- *
- * Google enforces BYTE-IDENTICAL match between authorize's `redirect_uri`
- * and exchange's `redirect_uri`. A trailing slash difference =
- * 400 redirect_uri_mismatch. The Rust loopback listener registers
- * `http://127.0.0.1:<port>` with no path, but the browser appends `/`
- * when it issues the GET (`URL.pathname` returns `/` even for an
- * authority-only URL). Drop a lone `/` pathname to keep the round-trip
- * symmetric.
- *
- * @param {string} redirectUrl
- * @returns {string}
- */
-function _extractRedirectUri(redirectUrl)
-{
-    try
-    {
-        const u = new URL(redirectUrl);
-        const path = u.pathname === "/" ? "" : u.pathname;
-        return `${u.protocol}//${u.host}${path}`;
-    }
-    catch (_)
-    {
-        const qIdx = redirectUrl.indexOf("?");
-        let stripped = qIdx >= 0 ? redirectUrl.slice(0, qIdx) : redirectUrl;
-        // Same symmetry — drop a trailing slash that's just the "root" path.
-        if (stripped.endsWith("/") && stripped.split("/").length === 4)
-        {
-            stripped = stripped.slice(0, -1);
-        }
-        return stripped;
     }
 }
 

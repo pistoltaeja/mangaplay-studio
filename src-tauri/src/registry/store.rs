@@ -1,7 +1,6 @@
 //! On-disk `registry.json` schema types and atomic load/save.
 //!
-//! See [`TODO/uuid-file-registry.md`](../../../../TODO/uuid-file-registry.md)
-//! Part 1 for the full schema + atomic-write sequence.
+//! Schema + atomic-write sequence: tmp-write → fsync → rename with .bak recovery.
 //!
 //! # Storage layout
 //!
@@ -50,7 +49,7 @@
 //! - Else return [`LoadErr::Corrupt`].
 //! - If neither file exists → [`LoadErr::NotFound`].
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -58,6 +57,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::fs_helpers::retry_rename;
 use crate::registry::native_id::NativeId;
 
 /// Basename of the reserved per-project app directory. Matches the
@@ -114,7 +114,7 @@ pub struct RegistryEntry
     pub parent_uuid: Option<Uuid>,
 
     /// Monotonic revision counter — bumped on any mutation. Used for
-    /// optimistic-concurrency (`expected_rev`) in Part 3.
+    /// optimistic-concurrency (`expected_rev`).
     pub rev: u64,
 
     /// Tombstoned entries survive one boot cycle so late watcher events
@@ -135,11 +135,17 @@ pub struct RegistryEntry
 #[derive(Debug, Deserialize, Clone)]
 pub(crate) struct RegistryFileV1
 {
+    // Retained so serde deserializes real v1 payloads; not consumed by the v1→v2 lift.
+    #[allow(dead_code)]
     pub version: u32,
     pub project_uuid: Uuid,
+    // Retained so serde deserializes real v1 payloads; not consumed by the v1→v2 lift.
+    #[allow(dead_code)]
     pub root_path: PathBuf,
+    // Retained so serde deserializes real v1 payloads; not consumed by the v1→v2 lift.
+    #[allow(dead_code)]
     pub root_native_id: NativeId,
-    pub entries: HashMap<String, RegistryEntry>,
+    pub entries: BTreeMap<String, RegistryEntry>,
 }
 
 /// On-disk registry document (schema v2).
@@ -155,8 +161,12 @@ pub struct RegistryFile
     /// Stable UUID for the project itself.
     pub project_uuid: Uuid,
 
-    /// Per-file / per-folder entries, keyed by UUID string.
-    pub entries: HashMap<String, RegistryEntry>,
+    /// Per-file / per-folder entries, keyed by UUID string. `BTreeMap`
+    /// (sorted-by-key) so `serde_json::to_vec_pretty` emits deterministic
+    /// output — a `HashMap` here would flip on-disk byte order per launch
+    /// via Rust's randomised hash iteration, forcing SVN to record a diff
+    /// on every project open.
+    pub entries: BTreeMap<String, RegistryEntry>,
 }
 
 // ---------------------------------------------------------------------------
@@ -169,7 +179,7 @@ pub enum LoadErr
 {
     /// Neither `registry.json` nor `registry.json.bak` exists — this
     /// is a fresh project and the caller should trigger a rebuild-from-
-    /// scan (Part 5) instead of treating it as an error.
+    /// scan instead of treating it as an error.
     NotFound,
 
     /// Primary was missing or unparseable but `.bak` succeeded. The
@@ -313,9 +323,8 @@ fn registry_bak_tmp_path(project_root: &Path) -> PathBuf
 /// 3. Else if both files existed but neither parsed → `LoadErr::Corrupt`.
 /// 4. Else neither exists → `LoadErr::NotFound`.
 ///
-/// Pure I/O — no locks, no state. The caller (Part 2 managed-state
-/// wiring) is responsible for serialising concurrent load/save on the
-/// same project root.
+/// Pure I/O — no locks, no state. The caller is responsible for serialising
+/// concurrent load/save on the same project root.
 pub fn load_from_disk(project_root: &Path) -> Result<RegistryFile, LoadErr>
 {
     let primary = registry_path(project_root);
@@ -532,35 +541,17 @@ pub fn save_atomic(project_root: &Path, reg: &RegistryFile) -> Result<(), SaveEr
         }
     }
 
-    // 4. Rename tmp → primary with retry/backoff. Mirrors the pattern
-    //    in `fs_helpers::atomic_write_impl` to survive transient
+    // 4. Rename tmp → primary with retry/backoff (shared helper — same
+    //    schedule as `fs_helpers::atomic_write_impl`). Survives transient
     //    Windows AV / indexer locks on the destination slot.
-    let mut last_err = String::new();
-    let mut renamed = false;
-    for delay_ms in [0u64, 50, 150, 450]
-    {
-        if delay_ms > 0
-        {
-            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-        }
-        match fs::rename(&tmp, &primary)
-        {
-            Ok(()) =>
-            {
-                renamed = true;
-                break;
-            }
-            Err(e) => last_err = e.to_string(),
-        }
-    }
-    if !renamed
+    if let Err(e) = retry_rename(&tmp, &primary)
     {
         // Best-effort cleanup of the leftover tmp so the next save starts clean.
         let _ = fs::remove_file(&tmp);
         return Err(SaveErr::Io
         {
             step: "rename-tmp-to-primary",
-            error: last_err,
+            error: e.to_string(),
         });
     }
 

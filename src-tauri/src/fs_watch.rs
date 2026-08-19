@@ -1,17 +1,17 @@
 // ── Filesystem watcher (project tree change notifications) ───────────────
 //
 // Wraps notify-debouncer-full with a per-window state managed by Tauri.
-// JS calls fs_watch_start(root) once the project is open, and add/remove
-// per subdir as the explorer expands/collapses folders. Events emit on
-// the existing `project-fs-changed` Tauri event so the sync contract
-// stays single-channel.
+// JS calls fs_watch_start(root) once the project is open. The watcher
+// uses RecursiveMode::Recursive so every subdirectory is covered from
+// the start — externally-created files in any subfolder trigger events
+// without waiting for the user to expand that folder in the explorer.
+// Events emit on the existing `project-fs-changed` Tauri event so the
+// sync contract stays single-channel.
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use notify::{RecursiveMode, RecommendedWatcher};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use notify_debouncer_full::{Debouncer, DebouncedEvent, RecommendedCache, new_debouncer};
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-use std::collections::HashSet;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use std::time::Duration;
 
@@ -29,8 +29,6 @@ use tauri::Manager;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 const FS_WATCHER_DEBOUNCE_MS: u64 = 500;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-const FS_WATCHER_MAX_PATHS: usize = 256;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub struct FsWatcher
@@ -57,7 +55,9 @@ impl FsWatcher {
 struct FsWatcherInner
 {
     debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
-    watched: HashSet<PathBuf>,
+    /// Kept for log context / future diagnostics; the debouncer owns the
+    /// recursive watch and unregisters it when dropped.
+    #[allow(dead_code)]
     root: PathBuf,
 }
 
@@ -229,12 +229,11 @@ pub async fn fs_watch_start(
                         let de: &DebouncedEvent = &ev;
                         for (path, change) in map_notify_event(&de.event)
                         {
-                            // NEW `registry-fs-changed` event (Part 3c.ii) fires
-                            // BEFORE the OLD `project-fs-changed` — we borrow the
-                            // `change` snapshot for registry resolution then hand
-                            // ownership to the legacy emitter. Both listeners see
-                            // the same underlying change while Part 4 migrates
-                            // JS listeners over one at a time.
+                            // NEW `registry-fs-changed` event fires BEFORE the
+                            // OLD `project-fs-changed` — we borrow the `change`
+                            // snapshot for registry resolution then hand ownership
+                            // to the legacy emitter. Both listeners see the same
+                            // underlying change while JS listeners migrate over.
                             let registry_state = app_handle.state::<ProjectRegistryState>();
                             emit_registry_fs_changed(&app_handle, &registry_state, &path, &change);
                             emit_fs_changed(&app_handle, &path, change);
@@ -249,13 +248,10 @@ pub async fn fs_watch_start(
         },
     ).map_err(|e| e.to_string())?;
 
-    debouncer.watch(&root, RecursiveMode::NonRecursive).map_err(|e| e.to_string())?;
-
-    let mut watched = HashSet::new();
-    watched.insert(root.clone());
+    debouncer.watch(&root, RecursiveMode::Recursive).map_err(|e| e.to_string())?;
 
     let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
-    *guard = Some(FsWatcherInner { debouncer, watched, root });
+    *guard = Some(FsWatcherInner { debouncer, root });
     Ok(())
 }
 
@@ -271,40 +267,22 @@ pub async fn fs_watch_stop(state: tauri::State<'_, FsWatcher>) -> Result<(), Str
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tauri::command]
 pub async fn fs_watch_add_subdir(
-    state: tauri::State<'_, FsWatcher>,
-    path: String,
+    _state: tauri::State<'_, FsWatcher>,
+    _path: String,
 ) -> Result<(), String>
 {
-    let p = PathBuf::from(&path);
-    let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
-    let Some(inner) = guard.as_mut() else { return Ok(()); };
-    if inner.watched.contains(&p) { return Ok(()); }
-    if inner.watched.len() >= FS_WATCHER_MAX_PATHS
-    {
-        log::warn!(
-            "[fs_watcher] watch cap reached ({}); skipping add: {}",
-            FS_WATCHER_MAX_PATHS, path
-        );
-        return Ok(());
-    }
-    inner.debouncer.watch(&p, RecursiveMode::NonRecursive).map_err(|e| e.to_string())?;
-    inner.watched.insert(p);
+    // Recursive mode covers all subdirectories — nothing to add.
     Ok(())
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tauri::command]
 pub async fn fs_watch_remove_subdir(
-    state: tauri::State<'_, FsWatcher>,
-    path: String,
+    _state: tauri::State<'_, FsWatcher>,
+    _path: String,
 ) -> Result<(), String>
 {
-    let p = PathBuf::from(&path);
-    let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
-    let Some(inner) = guard.as_mut() else { return Ok(()); };
-    if p == inner.root { return Ok(()); }  // never unwatch the root via this API
-    if !inner.watched.remove(&p) { return Ok(()); }
-    let _ = inner.debouncer.unwatch(&p);  // tolerate watcher already-dropped errors
+    // Recursive mode covers all subdirectories — nothing to remove.
     Ok(())
 }
 

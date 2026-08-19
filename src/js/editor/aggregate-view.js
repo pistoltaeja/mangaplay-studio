@@ -5,7 +5,6 @@
  * (previous / focused / next in alphabetical child order) plus placeholder
  * divs for out-of-window siblings, or a single `<mps-canvas>` in visual mode.
  *
- * See TODO/folder-options-menu.md §2.0 – §2.10 for the architectural spec.
  * Round A (this file) implements the shell — Round B wires consumers
  * (explorer file-open, mode toggle, fs-listeners, session restore).
  *
@@ -44,7 +43,7 @@ import { loadMangaartForFolder, saveScript } from "../project/project.js";
  *   - The Folder Options popup still saves to meta.json, but nothing reads it.
  *
  * When `true`:
- *   - Full aggregate behaviour per §2 of TODO/folder-options-menu.md.
+ *   - Full aggregate behaviour (folder multi-file view).
  *
  * Flip in source to enable. No runtime toggle, no UI, no persistence.
  */
@@ -60,7 +59,7 @@ export const renderGroupsAsOne = false;
  * @typedef {Object} MountAggregateOpts
  * @property {string} folderUuid                                 - stable folder UUID
  * @property {string} activeFileUuid                             - fileUuid to focus on mount
- * @property {"source"|"text"|"visual"} mode                     - initial editor mode
+ * @property {"source"|"wysiwyg"|"easy"} mode                    - initial editor mode
  * @property {HTMLElement} container                             - scroll container to render into
  * @property {string} projectPath                                - absolute project root
  * @property {string[]} files                                    - alphabetically-ordered fileUuid list of valid children
@@ -95,7 +94,7 @@ export const renderGroupsAsOne = false;
  * @property {() => Promise<void>} destroy
  * @property {(fileUuid: string) => Promise<void>} jumpToFile
  * @property {() => string | null} currentFocusedFileUuid
- * @property {(mode: "source"|"text"|"visual") => Promise<void>} applyMode
+ * @property {(mode: "source"|"wysiwyg"|"easy") => Promise<void>} applyMode
  * @property {() => Promise<{ text: string, folderName: string, childBasenames: string[], format: string }>} collectSourceForExport
  * @property {() => any[]} getActiveBrokers
  * @property {() => Promise<void>} drainAll
@@ -692,7 +691,7 @@ export async function mountAggregate(opts)
         }
     }
 
-    if (initialMode === "visual")
+    if (initialMode === "easy")
     {
         await initialVisualMount();
     }
@@ -714,7 +713,7 @@ export async function mountAggregate(opts)
         state.pendingSlide = null;
         if (state.disposed || state.errorState) return;
         if (state.slideLock) return; // will re-schedule on next scroll
-        if (state.mode === "visual") return;
+        if (state.mode === "easy") return;
         const focusedUuid = state.files[state.focusedIdx];
         const entry = state.mounted.get(focusedUuid);
         if (!entry) return;
@@ -1006,7 +1005,7 @@ export async function mountAggregate(opts)
     async function jumpToFile(fileUuid)
     {
         if (state.disposed) return;
-        if (state.mode === "visual") return;
+        if (state.mode === "easy") return;
         const targetIdx = state.files.indexOf(fileUuid);
         if (targetIdx < 0) return;
         if (state.mounted.has(fileUuid))
@@ -1054,17 +1053,17 @@ export async function mountAggregate(opts)
     }
 
     /**
-     * @param {"source"|"text"|"visual"} nextMode
+     * @param {"source"|"wysiwyg"|"easy"} nextMode
      */
     async function applyMode(nextMode)
     {
         if (state.disposed) return;
         if (nextMode === state.mode) return;
-        const goingVisual = nextMode === "visual";
-        const leavingVisual = state.mode === "visual";
+        const goingVisual = nextMode === "easy";
+        const leavingVisual = state.mode === "easy";
         if (goingVisual === leavingVisual)
         {
-            // source ↔ text: no destroy. Fan out mode reconfigure to every
+            // source ↔ wysiwyg: no destroy. Fan out mode reconfigure to every
             // mounted view. mps-editor.js owns the per-view mode swap; we
             // dispatch through the same helper so aggregate + single-file
             // stay symmetrical. Dynamic import avoids a static cycle with
@@ -1219,9 +1218,9 @@ export async function mountAggregate(opts)
     async function onFsChange(event)
     {
         if (state.disposed) return;
-        if (state.mode === "visual")
+        if (state.mode === "easy")
         {
-            // Visual mode doesn't mount the source trio — nothing to
+            // Easy Editor mode doesn't mount the source trio — nothing to
             // reshape here. The folder-scoped mangaart reload is Round C.
             return;
         }

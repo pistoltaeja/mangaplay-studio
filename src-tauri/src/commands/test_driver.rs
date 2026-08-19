@@ -22,6 +22,10 @@ fn get_eval_pending() -> &'static StdMutex<HashMap<String, std::sync::mpsc::Send
 }
 
 /// IPC callback from JS: delivers the eval result back to the HTTP handler.
+///
+/// Registered but not called from bundled JS — reserved for CDP-driven
+/// smoke tests (`bun run test:app`), which inject the caller-side JS at
+/// runtime.
 #[tauri::command]
 pub fn test_eval_result(id: String, payload: String) -> Result<(), String> {
     let map = get_eval_pending().lock().map_err(|e| e.to_string())?;

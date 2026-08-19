@@ -2,9 +2,10 @@
    <mps-dialogue> — light-DOM speech bubble.
 
    Positions against the mascot via CSS custom properties
-   `--ob-mascot-x/y/size` published on :root by <mps-mascot>. Both the
-   mascot and this bubble use `transition: left, top` at matching
-   durations so they animate in lockstep — no JS pump needed.
+   `--ob-mascot-x/y/size` published on :root by <mps-mascot>. The bubble
+   snaps to the mascot's position (no left/top transition — layout-
+   triggering props kill WKWebView perf). Entrance/exit via opacity +
+   transform only.
    ──────────────────────────────────────────────────────────────────────── */
 
 mps-dialogue
@@ -22,7 +23,7 @@ mps-dialogue
     padding: 16px 20px;
     max-width: min(320px, calc(100vw - 32px));
     font-family: var(--mps-font-app, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
-    font-size: 14px;
+    font-size: var(--mps-font-size-md);
     line-height: 1.4;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
     /* Above mascot (1000) and picker-shell (950), but below the
@@ -33,13 +34,10 @@ mps-dialogue
     opacity: 0;
     pointer-events: none;
     user-select: none;
-    /* Only transition opacity + transform on the initial paint. Adding
-       `left, top` here would animate them from their `auto` initial values
-       to the calc()-resolved coords on the very first frame, producing a
-       visible "flash from top-left → mascot" during entrance. The left/
-       top transitions are enabled once `.visible` is applied — by that
-       point the coords are already correct, so future mascot moves
-       animate the bubble in lockstep without a first-mount flash. */
+    /* Only transition opacity + transform — never left/top, which trigger
+       layout recalculation on every animation frame and are especially
+       expensive on WKWebView (iOS). The bubble snaps to the mascot's
+       new position; entrance/exit animates via opacity + transform. */
     transition:
         opacity 200ms cubic-bezier(0.32, 0.72, 0, 1),
         transform 200ms cubic-bezier(0.32, 0.72, 0, 1);
@@ -51,14 +49,12 @@ mps-dialogue.visible
     pointer-events: auto;
     transition:
         opacity 200ms cubic-bezier(0.32, 0.72, 0, 1),
-        transform 200ms cubic-bezier(0.32, 0.72, 0, 1),
-        left 0.4s ease-in-out,
-        top 0.4s ease-in-out;
+        transform 200ms cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 mps-dialogue .mps-dialogue-text
 {
-    font-size: 14px;
+    font-size: var(--mps-font-size-md);
     line-height: 1.4;
     text-align: center;
 }
@@ -187,6 +183,17 @@ mps-dialogue[data-tail="centre"]
 mps-dialogue[data-tail="centre"].visible
 {
     transform: translate(-50%, -50%) scale(1);
+}
+
+/* On mobile, drop the blur — it kills animation perf on WKWebView.
+ * Slightly more opaque background compensates for the missing frosted
+ * glass effect. */
+:root[data-ux-mode="mobile"] mps-dialogue,
+:root[data-ux-mode="tablet"] mps-dialogue
+{
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: rgba(255, 255, 255, 0.97);
 }
 
 @media (prefers-reduced-motion: reduce)

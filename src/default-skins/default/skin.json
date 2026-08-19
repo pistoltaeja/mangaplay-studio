@@ -5,6 +5,7 @@
     "version": "1.0.0",
     "baseVariant": "light",
     "cssFile": "default.css",
+    "mainMascotFile": "icon-128.png",
     "mascotHeadFile": "mascot-head-default.png",
     "mascotBodyFile": "mascot-body-default.png",
     "splashFile": "splash-default.png",

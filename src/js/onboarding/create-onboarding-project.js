@@ -8,7 +8,7 @@ import { openAndMountProject } from "../shell/open-and-mount-project.js";
  * Create a new project for the user based on their onboarding selections,
  * save relevant settings, then transition the app into the workspace.
  *
- * Currently: creates an empty "MyFirstProject" (or numbered suffix) in the
+ * Currently: creates an empty "my-documents" (or numbered suffix) in the
  * user-data dir. The `category` and `template` params are captured but not
  * yet used to differentiate project seed content — they're placeholders for
  * future logic (e.g. seed a 24-page comic template when template === "real-comic").
@@ -32,17 +32,20 @@ export async function createOnboardingProject(params)
     const userDataDir = await invoke("user_data_dir");
 
     // 2. Pick a candidate name — mirror ensureMobileDefaultProject logic.
-    let candidate = `${userDataDir}/MyFirstProject`;
+    let candidate = `${userDataDir}/my-documents`;
     if (await pathExists(candidate))
     {
         let n = 2;
-        while ((await pathExists(`${userDataDir}/MyFirstProject (${n})`)) && n < 9999) n++;
-        candidate = `${userDataDir}/MyFirstProject (${n})`;
+        while ((await pathExists(`${userDataDir}/my-documents (${n})`)) && n < 9999) n++;
+        candidate = `${userDataDir}/my-documents (${n})`;
     }
     const name = candidate.substring(userDataDir.length + 1);
 
-    // 3. Create the project on disk.
-    const newPath = await createNewProject(userDataDir, name);
+    // 3. Create the project on disk. This is the default "My Documents"
+    //    project every new user gets on first launch — locked so it can't
+    //    be renamed or deleted (parity with the mobile/desktop auto-default).
+    const newPath = await createNewProject(userDataDir, name, true,
+        { displayName: "My Documents", description: "My Documents", locked: true });
 
     // 4. Persist onboardingCompleted BEFORE the open call so the flag
     //    lands even if openAndMountProject throws. openAndMountProject

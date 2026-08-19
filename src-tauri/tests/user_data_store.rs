@@ -126,11 +126,17 @@ fn user_settings_save_then_load_round_trip()
 
     user_settings_save_impl(
         &dir,
-        serde_json::json!({ "lastProjectPath": "/tmp/projA" }),
+        serde_json::json!({
+            "lastProjectPath": "/tmp/projA",
+            "lastMobileExplorerTab": "stats",
+            "mobileExplorerSwipeHintShown": true,
+        }),
     ).expect("save ok");
 
     let v = user_settings_load_impl(&dir).expect("load ok");
     assert_eq!(v["lastProjectPath"], "/tmp/projA");
+    assert_eq!(v["lastMobileExplorerTab"], "stats", "mobile explorer tab round-trips");
+    assert_eq!(v["mobileExplorerSwipeHintShown"], true, "swipe hint flag round-trips");
     assert_eq!(v["defaultLanguage"], "en", "default preserved");
     assert!(
         tmp.path().join("user-settings.json").exists(),

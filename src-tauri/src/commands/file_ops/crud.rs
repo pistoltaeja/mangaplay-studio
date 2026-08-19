@@ -9,11 +9,10 @@ use crate::commands::project::{is_script_filename, storyboard_dir};
 use crate::commands::project_mutations::{read_project_json, write_project_json};
 use crate::fs_helpers::next_free_name;
 use crate::locks::ProjectJsonLocks;
-use crate::project_root::{ProjectRoot, assert_within_project_root};
 use crate::script_map::{script_map_rewrite_key, script_map_rewrite_prefix};
 use crate::validate_basename::validate_basename;
 
-use super::fs_events::{FsChange, emit_fs_changed, path_eq_caseless};
+use super::fs_events::path_eq_caseless;
 
 // ── app_create_file ──────────────────────────────────────────────────────
 
@@ -25,15 +24,8 @@ pub fn create_file_impl(parent: &Path, kind: &str) -> Result<PathBuf, String>
     {
         return Err("parent-not-dir".into());
     }
-    let (ext_chain, seed): (&str, Option<&str>) = match kind
-    {
-        "folder" => ("", None),
-        "mangaplay" => (".mangaplay.md", Some("# Page 1\nPanel 1\nAction line.\n")),
-        "fountain" => (".fountain.md", Some("")),
-        "superscript" => (".sup.md", Some("")),
-        "text" => (".txt", Some("")),
-        _ => return Err("invalid-kind".into()),
-    };
+    let (ext_chain, seed) = crate::commands::file_ops::kind_to_ext_and_seed(kind)
+        .map_err(|_| "invalid-kind".to_string())?;
     let new_name = next_free_name(parent, "Untitled", ext_chain, 1);
     let dst = parent.join(&new_name);
     if kind == "folder"
@@ -48,28 +40,14 @@ pub fn create_file_impl(parent: &Path, kind: &str) -> Result<PathBuf, String>
     Ok(dst)
 }
 
-#[tauri::command]
-pub fn app_create_file(
-    app: tauri::AppHandle,
-    state: tauri::State<ProjectRoot>,
-    parent: String,
-    kind: String,
-) -> Result<String, String>
-{
-    let p = assert_within_project_root(Path::new(&parent), &state)?;
-    let dst = create_file_impl(&p, &kind)?;
-    let dst_str = dst.to_string_lossy().to_string();
-    emit_fs_changed(&app, &dst_str, FsChange::Created { path: dst_str.clone() });
-    Ok(dst_str)
-}
-
 // ── app_rename_file ──────────────────────────────────────────────────────
 
-/// Pure helper backing `app_rename_file`. See
-/// TODO/mangaart-storyboard-relocation.md Phase 3 (file case) and Phase 5
-/// (folder case — when `path.is_dir()` the artMap prefix is rewritten and
-/// the `<root>/storyboard/<old_rel>/` subtree is physically moved to mirror
-/// the new script-folder location).
+/// Pure helper backing `app_rename_file`.
+///
+/// File case: artMap entry key is rewritten to the new relative path.
+/// Folder case (`path.is_dir()`): artMap prefix is rewritten and the
+/// `<root>/storyboard/<old_rel>/` subtree is physically moved to mirror
+/// the new script-folder location.
 ///
 /// When `project_root` is provided AND the source is a script file (per
 /// `is_script_filename`) AND `project.json` has an `artMap.scripts` entry
@@ -117,7 +95,7 @@ pub fn rename_file_impl(
         return Err("target-exists".into());
     }
 
-    // ── FOLDER rename branch (Phase 5) ────────────────────────────────────
+    // ── FOLDER rename branch ──────────────────────────────────────────────
     // For folders the script-side rename happens FIRST (visible op, fail
     // fast); then the artMap prefix rewrite and storyboard subtree move are
     // best-effort. Failure modes:
@@ -227,7 +205,7 @@ pub(crate) fn project_rel_path(root: &Path, child: &Path) -> Option<String>
 }
 
 /// Best-effort artMap prefix rewrite + storyboard subtree move for a folder
-/// rename / move (Phase 5). Called AFTER the script-side rename has
+/// rename / move. Called AFTER the script-side rename has
 /// succeeded; either step failing here logs a warning but never unwinds.
 /// Used by both [`rename_file_impl`] (folder branch) and
 /// [`move_path_with_art`].
@@ -309,7 +287,7 @@ pub(crate) fn apply_folder_art_relocation(root: &Path, old_rel: &str, new_rel: &
 /// Join a forward-slash relative path (the `artMap.scripts` key form) onto a
 /// native base `Path`. Empty segments are skipped so a leading or trailing
 /// `/` cannot escape `base`.
-pub(super) fn rel_join(base: &Path, rel: &str) -> PathBuf
+pub(crate) fn rel_join(base: &Path, rel: &str) -> PathBuf
 {
     let mut out = base.to_path_buf();
     for part in rel.trim_matches('/').split('/')
@@ -318,24 +296,6 @@ pub(super) fn rel_join(base: &Path, rel: &str) -> PathBuf
         out.push(part);
     }
     out
-}
-
-#[tauri::command]
-pub fn app_rename_file(
-    app: tauri::AppHandle,
-    state: tauri::State<ProjectRoot>,
-    path: String,
-    new_name: String,
-    currently_open: bool,
-    project_root: Option<String>,
-) -> Result<String, String>
-{
-    let safe = assert_within_project_root(Path::new(&path), &state)?;
-    let root_buf = project_root.as_deref().map(Path::new);
-    let dst = rename_file_impl(&safe, &new_name, currently_open, root_buf)?;
-    let dst_str = dst.to_string_lossy().to_string();
-    emit_fs_changed(&app, &path, FsChange::Renamed { to: dst_str.clone() });
-    Ok(dst_str)
 }
 
 /// Open a native Save-As dialog and return the chosen path (or None on cancel).
@@ -416,6 +376,39 @@ pub async fn app_open_file_dialog(
             builder = builder.add_filter(name, &exts_ref);
         }
         Ok::<Option<String>, String>(builder.blocking_pick_file().map(|p| p.to_string()))
+    })
+    .await
+    .map_err(|e| format!("open-dialog-join-error:{}", e))?
+}
+
+/// Multi-file variant of app_open_file_dialog. Returns the chosen paths (or
+/// None on cancel). Honours MPS_TEST_OPEN_FILE — wraps the single test path
+/// in a one-element vec so CDP tests can still short-circuit.
+///
+/// `filters` is `[(label, [ext, ...]), ...]` — same shape as app_open_file_dialog.
+#[tauri::command]
+pub async fn app_open_files_dialog(
+    app: tauri::AppHandle,
+    filters: Vec<(String, Vec<String>)>,
+) -> Result<Option<Vec<String>>, String>
+{
+    if let Ok(test_path) = std::env::var("MPS_TEST_OPEN_FILE") {
+        if !test_path.is_empty() {
+            return Ok(Some(vec![test_path]));
+        }
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri_plugin_dialog::DialogExt;
+        let mut builder = app.dialog().file();
+        for (name, exts) in &filters {
+            let exts_ref: Vec<&str> = exts.iter().map(|s| s.as_str()).collect();
+            builder = builder.add_filter(name, &exts_ref);
+        }
+        Ok::<Option<Vec<String>>, String>(
+            builder
+                .blocking_pick_files()
+                .map(|paths| paths.into_iter().map(|p| p.to_string()).collect()),
+        )
     })
     .await
     .map_err(|e| format!("open-dialog-join-error:{}", e))?

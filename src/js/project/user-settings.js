@@ -51,7 +51,9 @@ async function invoke(cmd, args)
                 lastSettingsTab: "general",
                 spellcheckEnabled: true,
                 spellcheckLanguage: null,
+                personalDictionary: [],
                 onboardingCompleted: false,
+                projectSessions: {},
             };
         }
         if (cmd === "user_settings_save") return undefined;
@@ -189,6 +191,70 @@ export async function ensureSpellcheckSeed()
     catch (_) { /* keep en-US fallback */ }
     await saveUserSettings({ spellcheckLanguage: detected });
     return detected;
+}
+
+/**
+ * Read the per-project session sub-map entry for a project UUID.
+ *
+ * Returns a shallow copy so mutations by the caller don't leak into the
+ * shared cache. Absent entry → empty object. Throws if
+ * `loadUserSettings()` has not run yet — callers must await it at boot.
+ *
+ * The sub-map is keyed by `project.json.id` (stable across renames) and
+ * carries per-user "slice-of-life" state (open tabs, cursor positions,
+ * view mode, expanded folders, canvas heights). Team-relevant state stays
+ * in the project's `_mangaplaystudio/` folder.
+ *
+ * @param {string} projectUuid
+ * @returns {Record<string, any>}
+ */
+export function getProjectSession(projectUuid)
+{
+    if (!cache) throw new Error("user-settings not loaded — call loadUserSettings() in boot()");
+    if (!projectUuid) return {};
+    const map = cache.projectSessions;
+    if (!map || typeof map !== "object") return {};
+    const entry = map[projectUuid];
+    if (!entry || typeof entry !== "object") return {};
+    // Deep clone so caller-side mutations (Array.push on expandedFolders,
+    // object assignment on lastPageIndex, etc.) never leak back into the
+    // shared cache. structuredClone is the flat, safe choice — payload is
+    // pure JSON so no non-cloneable types are in play.
+    return typeof structuredClone === "function"
+        ? structuredClone(entry)
+        : JSON.parse(JSON.stringify(entry));
+}
+
+/**
+ * Shallow-merge `partial` into `projectSessions[projectUuid]` and persist
+ * to disk. Other projects' entries are preserved by the Rust merge
+ * (deep-merge on the `projectSessions` key). Passing an empty `partial`
+ * is a no-op.
+ *
+ * @param {string} projectUuid
+ * @param {Record<string, any>} partial
+ * @returns {Promise<void>}
+ */
+export async function saveProjectSession(projectUuid, partial)
+{
+    if (!projectUuid) return;
+    if (!partial || typeof partial !== "object") return;
+    if (!cache)
+    {
+        throw new Error("user-settings not loaded — call loadUserSettings() in boot()");
+    }
+    const existingMap = (cache.projectSessions && typeof cache.projectSessions === "object")
+        ? cache.projectSessions
+        : {};
+    const existingEntry = (existingMap[projectUuid] && typeof existingMap[projectUuid] === "object")
+        ? existingMap[projectUuid]
+        : {};
+    const mergedEntry = { ...existingEntry, ...partial };
+    const mergedMap = { ...existingMap, [projectUuid]: mergedEntry };
+    cache.projectSessions = mergedMap;
+    await invoke("user_settings_save", {
+        value: { projectSessions: { [projectUuid]: mergedEntry } },
+    });
 }
 
 /** Reset cache — only used by tests. */

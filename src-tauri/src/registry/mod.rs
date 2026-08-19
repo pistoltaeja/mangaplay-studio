@@ -1,9 +1,6 @@
 //! UUID file registry — Rust-owned per-project identity map.
 //!
-//! Part 1 landing: schema types and atomic on-disk store only. No commands,
-//! no managed state, no platform-native ID readers yet. See
-//! [`TODO/uuid-file-registry.md`](../../../../TODO/uuid-file-registry.md)
-//! Part 1 for the full design.
+//! Schema types and atomic on-disk store.
 //!
 //! Modules:
 //! - [`native_id`] — [`NativeId`] union covering NTFS / APFS / POSIX / iOS

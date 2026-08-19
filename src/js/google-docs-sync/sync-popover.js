@@ -2,12 +2,11 @@
 /**
  * sync-popover.js — small panel anchored above the gear button.
  *
- * Per TODO/mangaplay-studio-google-docs-sync.md §7 "Sync popover". Opens
- * when the gear is clicked in any non-Grey state. Closes on outside-click
+ * Opens when the gear is clicked in any non-Grey state. Closes on outside-click
  * or Escape.
  *
  * The popover is a callbacks-only surface — all real Push / Pull /
- * View / Refresh / Unlink work lives in the caller (Phase 4). This file
+ * View / Refresh / Unlink work lives in the caller. This file
  * builds the DOM, wires the buttons, and manages the singleton open/close
  * lifecycle.
  */

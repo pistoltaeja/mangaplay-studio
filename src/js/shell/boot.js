@@ -12,15 +12,14 @@ import { initPathHelpers } from "../util/paths.js";
 import { applySkin } from "../boot/skins.js";
 import { transition, STATES } from "../boot/state-machine.js";
 import { reportError } from "../boot/error-router.js";
-import { initIap, initAnalytics, initAccount } from "../boot/boot-placeholders.js";
+import { initIap, initAnalytics, initAccount, initAds } from "../boot/boot-placeholders.js";
 import { hasWindowChrome } from "../adapters/platform-capabilities.js";
 import { wireWindowControls } from "../boot/window-controls.js";
 import { isMobileLike } from "../boot/ux-mode.js";
 import { wireDeclarativeTooltips } from "../tooltip/tooltip.js";
 import { wireQuickToggleTooltipMirror } from "../tooltip/quick-toggle-tooltip-mirror.js";
 import { wireTooltipI18nLiveUpdates } from "../tooltip/tooltip-i18n.js";
-import { ensureRehydrated } from "../auth/google-oauth.js";
-import { warmupHarper, disposeHarper } from "../spellcheck/harper-linter.js";
+import { warmupHarper, disposeHarper, loadPersistedDictionary } from "../spellcheck/harper-linter.js";
 import { resolveTier } from "../spellcheck/spellcheck-tier.js";
 import { setSpellcheckState } from "../spellcheck/spellcheck-state.js";
 import { ensureFontsFor, releaseFontsFor } from "../font/font-loader.js";
@@ -38,6 +37,15 @@ import { openProjectSwitcherMenu } from "./project-switcher.js";
 import { wireTopbarPagination, wirePageIndexSessionWriteThrough } from "./topbar-pagination.js";
 import { openAndMountProject } from "./open-and-mount-project.js";
 import { createOnboardingProject } from "../onboarding/create-onboarding-project.js";
+// Onboarding modules — statically imported to keep the iOS boot path free of
+// any runtime module resolution. Onboarding fires on first launch of every
+// platform, and mobile bundles single-file with no chunk fetches.
+import "../components/mps-picker-shell.js";
+import "../components/mps-mobile-fab.js";
+import { getAppMascot } from "../components/mps-mascot-app.js";
+import "../components/mps-dialogue.js";
+import "../components/mps-card-tray.js";
+import { runOnboardingScript } from "../onboarding/onboarding-engine.js";
 import {
     setAppState,
     showError,
@@ -48,10 +56,10 @@ import {
     refreshStateMessage,
     markBench,
     wireEmptyState,
-    wireHomeButton,
     wireHelpButton,
     wireRailAccount,
     wireSettingsButton,
+    wireMobileFabActions,
     wireStoryboardSwitcher,
 } from "../app.js";
 
@@ -77,24 +85,6 @@ export async function wireShellOnce()
         el.outerHTML = icon(el.dataset.icon, { size: 16, class: "icon" });
     }
 
-    // Mount the mobile / tablet bottom tabbar. Lazy-import so standalone
-    // builds Phase-2-DCE drop the component module. Idempotent — the
-    // component constructor guards on isMobileLike().
-    if (isMobileLike())
-    {
-        try
-        {
-            await import("../components/mps-mobile-tabbar.js");
-            if (!document.querySelector("mps-mobile-tabbar"))
-            {
-                const tabbar = document.createElement("mps-mobile-tabbar");
-                tabbar.id = "mps-mobile-tabbar";
-                document.body.appendChild(tabbar);
-            }
-        }
-        catch (e) { console.warn("[wireShellOnce] tabbar mount failed:", e); }
-    }
-
     // Tooltip system — registers a single delegated handler for [data-tooltip] elements.
     wireDeclarativeTooltips();
     // Mirror the quick-toggle sidebar's data-tooltip-text onto data-tooltip so
@@ -111,8 +101,8 @@ export async function wireShellOnce()
     wireLeftSubviews();
     wireEmptyState();
     wireSettingsButton();
+    wireMobileFabActions();
     wireHelpButton();
-    wireHomeButton();
     wireRailAccount();
 
     // Left-click on a folder-list-row opens that file in the editor. Skipped
@@ -266,19 +256,32 @@ export async function wireShellOnce()
 async function ensureMobileDefaultProject(opts = {})
 {
     const userDataDir = await invoke("user_data_dir");
-    let candidate = `${userDataDir}/MyFirstProject`;
+    const name = await pickDefaultProjectName(userDataDir, opts);
+    const path = await createNewProject(userDataDir, name, true,
+        { displayName: "My Documents", description: "My Documents", locked: true });
+    await saveUserSettings({ lastProjectPath: path });
+    return path;
+}
+
+/**
+ * Pick an unused default project name under `userDataDir`: `my-documents`, or
+ * `my-documents (N)` when the base name is taken or `forceNew` is set. The
+ * 9999 cap mirrors the pathological fallback in fs_helpers.rs.
+ * @param {string} userDataDir
+ * @param {{forceNew?: boolean}} [opts]
+ * @returns {Promise<string>} the bare project name (no parent prefix)
+ */
+export async function pickDefaultProjectName(userDataDir, opts = {})
+{
+    let candidate = `${userDataDir}/my-documents`;
     if (opts.forceNew || (await pathExists(candidate)))
     {
         let n = 2;
-        // 9999 cap mirrors the pathological fallback in fs_helpers.rs.
-        while ((await pathExists(`${userDataDir}/MyFirstProject (${n})`)) && n < 9999) n++;
-        candidate = `${userDataDir}/MyFirstProject (${n})`;
+        while ((await pathExists(`${userDataDir}/my-documents (${n})`)) && n < 9999) n++;
+        candidate = `${userDataDir}/my-documents (${n})`;
     }
     // Strip the parent prefix to get just the name for project_create_new.
-    const name = candidate.substring(userDataDir.length + 1);
-    const path = await createNewProject(userDataDir, name);
-    await saveUserSettings({ lastProjectPath: path });
-    return path;
+    return candidate.substring(userDataDir.length + 1);
 }
 
 // ── Boot sequence ──
@@ -297,7 +300,7 @@ export async function boot() {
         // suppressor — local listeners below the guard never fire.
         document.addEventListener("contextmenu", (e) =>
         {
-            const result = routeContextMenu(e.target);
+            const result = routeContextMenu(e.target, e);
             if (result === "native") return;           // opt-in — let native menu through
             e.preventDefault();                          // suppress native everywhere else
             if (result && result.items)
@@ -337,6 +340,18 @@ export async function boot() {
             origWarn(...args);
             forwardToRustLog("warn", "console", args.map(String).join(" "));
         };
+
+        // Debug: viewport diagnostics for iOS sizing investigation.
+        // Runs after the Tauri bridge is ready so it appears in Xcode console.
+        forwardToRustLog("info", "viewport",
+            `innerW=${window.innerWidth} innerH=${window.innerHeight}` +
+            ` clientW=${document.documentElement.clientWidth}` +
+            ` clientH=${document.documentElement.clientHeight}` +
+            ` scrollW=${document.documentElement.scrollWidth}` +
+            ` scrollH=${document.documentElement.scrollHeight}` +
+            ` screenW=${screen.width} screenH=${screen.height}` +
+            ` dpr=${window.devicePixelRatio}` +
+            ` uxMode=${document.documentElement.getAttribute("data-ux-mode")}`);
 
         // NOTE: window.addEventListener("error" | "unhandledrejection") is
         // installed once at module-load by error-router.js. error-router's
@@ -511,26 +526,10 @@ export async function boot() {
             return;  // stop boot — ERROR state owns the screen
         }
 
-        // Fire-and-forget Google OAuth rehydrate. Boot must NOT block on
-        // Google reachability — ensureRehydrated() reads the local keyring
-        // + user-settings cache and only fires a silent refresh in the
-        // background if the cached token is expired.
-        //
-        // On failure we surface a non-blocking toast via reportError so the
-        // user knows their sign-in wasn't restored, instead of leaving the
-        // account menu silently claiming "signed out" while the picker
-        // shows. The picker + rest of boot proceed regardless — auth is
-        // never allowed to gate first paint.
-        try
-        {
-            ensureRehydrated().catch((e) =>
-            {
-                console.debug("auth rehydrate failed:", e);
-                try { reportError(e, { origin: "auth-rehydrate" }); }
-                catch (_) { /* swallow — never let error routing crash boot */ }
-            });
-        }
-        catch (e) { console.debug("auth rehydrate call failed:", e); }
+        // Google OAuth rehydrate deferred — ensureRehydrated() is called
+        // lazily on first auth interaction (sign-in, getAccessToken, etc.)
+        // to avoid triggering a macOS Keychain prompt at boot. The auth
+        // module's idempotent promise ensures it runs exactly once.
 
         // Seed spellcheckLanguage once from the OS locale, then push the
         // resolved values into the runtime spellcheck-state module so the
@@ -553,7 +552,7 @@ export async function boot() {
                     const cfg = resolveTier(seeded);
                     if (cfg.tier === "A")
                     {
-                        warmupHarper(cfg.dialect);
+                        warmupHarper(cfg.dialect).then(() => loadPersistedDictionary()).catch(() => {});
                     }
                 }
                 catch (e) { console.debug("Harper warmup skipped:", e); }
@@ -561,22 +560,25 @@ export async function boot() {
         }
         catch (e) { console.debug("ensureSpellcheckSeed failed:", e); }
 
-        // Placeholder boot substages — IAP / Analytics / Account — moved
-        // OFF the critical boot path. Previously awaited sequentially here;
-        // now fire-and-forget after the FSM reaches PROJECT so they can
-        // never block first paint. Each helper is a no-op today (the FSM
-        // shape stays right for when real impls land — future plans in
-        // src/js/boot/boot-placeholders.js just replace the bodies).
-        //
-        // Kicked off inside a queueMicrotask so the current synchronous
-        // frame finishes first — the placeholders themselves may schedule
-        // more microtasks, and we want the boot bar's next update to land
-        // before any of them start.
+        // Boot substages — IAP / Analytics are still placeholders and
+        // fire-and-forget so they can never block first paint. Account
+        // restore, however, DOES block: if a cached Google profile exists
+        // and the machine is online, we await ensureRehydrated() so the
+        // workspace opens with a warm access token instead of flickering
+        // through IDLE → AUTHENTICATED after mount. initAccount() is a
+        // no-op when no cached profile is present, so cold-first-run users
+        // pay nothing.
         queueMicrotask(() => {
-            initIap().catch((e) => console.debug("initIap:", e));
             initAnalytics().catch((e) => console.debug("initAnalytics:", e));
-            initAccount().catch((e) => console.debug("initAccount:", e));
+            initIap()
+                .catch((e) => console.debug("initIap:", e))
+                .finally(() => { initAds().catch((e) => console.debug("initAds:", e)); });
         });
+        try
+        {
+            await initAccount();
+        }
+        catch (e) { console.debug("initAccount:", e); }
         markBench("placeholdersScheduled");
 
         // Pre-warm pdf-lib so the first PDF export doesn't have to download the
@@ -636,9 +638,8 @@ export async function boot() {
             }
 
             // Even on mobile — mount the picker-shell for the onboarding surface.
-            // Mobile normally Phase-2-DCEs the picker; this dynamic import lands
-            // it in the bundle when onboarding fires. Acceptable one-off cost.
-            await import("../components/mps-picker-shell.js");
+            // Statically imported at the top of this file; the element is
+            // defined by the time this branch runs.
             let pkr = /** @type {any} */ (document.getElementById("picker-shell"));
             if (!pkr)
             {
@@ -664,8 +665,7 @@ export async function boot() {
             // the first paint has the element in place. Entrance is
             // deferred ~1s via requestIdleCallback so any late paints (font
             // swaps, i18n hydration) settle before the animation starts.
-            const mascotMod = await import("../components/mps-mascot-app.js");
-            const mascot = mascotMod.getAppMascot();
+            const mascot = getAppMascot();
             const kickEntrance = async () =>
             {
                 try
@@ -673,11 +673,8 @@ export async function boot() {
                     if (!mascot?.enter) return;
                     await mascot.enter("right");
                     mascot.setBadge?.("Pistol Taeja");
-                    const [, engineMod, ] = await Promise.all([
-                        import("../components/mps-dialogue.js"),
-                        import("../onboarding/onboarding-engine.js"),
-                        import("../components/mps-card-tray.js"),
-                    ]);
+                    // mps-dialogue, mps-card-tray, and onboarding-engine are
+                    // statically imported at the top of this file.
                     const dialogue = document.createElement("mps-dialogue");
                     document.body.appendChild(dialogue);
                     const cardTray = document.createElement("mps-card-tray");
@@ -685,7 +682,7 @@ export async function boot() {
                     const ctx = { mascot, dialogue, cardTray, results: {} };
 
                     // Step 1 — welcome + category chooser.
-                    await engineMod.runOnboardingScript([
+                    await runOnboardingScript([
                         { type: "bobble" },
                         { type: "speak", text: t("mangaplay-studio.onboarding.init.welcome"), tail: "above" },
                         { type: "waitForClick", graceMs: 200 },
@@ -727,7 +724,7 @@ export async function boot() {
                             step2Cards = [STORY_CARDS.emptyProject];
                             break;
                     }
-                    await engineMod.runOnboardingScript([
+                    await runOnboardingScript([
                         { type: "showCards", stagger: 60, layout: "row", cards: step2Cards },
                         { type: "waitForCardSelected", buttonLabel: t("mangaplay-studio.onboarding.init.readyButton"), storeAs: "template" },
                         { type: "hideButton", slideLeft: true },
@@ -759,8 +756,8 @@ export async function boot() {
                 setTimeout(kickEntrance, 1000);
             }
 
-            // Phase 1 stops here — no completion trigger yet. Return so the
-            // auto-resume / picker paths below don't fire.
+            // Onboarding stops here — no completion trigger yet. Return so
+            // the auto-resume / picker paths below don't fire.
             return;
         }
 
@@ -773,7 +770,7 @@ export async function boot() {
 
             // Mobile / tablet UX: never show the picker. Auto-open the
             // user's last project if it's still there, else auto-create
-            // a "MyFirstProject" inside the user-data dir.
+            // a "my-documents" inside the user-data dir.
             chosenPath = getUserSetting("lastProjectPath", null);
             const looksValid = chosenPath
                 && (await pathExists(`${chosenPath}/_mangaplaystudio/project.json`));
@@ -792,11 +789,9 @@ export async function boot() {
         }
         else
         {
-            // Standalone UX: dynamic-import the picker-shell only here so
-            // mobile/tablet builds can Phase-2-DCE drop it. Also create
-            // the `<mps-picker-shell>` element at runtime — index.html
-            // no longer hardcodes it.
-            await import("../components/mps-picker-shell.js");
+            // Standalone UX: picker-shell is statically imported at the top
+            // of this file. Create the `<mps-picker-shell>` element at runtime
+            // — index.html no longer hardcodes it.
             let pkr = /** @type {any} */ (document.getElementById("picker-shell"));
             if (!pkr)
             {
@@ -833,6 +828,21 @@ export async function boot() {
                     splash.setProgress(0.1);
                 }
                 setAppState("start-screen"); // paint briefly; opening-project transition follows
+            }
+            else if (state.recentProjects.length === 0 && isTauri())
+            {
+                // First launch with zero recents — auto-create the locked
+                // my-documents default and open it directly (no picker).
+                setAppState("opening-project");
+                try
+                {
+                    chosenPath = await ensureMobileDefaultProject();
+                }
+                catch (e)
+                {
+                    reportError(e, { origin: "project-create" });
+                    return;
+                }
             }
             else
             {
@@ -967,6 +977,40 @@ export async function flushCurrentProjectMeta()
     try { await getBroker().drainAllPending(); }
     catch (e) { console.error("flush: drainAllPending failed:", e); }
 
+    // The aggregate view mounts per-file factory brokers that live outside
+    // the singleton, so their pending writes are missed by the drain above.
+    // Dynamic import keeps boot.js free of a static edge to aggregate-view.js
+    // (an unused module in single-file paths).
+    // No-op when no aggregate is mounted.
+    try
+    {
+        const { drainActiveAggregate, getActiveAggregate } = await import("../editor/aggregate-view.js");
+        // Snapshot session BEFORE drain — the scrollTop reflects the
+        // user's last visible position. Drain touches broker state only,
+        // not scroll.
+        try
+        {
+            const active = getActiveAggregate();
+            if (active && state.currentProject)
+            {
+                const { setAggregateSession } = await import("../project/project.js");
+                const scrollTop = active.getScrollTop() ?? 0;
+                const focusedUuid = active.currentFocusedFileUuid();
+                if (focusedUuid)
+                {
+                    await setAggregateSession(state.currentProject.path, {
+                        folderUuid: active.folderUuid,
+                        focusedFileUuid: focusedUuid,
+                        scrollTop,
+                    });
+                }
+            }
+        }
+        catch (e) { console.warn("flush: snapshot aggregateSession failed:", e); }
+        await drainActiveAggregate();
+    }
+    catch (e) { console.error("flush: drainActiveAggregate failed:", e); }
+
     // App-wide settings are NOT broker-owned; flush them separately.
     try { await flushAppSettings(); }
     catch (e) { console.error("flush: flushAppSettings failed:", e); }
@@ -1023,17 +1067,38 @@ export function destroyCurrentProjectViews()
     // mount it captured — clear it so format-driven downgrades don't reach
     // into a torn-down view between project swaps.
     state.applyEditorModeRef = null;
-    state.editorAreaTopBarEl = null;
-    // When the user was in Visual mode, applyEditorMode lazily appended a
-    // <mps-visual-editor> to <mps-editor-host>. Without removal here, the
-    // next project's first switch into Visual mode appends ANOTHER one (the
+    // mountProjectViews appends a fresh <mps-editor-toolbar> every mount.
+    // Removing it fires disconnectedCallback, which detaches its document-
+    // level selectionchange/pointerdown/keydown listeners and clears the
+    // style preview — without this the orphans (and their capture-phase
+    // listeners) stack N× after N project switches.
+    if (state.editorToolbarEl)
+    {
+        try { state.editorToolbarEl.parentNode?.removeChild(state.editorToolbarEl); } catch {}
+        state.editorToolbarEl = null;
+    }
+    // mountProjectViews appends a fresh `.editor-area-top-bar` div (carrying
+    // the pagination chevrons, fix-issues button, mode toggle, find + more-
+    // options buttons) to <mps-editor-host> every mount. Without removing the
+    // old node here it stacks a second full top bar on every project switch —
+    // duplicated buttons with stale click handlers (visible on mobile via the
+    // Projects-tab "Create Empty Project" → switchProject path). Mirror the
+    // modeToggle / visualEditor teardown below.
+    if (state.editorAreaTopBarEl)
+    {
+        try { state.editorAreaTopBarEl.parentNode?.removeChild(state.editorAreaTopBarEl); } catch {}
+        state.editorAreaTopBarEl = null;
+    }
+    // When the user was in Easy Editor mode, applyEditorMode lazily appended a
+    // <mps-easy-editor> to <mps-editor-host>. Without removal here, the
+    // next project's first switch into Easy Editor mode appends ANOTHER one (the
     // module-level ref is dropped on the next mount path that overwrites
     // it, but the orphan DOM stays and renders the previous project's
     // pages stacked above the new one).
-    if (state.visualEditorEl)
+    if (state.easyEditorEl)
     {
-        try { state.visualEditorEl.parentNode?.removeChild(state.visualEditorEl); } catch {}
-        state.visualEditorEl = null;
+        try { state.easyEditorEl.parentNode?.removeChild(state.easyEditorEl); } catch {}
+        state.easyEditorEl = null;
     }
 }
 

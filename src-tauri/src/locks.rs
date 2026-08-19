@@ -1,6 +1,5 @@
 // ---------------------------------------------------------------------------
-// Per-project mutex for project.json read-modify-write cycles
-// (TODO/script-uuid-registry.md).
+// Per-project mutex for project.json read-modify-write cycles.
 //
 // scriptMap mint is a read-modify-write — read project.json, mutate
 // scriptMap, atomic-write back. Two callers (JS publish + Rust mangaart

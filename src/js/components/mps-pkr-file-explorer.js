@@ -18,10 +18,12 @@
  *   - mps-picker-reveal          { detail: { path } }
  *   - mps-picker-rename-project  { detail: { path, displayName, scope } }
  *   - mps-picker-rename-folder   { detail: { path, newBasename } }
+ *   - mps-picker-delete-project  { detail: { path } }
  */
 
 import { t, subscribe } from "../adapters/tauri-i18n.js";
 import { escapeHtml } from "../util/index.js";
+import { hasSystemTrash } from "../adapters/platform-capabilities.js";
 import { openContextMenu, closeContextMenu } from "./mps-context-menu.js";
 
 class MpsPkrFileExplorer extends HTMLElement
@@ -29,7 +31,7 @@ class MpsPkrFileExplorer extends HTMLElement
     constructor()
     {
         super();
-        /** @type {Array<{id?:string, path:string, name?:string, resolvedName?:string, exists?:boolean}>} */
+        /** @type {Array<{id?:string, path:string, name?:string, resolvedName?:string, exists?:boolean, locked?:boolean}>} */
         this._recent = [];
         this._openMenuPath = null;
         this._lastPathInvalid = false;
@@ -200,6 +202,21 @@ class MpsPkrFileExplorer extends HTMLElement
             return [
                 { id: "remove", label: t("mangaplay-studio.picker.menu.removeFromList"), danger: true,
                   onSelect: () => this._handleMenu("remove", r) },
+                { id: "delete-project", label: t("mangaplay-studio.picker.menu.deleteProject"),
+                  danger: true, icon: "trash-2",
+                  onSelect: () => this._handleMenu("delete-project", r) },
+            ];
+        }
+        if (r.locked)
+        {
+            // Locked projects: reveal and remove-from-list only (remove-from-list
+            // only scrubs the recent entry, doesn't delete on disk — safe).
+            return [
+                { id: "reveal", label: t("mangaplay-studio.picker.menu.revealInExplorer"),
+                  onSelect: () => this._handleMenu("reveal", r) },
+                { kind: "divider" },
+                { id: "remove", label: t("mangaplay-studio.picker.menu.removeFromList"), danger: true,
+                  onSelect: () => this._handleMenu("remove", r) },
             ];
         }
         return [
@@ -212,6 +229,9 @@ class MpsPkrFileExplorer extends HTMLElement
             { kind: "divider" },
             { id: "remove", label: t("mangaplay-studio.picker.menu.removeFromList"), danger: true,
               onSelect: () => this._handleMenu("remove", r) },
+            { id: "delete-project", label: t("mangaplay-studio.picker.menu.deleteProject"),
+              danger: true, icon: "trash-2",
+              onSelect: () => this._handleMenu("delete-project", r) },
         ];
     }
 
@@ -233,7 +253,31 @@ class MpsPkrFileExplorer extends HTMLElement
             case "remove":
                 this._emit("mps-picker-remove", { path: r.path });
                 break;
+            case "delete-project":
+                this._openDeleteProjectModal(r);
+                break;
         }
+    }
+
+    _openDeleteProjectModal(r)
+    {
+        const name = r.resolvedName || r.name || r.path;
+        const desktop = hasSystemTrash();
+        const body = desktop
+            ? t("mangaplay-studio.picker.deleteModal.bodyDesktop", { name })
+            : t("mangaplay-studio.picker.deleteModal.bodyMobile", { name });
+        const confirmLabel = desktop
+            ? t("mangaplay-studio.picker.deleteModal.confirmDesktop")
+            : t("mangaplay-studio.picker.deleteModal.confirmMobile");
+        this._modal({
+            title: t("mangaplay-studio.picker.deleteModal.title"),
+            body: `<p class="pkr-modal-body-text">${escapeHtml(body)}</p>`,
+            confirmLabel,
+            onConfirm: () =>
+            {
+                this._emit("mps-picker-delete-project", { path: r.path });
+            },
+        });
     }
 
     _openRenameProjectModal(r)

@@ -24,5 +24,19 @@ default this lives in the OS-correct user-config directory:
 |---------|--------------------------------------------------------------------|
 | Windows | `%APPDATA%\studio.mangaplay.app\user-settings.json`             |
 | macOS   | `~/Library/Application Support/studio.mangaplay.app/`           |
+| Linux   | `~/.config/studio.mangaplay.app/user-settings.json`                |
+
+`user-settings.json` also holds a `projectSessions` sub-map keyed by each
+project's UUID (from `project.json.id`). Per-user "slice-of-life" state —
+open tabs, cursor positions, view mode, expanded folders, canvas heights —
+lives here rather than inside the project folder, so SVN diffs stay quiet
+and teammates never see each other's local scroll positions or window
+layout. Renaming or moving the project folder does not lose this state
+because the UUID is stable.
+
+Team-relevant per-project state stays inside the project's
+`_mangaplaystudio/` folder (`project.json`, `registry.json`,
+`meta.json { savedAt, folderTypes }`, `storyboard/`) and is intended to be
+committed to SVN.
 
 ## More coming soon

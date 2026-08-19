@@ -8,8 +8,8 @@
  * later wave wraps these in min-dwell timers and progress percentages.
  *
  * Why pure async functions rather than a class: the publish state machine
- * (Phase 2) wants to call each one independently between progress-bar
- * updates, and the unit-test surface is dramatically smaller this way.
+ * calls each one independently between progress-bar updates, and the
+ * unit-test surface is dramatically smaller this way.
  */
 
 import { pathExists } from "../project/user-settings.js";
@@ -104,7 +104,6 @@ export async function preflightGoogleAccess({ response })
  */
 export async function preflightToken({ authClient })
 {
-    console.warn("[mps:auth:TRACE] preflight.preflightToken() ENTRY → calling authClient.getAccessToken({allowRefresh:true})");
     let token = null;
     try
     {
@@ -113,15 +112,12 @@ export async function preflightToken({ authClient })
     catch (err)
     {
         const e = /** @type {any} */ (err);
-        console.warn("[mps:auth:TRACE] preflight.preflightToken() ← THREW", e);
         throw _err("AuthError", `token refresh failed: ${e?.message || e}`);
     }
     if (!token)
     {
-        console.warn("[mps:auth:TRACE] preflight.preflightToken() ← NULL token → throwing AuthError (this is what triggers the modal to route to sign-in, opening the browser)");
         throw _err("AuthError", "no access token available (sign-in required)");
     }
-    console.warn("[mps:auth:TRACE] preflight.preflightToken() ← got token len=" + token.length);
     return { ok: true, token };
 }
 
@@ -248,9 +244,9 @@ export async function preflightQuota({ driveClient, token })
  * thrown error and returns `{ ok: false, failedAt, error }`. Quota
  * warnings are collected into `warnings: []`.
  *
- * The publish state machine in Phase 2 will likely NOT use this — it will
- * drive each step individually so it can update the progress bar between
- * them. This helper exists for tests and for non-modal callers.
+ * The publish state machine drives each step individually to update the
+ * progress bar between them. This helper exists for tests and non-modal
+ * callers.
  *
  * @param {{ driveClient: any, authClient: any, localPath: string, folderId: string|null }} args
  * @returns {Promise<{ ok: boolean, warnings: Array<string>, failedAt?: string, error?: any, token?: string }>}

@@ -3,7 +3,7 @@
  * focused-view-registry.js — central registry for CM6 EditorView focus
  * tracking.
  *
- * Supports N concurrent views (needed for aggregate view — Phase 2). Every
+ * Supports N concurrent views (needed for aggregate view). Every
  * focused-view change mirror-writes `window.__mpsActiveEditorView` so
  * pre-existing external consumers (editor-clipboard, context menu router,
  * import-workers, smoke tests) keep working without changes.

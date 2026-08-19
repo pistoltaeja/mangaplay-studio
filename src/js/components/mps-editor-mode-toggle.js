@@ -2,7 +2,7 @@
 /**
  * mps-editor-mode-toggle — cycling button for the editor pane.
  *
- * Full cycle: "source" → "text" → "visual" → "source".
+ * Full cycle: "source" → "wysiwyg" → "easy" → "source".
  *
  * The active set of states is restricted by the `allowedModes` property
  * (defaults to all three). Clicking cycles to the NEXT state that is
@@ -11,54 +11,53 @@
  *
  * Icons (from icons.js registry):
  *   - "source"  → code
- *   - "text"    → book-open
- *   - "visual"  → wand-sparkles
+ *   - "wysiwyg" → book-open
+ *   - "easy"    → wand-sparkles
  *
  * Click dispatches `mps:mode-change` with `detail = { mode }`
  * (bubbles + composed) so the host can react.
  *
- * The `mode` attribute / property sets the current state. Defaults to "text".
+ * The `mode` attribute / property sets the current state. Defaults to "wysiwyg".
  * Setting the property externally (e.g. after persisting / restoring) keeps
  * the icon + title in sync without firing the event.
  */
 
 import { icon } from "../panes/icons.js";
 import { t, subscribe } from "../adapters/tauri-i18n.js";
+import { isMobileLike } from "../boot/ux-mode.js";
 
-/** @type {Array<"source"|"text"|"visual">} */
-const MODES = ["source", "text", "visual"];
+/** @type {Array<"source"|"wysiwyg"|"easy">} */
+const MODES = ["source", "wysiwyg", "easy"];
 
 const ICON_FOR_MODE = {
-    source: "code",
-    text:   "book-open",
-    visual: "wand-sparkles"
+    source:  "code",
+    wysiwyg: "book-open",
+    easy:    "wand-sparkles"
 };
 
-const TOOLTIP_KEY_FOR_NEXT = {
-    source: "mangaplay-studio.chrome.tooltip.editorModeSwitchToSource",
-    text:   "mangaplay-studio.chrome.tooltip.editorModeSwitchToText",
-    visual: "mangaplay-studio.chrome.tooltip.editorModeSwitchToVisual"
+/** Bare mode-name translation keys (e.g. "Source Editor" / "WYSIWYG" / "Easy Editor"). */
+const NAME_KEY_FOR_MODE = {
+    source:  "mangaplay-studio.chrome.tooltip.editorModeNameSource",
+    wysiwyg: "mangaplay-studio.chrome.tooltip.editorModeNameWysiwyg",
+    easy:    "mangaplay-studio.chrome.tooltip.editorModeNameEasy"
 };
 
-/** English fallback labels used when a translation isn't available. */
-const FALLBACK_LABEL_FOR_NEXT = {
-    source: "Source Editor",
-    text:   "Text Editor",
-    visual: "Visual Editor"
-};
+/** Generic "Switch to: {mode}" wrapper key for the cycling button. */
+const SWITCH_TO_PREFIX_KEY = "mangaplay-studio.chrome.tooltip.editorModeSwitchToPrefix";
 
-const FALLBACK_LABEL_FOR_CURRENT = {
-    source: "Source Editor",
-    text:   "Text Editor",
-    visual: "Visual Editor"
+/** English fallback mode names used when a translation isn't available. */
+const FALLBACK_NAME_FOR_MODE = {
+    source:  "Source Editor",
+    wysiwyg: "WYSIWYG",
+    easy:    "Easy Editor"
 };
 
 /**
  * Cycle to the next mode that is present in `allowed`. If the current mode
  * is the only allowed one, returns it unchanged.
- * @param {"source"|"text"|"visual"} mode
- * @param {Array<"source"|"text"|"visual">} allowed
- * @returns {"source"|"text"|"visual"}
+ * @param {"source"|"wysiwyg"|"easy"} mode
+ * @param {Array<"source"|"wysiwyg"|"easy">} allowed
+ * @returns {"source"|"wysiwyg"|"easy"}
  */
 function nextMode(mode, allowed)
 {
@@ -82,9 +81,9 @@ class MPSEditorModeToggle extends HTMLElement
     constructor()
     {
         super();
-        /** @type {"source"|"text"|"visual"} */
-        this._mode = "text";
-        /** @type {Array<"source"|"text"|"visual">} */
+        /** @type {"source"|"wysiwyg"|"easy"} */
+        this._mode = "wysiwyg";
+        /** @type {Array<"source"|"wysiwyg"|"easy">} */
         this._allowedModes = MODES.slice();
         this._btn = /** @type {HTMLButtonElement|null} */ (null);
         this._onClick = this._onClick.bind(this);
@@ -140,13 +139,13 @@ class MPSEditorModeToggle extends HTMLElement
         }
     }
 
-    /** @returns {"source"|"text"|"visual"} */
+    /** @returns {"source"|"wysiwyg"|"easy"} */
     get mode()
     {
         return this._mode;
     }
 
-    /** @param {"source"|"text"|"visual"} v */
+    /** @param {"source"|"wysiwyg"|"easy"} v */
     set mode(v)
     {
         if (!MODES.includes(v)) return;
@@ -160,13 +159,13 @@ class MPSEditorModeToggle extends HTMLElement
         this._render();
     }
 
-    /** @returns {Array<"source"|"text"|"visual">} */
+    /** @returns {Array<"source"|"wysiwyg"|"easy">} */
     get allowedModes()
     {
         return this._allowedModes.slice();
     }
 
-    /** @param {Array<"source"|"text"|"visual">} list */
+    /** @param {Array<"source"|"wysiwyg"|"easy">} list */
     set allowedModes(list)
     {
         const next = Array.isArray(list)
@@ -206,16 +205,18 @@ class MPSEditorModeToggle extends HTMLElement
         let label;
         if (onlyOne)
         {
-            label = FALLBACK_LABEL_FOR_CURRENT[this._mode];
+            // Single allowed mode: the button is disabled — just name it.
+            label = t(NAME_KEY_FOR_MODE[this._mode]) || FALLBACK_NAME_FOR_MODE[this._mode];
         }
         else
         {
             const next = nextMode(this._mode, allowed);
-            label = t(TOOLTIP_KEY_FOR_NEXT[next]) || FALLBACK_LABEL_FOR_NEXT[next];
+            const nextName = t(NAME_KEY_FOR_MODE[next]) || FALLBACK_NAME_FOR_MODE[next];
+            label = t(SWITCH_TO_PREFIX_KEY, { mode: nextName }) || `Switch to: ${nextName}`;
         }
         this._btn.setAttribute("aria-label", label);
         this._btn.setAttribute("data-tooltip", label);
-        this._btn.setAttribute("data-tooltip-side", "left");
+        this._btn.setAttribute("data-tooltip-side", isMobileLike() ? "bottom" : "left");
         this._btn.dataset.mode = this._mode;
         this._btn.disabled = onlyOne;
         if (onlyOne)

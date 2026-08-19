@@ -29,3 +29,4 @@ node_modules
 src/_generated/
 # Environment files
 .env
+build

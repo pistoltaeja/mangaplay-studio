@@ -34,6 +34,30 @@
     --row-text:  #c8c8c8;
     --row-badge: #7a7a7a;
 
+    /* Mangaplay editor highlight tokens. See default.css for the ownership contract. */
+    --cm-mp-error:               #FF6B6B;
+    --cm-mp-style:               #FFB454;
+    --cm-mp-hint:                #AED581;
+    --cm-mp-tooltip-bg:          #1f2228;
+    --cm-mp-tooltip-fg:          #e8e8e8;
+    --cm-mp-tooltip-border:      #3a3f48;
+    --cm-mp-page-color:          #e8e8e8;
+    --cm-mp-panel-color:         #e8e8e8;
+    --cm-mp-sfx-color:           #FF6B6B;
+    --cm-mp-chevron-color:       #6b7280;
+    --cm-mp-emph-marker-color:   #5a616b;
+    --cm-mp-title-card-color:    #ce93d8;
+    --cm-mp-dialogue-color:      #e8e8e8;
+    --cm-mp-parenthetical-color: #a0a0a0;
+    --cm-mp-action-color:        #e8e8e8;
+    --cm-mp-transition-color:    #90a4ae;
+    --cm-mp-note-color:          #808080;
+    --cm-mp-centered-color:      #b0bec5;
+    --cm-mp-page-break-color:    #6b7280;
+    --cm-mp-title-page-key-color: #ffc947;
+    --cm-mp-cue-color:           #ffffff;
+    --cm-mp-diagnostic-action-fg: #ffffff;
+
     /* Editor tab strip text — light grey in the Night skin for legibility
      * against the #363636 topbar / #1e1e1e active surface. Default skin
      * falls back to #1a1a1a via the var() default in app.css. */
@@ -81,6 +105,31 @@
     --mps-screenplay-ink:      #ffffff;
     --mps-screenplay-ink-muted: #c0c0c0;
 
+    /* Body/secondary text tokens consumed by modals. See default.css for
+     * the ownership contract. On the Night `#1e1e1e` panel bg the hardcoded
+     * `#666` fallback is unreadable — `#b8b8b8` is legible without competing
+     * with primary text `#e8e8e8`. */
+    --mps-text:           #e8e8e8;
+    --mps-text-secondary: #b8b8b8;
+
+    /* Panel tokens — visualiser mode. theme.css keeps --mps-panel-bg
+     * white in both light and dark blocks (design intent: panel = paper).
+     * On the desktop Night skin the visualiser needs a dark surface so
+     * the page-header + panel cards + dialogue widget wrappers match
+     * the editor palette instead of showing as a wall of white cards. */
+    --mps-panel-bg:            var(--grey-dark);
+    --mps-panel-border:        #3a3a3c;
+    /* Storyboard <mps-panel> renders on the WHITE canvas page (--mps-page-bg
+     * stays white in Night — see plan). A dark panel-bg reads as black
+     * blocks on white paper. Override just the storyboard-panel selector
+     * to keep panels white; visualiser .panel-card keeps the dark
+     * --mps-panel-bg above. */
+    --mps-storyboard-panel-bg:  #ffffff;
+    --mps-storyboard-panel-text:#1a1a1a;
+    --mps-panel-content-text:  #e8e8e8;
+    --mps-panel-description:   #b8b8b8;
+    --mps-panel-number-text:   #f5f5f7;
+
     /* Splash background for the Night skin. See default.css for the
      * ownership contract. */
     --mps-splash-bg: #1a1a1a;
@@ -101,4 +150,18 @@ html[data-skin="night"] body
 html[data-skin="night"][data-chrome-visible="true"] body
 {
     background: var(--grey-light);
+}
+
+/* CodeMirror caret colour — Night skin. See default.css for the full
+ * rationale on `caret-color` vs `.cm-cursor` (drawSelection is disabled,
+ * so the native caret is what actually paints). */
+:root[data-skin="night"] .cm-editor .cm-content
+{
+    caret-color: #ffffff;
+}
+:root[data-skin="night"] .cm-editor .cm-cursor,
+:root[data-skin="night"] .cm-editor .cm-dropCursor
+{
+    border-left-color: #ffffff;
+    border-left-width: 2px;
 }

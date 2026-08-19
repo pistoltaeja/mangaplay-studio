@@ -52,9 +52,9 @@
 :root {
     --left-pane-width: 240px;
     --storyboard-width: 600px;
-    /* Width of the in-flow #window-controls block. macOS-style traffic-light
-     * pips: 16px L padding + 22px + 8px gap + 22px + 8px gap + 22px + 16px R
-     * padding = 114px. Used by rules that need to dock content just-left of
-     * the window controls — see .top-bar-action-c on storyboard-collapse. */
+    /* Default width of the in-flow #window-controls block (Linux macOS-style
+     * pips). window-controls.js overrides per-platform at boot:
+     * macOS 0px (controls hidden) | Windows 138px | Linux 114px.
+     * Consumed by rules that dock content beside the window controls. */
     --tauri-frame-controls-width: 114px;
 }
