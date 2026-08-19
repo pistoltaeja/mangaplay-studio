@@ -15,6 +15,11 @@ Mangaplay Studio has built in support for Superscript's `.sup` and Fountain's `.
 
 We are not affiliated with Superscript or its author. The lineage is in the workflow, not the code.
 
+<table><tr>
+<td><img src="https://mangaplay.studio/dist/img/screenplay-writer/mangaplay-screenplay-writer-storyboard-third.webp" alt="Mangaplay Studio — screenplay editor with live storyboard panel"></td>
+<td><img src="https://mangaplay.studio/dist/img/screenplay-writer/desktop-editor-only.webp" alt="Mangaplay Studio — desktop editor view"></td>
+</tr></table>
+
 ## User data and portable mode
 
 Mangaplay Studio stores small per-user preferences in `user-settings.json`. By
